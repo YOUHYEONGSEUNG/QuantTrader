@@ -13,18 +13,20 @@
 | --- | --- |
 | MidPeriod (EMA) | 26 |
 | AtrPeriod | 14 |
+| Mult1 / Mult2 / Mult3 | 1 / 2 / 3 |
 
 | 플롯 | 의미 |
 | --- | --- |
-| Mid | EMA(26) |
-| Up1, Up2, Up3 | Mid + ATR × 1·2·3 |
-| Dn1, Dn2, Dn3 | Mid − ATR × 1·2·3 |
+| Mid | EMA(MidPeriod) |
+| Up1, Up2, Up3 | Mid + ATR × Mult1·Mult2·Mult3 |
+| Dn1, Dn2, Dn3 | Mid − ATR × Mult1·Mult2·Mult3 |
 
 ## TQ_Regime (A) — 입력: 10분봉 (전략에서 `TQ_Regime(BarsArray[1])`)
 | 설정값 | 기본값 |
 | --- | --- |
 | Fast / Mid / Slow (SMA) | 20 / 60 / 120 |
 | UseRule12 | false (spec 1.2·2.2, 정의 확정 전까지 끔) |
+| ShowDebugVisuals | false (검증용 배경색) |
 
 | 플롯 | 의미 |
 | --- | --- |
@@ -41,15 +43,24 @@
 | RsiHigh / RsiLow | 70 / 20 |
 | DivFrom / DivTo | 5 / 30 |
 | SwingBars | 5 |
+| BandMidPeriod / BandAtrPeriod | 26 / 14 (TQ_ATRChannels의 MidPeriod / AtrPeriod와 같은 값) |
+| BandMult1 / BandMult2 / BandMult3 | 1 / 2 / 3 (TQ_ATRChannels의 Mult1~3과 같은 값) |
+| MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 |
+| StochPeriodK / StochSmooth / StochPeriodD | 10 / 5 / 5 (%K 길이 / %K 스무딩 / %D 스무딩) |
+| SmaPeriod | 20 (3분봉, spec 5.1 강한 모멘텀 청산) |
+| ShowDebugVisuals | false (검증용 화살표) |
+
+설정값 타입: 기간·봉 수는 int, 기준값(CrossLow/High, RsiHigh/Low)과 배수는 double, UseRule12·ShowDebugVisuals는 bool.
+전략은 TQ_ATRChannels와 TQ_Signals에 같은 밴드 설정값을 넘긴다.
 
 숫자 값 (Series&lt;double&gt;)
 
 | 이름 | 의미 |
 | --- | --- |
-| K, D | Stochastics(5, 10, 5)의 %K, %D |
-| Rsi | RSI(14) |
-| MacdHist | MACD(12, 26, 9).Diff |
-| Sma20 | 3분봉 SMA20 (spec 5.1 강한 모멘텀 청산용) |
+| K, D | Stochastics(StochPeriodD, StochPeriodK, StochSmooth)의 %K, %D. 기본값 Stochastics(5, 10, 5) |
+| Rsi | RSI(RsiPeriod). 기본값 RSI(14) |
+| MacdHist | MACD(MacdFast, MacdSlow, MacdSmooth).Diff. 기본값 MACD(12, 26, 9) |
+| Sma20 | 3분봉 SMA(SmaPeriod). 기본값 SMA20 (spec 5.1 강한 모멘텀 청산용) |
 | SwingHigh5, SwingLow5 | 신호 봉 포함 최근 5봉의 최고 고가 / 최저 저가 (spec 2장 전고점·전저점). B는 신호 봉의 값을 읽는다 |
 
 이벤트 (Series&lt;bool&gt;) — spec 2장 정의 그대로

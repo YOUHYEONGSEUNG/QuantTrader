@@ -30,6 +30,9 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				// spec 8장 기본값
 				MidPeriod					= 26;
 				AtrPeriod					= 14;
+				Mult1						= 1;
+				Mult2						= 2;
+				Mult3						= 3;
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
 				AddPlot(Brushes.Gray, "Mid");
@@ -44,7 +47,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		protected override void OnBarUpdate()
 		{
-			// TODO(A) spec 2장 밴드: Mid = EMA(MidPeriod), Up/Dn = Mid ± ATR(AtrPeriod) × 1·2·3
+			// TODO(A) spec 2장 밴드: Mid = EMA(MidPeriod), Up/Dn = Mid ± ATR(AtrPeriod) × Mult1·Mult2·Mult3
 			Mid[0] = double.NaN;
 			Up1[0] = double.NaN;
 			Up2[0] = double.NaN;
@@ -64,6 +67,21 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Range(1, int.MaxValue)]
 		[Display(Name = "AtrPeriod", Description = "ATR 기간", GroupName = "Parameters", Order = 1)]
 		public int AtrPeriod { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "Mult1", Description = "밴드 배수 1", GroupName = "Parameters", Order = 2)]
+		public double Mult1 { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "Mult2", Description = "밴드 배수 2", GroupName = "Parameters", Order = 3)]
+		public double Mult2 { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "Mult3", Description = "밴드 배수 3", GroupName = "Parameters", Order = 4)]
+		public double Mult3 { get; set; }
 
 		[Browsable(false)]
 		[XmlIgnore]
@@ -103,18 +121,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_ATRChannels[] cacheTQ_ATRChannels;
-		public TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod)
+		public TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
-			return TQ_ATRChannels(Input, midPeriod, atrPeriod);
+			return TQ_ATRChannels(Input, midPeriod, atrPeriod, mult1, mult2, mult3);
 		}
 
-		public TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input, int midPeriod, int atrPeriod)
+		public TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input, int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
 			if (cacheTQ_ATRChannels != null)
 				for (int idx = 0; idx < cacheTQ_ATRChannels.Length; idx++)
-					if (cacheTQ_ATRChannels[idx] != null && cacheTQ_ATRChannels[idx].MidPeriod == midPeriod && cacheTQ_ATRChannels[idx].AtrPeriod == atrPeriod && cacheTQ_ATRChannels[idx].EqualsInput(input))
+					if (cacheTQ_ATRChannels[idx] != null && cacheTQ_ATRChannels[idx].MidPeriod == midPeriod && cacheTQ_ATRChannels[idx].AtrPeriod == atrPeriod && cacheTQ_ATRChannels[idx].Mult1 == mult1 && cacheTQ_ATRChannels[idx].Mult2 == mult2 && cacheTQ_ATRChannels[idx].Mult3 == mult3 && cacheTQ_ATRChannels[idx].EqualsInput(input))
 						return cacheTQ_ATRChannels[idx];
-			return CacheIndicator<TeamQuant.TQ_ATRChannels>(new TeamQuant.TQ_ATRChannels(){ MidPeriod = midPeriod, AtrPeriod = atrPeriod }, input, ref cacheTQ_ATRChannels);
+			return CacheIndicator<TeamQuant.TQ_ATRChannels>(new TeamQuant.TQ_ATRChannels(){ MidPeriod = midPeriod, AtrPeriod = atrPeriod, Mult1 = mult1, Mult2 = mult2, Mult3 = mult3 }, input, ref cacheTQ_ATRChannels);
 		}
 	}
 }
@@ -123,14 +141,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod)
+		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
-			return indicator.TQ_ATRChannels(Input, midPeriod, atrPeriod);
+			return indicator.TQ_ATRChannels(Input, midPeriod, atrPeriod, mult1, mult2, mult3);
 		}
 
-		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input , int midPeriod, int atrPeriod)
+		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input , int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
-			return indicator.TQ_ATRChannels(input, midPeriod, atrPeriod);
+			return indicator.TQ_ATRChannels(input, midPeriod, atrPeriod, mult1, mult2, mult3);
 		}
 	}
 }
@@ -139,14 +157,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod)
+		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
-			return indicator.TQ_ATRChannels(Input, midPeriod, atrPeriod);
+			return indicator.TQ_ATRChannels(Input, midPeriod, atrPeriod, mult1, mult2, mult3);
 		}
 
-		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input , int midPeriod, int atrPeriod)
+		public Indicators.TeamQuant.TQ_ATRChannels TQ_ATRChannels(ISeries<double> input , int midPeriod, int atrPeriod, double mult1, double mult2, double mult3)
 		{
-			return indicator.TQ_ATRChannels(input, midPeriod, atrPeriod);
+			return indicator.TQ_ATRChannels(input, midPeriod, atrPeriod, mult1, mult2, mult3);
 		}
 	}
 }

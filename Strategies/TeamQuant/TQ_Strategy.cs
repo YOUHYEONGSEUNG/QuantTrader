@@ -81,13 +81,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			else if (State == State.DataLoaded)
 			{
-				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod);
+				// 마지막 인자 false = ShowDebugVisuals. 밴드 설정값은 두 지표에 같은 값을 넘긴다 (docs/interface.md)
+				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
 				regime		= TQ_Regime(BarsArray[1], RegimeFast, RegimeMid, RegimeSlow, UseRule12, false);
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, RsiHigh, RsiLow,
-								DivFrom, DivTo, SwingBars, false);
-
-				// TODO spec 8장: 밴드 배수, MACD, 스토캐스틱, 강한 모멘텀 SMA 기간은 지표에 아직 전달하지 않는다
-				//               (docs/interface.md 설정표에 없음)
+								DivFrom, DivTo, SwingBars,
+								BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3,
+								MacdFast, MacdSlow, MacdSmooth,
+								StochPeriodK, StochSmooth, StochPeriodD,
+								MomentumSmaPeriod, false);
 			}
 		}
 
