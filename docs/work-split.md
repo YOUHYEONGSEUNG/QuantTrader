@@ -20,5 +20,8 @@
 5. 검증: UseTestEntry로 임시 진입을 넣고 Market Replay에서 분할 익절·본절·종료 청산이 맞는지 확인.
 
 ## 합치기
-- 각자 브랜치에서 작업하고, NinjaScript Editor에서 컴파일되는 것만 main에 합친다.
+- 브랜치는 main 하나만 쓴다. 두 사람이 고치는 폴더가 겹치지 않으므로 따로 브랜치를 만들지 않는다.
+- 작업을 시작하기 전과 푸시하기 전에 `git pull --rebase`를 한다.
+- NinjaScript Editor에서 F5가 통과한 코드만 푸시한다. 깨진 코드가 올라가면 상대방 컴파일도 막힌다.
+- docs/interface.md와 지표의 설정값은 합의한 뒤에 바꾼다. 지표 설정값이 바뀌면 전략의 호출부도 같은 커밋에서 고친다.
 - A의 신호가 완성되면 B가 UseTestEntry를 끄고 실제 신호로 연결 → Strategy Analyzer 백테스트.
