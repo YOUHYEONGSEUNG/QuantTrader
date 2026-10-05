@@ -1,0 +1,13 @@
+# NinjaTrader Custom 폴더 전체를 무시하고 팀 파일만 추적
+/*
+!/.gitignore
+!/CLAUDE.md
+!/.claude/
+/.claude/settings.local.json
+!/docs/
+!/Indicators/
+/Indicators/*
+!/Indicators/TeamQuant/
+!/Strategies/
+/Strategies/*
+!/Strategies/TeamQuant/
