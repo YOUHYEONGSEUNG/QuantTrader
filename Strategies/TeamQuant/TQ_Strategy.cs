@@ -1,10 +1,12 @@
 #region Using declarations
 using System;
+using System.Collections.Generic;	// 보유 시그널·수량 추적 (task3·4)
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;	// Draw.TextFixed, TextPosition
 using NinjaTrader.NinjaScript.Indicators;
 using NinjaTrader.NinjaScript.Indicators.TeamQuant;
 #endregion
@@ -21,13 +23,30 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private TQ_Regime		regime;		// 10분봉 레짐 (spec 3장)
 		private TQ_Signals		signals;	// 3분봉 신호 (spec 2장·5장)
 
-		// TODO spec 1장 3: 진입 시점 레짐 저장 (청산이 끝날 때까지 고정)
-		// TODO spec 4장: 신호 봉 기준 손절가, 본절 이동 여부
-		// TODO spec 5장 청산 공통 규칙: 1차 익절 여부, 남은 수량
-		// TODO spec 5.1: 약한/강한 모멘텀 상태
-		// TODO spec 5.4: 2차 익절 여부
-		// TODO spec 5.5·5.6: 횡보 익절 세트 A/B 선택
-		// TODO spec 7장: 종목별 진입 횟수 (분할 진입 여러 건은 신호 1회)
+		// spec 7장: 종목별 진입 횟수 (분할 진입 여러 건은 신호 1회). 미보유→보유 전환 때 1 증가
+		private int				entryCount	= 0;
+		private MarketPosition	lastPosition = MarketPosition.Flat;
+
+		// spec 1장 3: 진입 시점 레짐 고정 + 어느 세부 전략(5.x)으로 진입했는지. 청산이 끝날 때까지 유지
+		private int				entryRegime	= 0;
+		private ActiveStrategy	active		= ActiveStrategy.None;
+		private enum ActiveStrategy { None, UpLong, UpShort, DnLong, DnShort, SideLong, SideShort }
+
+		// spec 4장 손절·본절 상태 (task3)
+		private bool			isLongPos;						// 현재 포지션 방향 (롱/숏)
+		private double			stopSwing		= double.NaN;	// 신호 봉의 전저점(롱)/전고점(숏)
+		private double			stopPrice		= double.NaN;	// 현재 걸어둔 손절가 (로그·갭 판정용)
+		private bool			stopFromFillDone;				// 실제 체결가 기준 손절 재계산 완료
+		private bool			breakevenDone;					// 본절 이동 완료
+		private readonly List<string>			liveSignals	= new List<string>();		// 아직 보유 중인 진입 시그널명
+		private readonly Dictionary<string, int>	chunkQty	= new Dictionary<string, int>();	// 진입 시그널별 수량
+
+		// spec 5장 익절 상태 머신 (task4)
+		private bool			tp1Done;						// 1차 익절 완료
+		private bool			tp2Done;						// 5.4 2차 익절 완료
+		private bool			strongMomentum;					// 5.1 강한 모멘텀 전환
+		private SideSet			sideSet		= SideSet.None;		// 5.5·5.6 먼저 충족된 세트
+		private enum SideSet { None, A, B }
 
 		protected override void OnStateChange()
 		{
@@ -104,7 +123,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				Print(string.Format("[{0}][{1}][TQ_Strategy] 10분봉 마감 레짐={2}",
 					Time[0], Instrument.FullName, regime.Regime[0]));
 
-				// TODO spec 5.2 1차 익절: 10분봉 저가 <= 10분봉 SMA20이면 즉시 익절 (주문은 BIP 0 대상)
+				// spec 5.2 1차 익절: 상승추세 숏 보유 중 10분봉 저가 <= 10분봉 SMA20이면 즉시 익절.
+				// 다음 3분봉 마감을 기다리지 않고 10분봉 마감 즉시 처리하며, 주문은 BIP 0 대상으로 낸다.
+				if (active == ActiveStrategy.UpShort && !tp1Done
+					&& Position.MarketPosition == MarketPosition.Short
+					&& !double.IsNaN(regime.Sma20[0]) && Lows[1][0] <= regime.Sma20[0])
+				{
+					ExitChunk("UpS1", "5.2 1차 익절(10분봉 저가<=SMA20)");
+					tp1Done = true;
+					MoveBreakeven();
+				}
 				return;
 			}
 
@@ -117,13 +145,500 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				signals.EntryDnLong[0], signals.EntryDnShort[0],
 				signals.EntrySideLong[0], signals.EntrySideShort[0]));
 
-			// TODO spec 7장: 종료 청산 (FlattenTime 봉 마감 시 전량 시장가)
-			// TODO spec 4장: 포지션이 없을 때 손절 리셋, 체결 후 실제 체결가로 손절 재계산, 본절 이동
-			// TODO spec 5장 청산 공통 규칙 + 5.1~5.6: 진입 시점 레짐의 익절·청산 상태 머신
-			// TODO spec 7장: 신규 진입 시간 필터 (신호 봉이 ContestStartTime~EntryEndTime)
-			// TODO spec 1장 2, 3장: 미보유 시 현재 레짐에 맞는 진입 신호로 분할 진입 (spec 6장 수량)
-			// TODO UseTestEntry: 주문 흐름 검증용 임시 진입
+			// spec 7장: 진입 횟수 화면 표시. 분할 진입 여러 건은 OnPositionUpdate에서 신호 1회로 센다
+			Draw.TextFixed(this, "TQ_EntryCount",
+				string.Format("{0} 진입: {1}회", Instrument.MasterInstrument.Name, entryCount),
+				TextPosition.TopRight);
+
+			// spec 7장: 종료 청산 — FlattenTime(00:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
+			if (IsFlattenTime())
+			{
+				if (Position.MarketPosition == MarketPosition.Long)
+				{
+					Print(string.Format("[{0}][{1}][TQ_Strategy] 종료 청산(롱) 수량={2}",
+						Time[0], Instrument.FullName, Position.Quantity));
+					ExitLong();	// 전량 시장가. 걸린 손절 스탑은 포지션 청산 시 자동 취소됨
+				}
+				else if (Position.MarketPosition == MarketPosition.Short)
+				{
+					Print(string.Format("[{0}][{1}][TQ_Strategy] 종료 청산(숏) 수량={2}",
+						Time[0], Instrument.FullName, Position.Quantity));
+					ExitShort();
+				}
+				return;	// 종료 시각 이후에는 신규 진입·익절 판단을 하지 않는다
+			}
+
+			if (Position.MarketPosition == MarketPosition.Flat)
+			{
+				// 미보유: 진입·익절·손절 상태 전체 리셋 (spec 1장 3, strategy.md)
+				ResetTradeState();
+
+				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 22:30~00:15)일 때만 신규 진입
+				if (InEntryWindow())
+					RouteEntry();
+
+				// TODO UseTestEntry: 주문 흐름 검증용 임시 진입 (task5)
+			}
+			else
+			{
+				// 보유 중: 새 진입 신호는 무시 (spec 1장 2).
+				// spec 4장: 체결 다음 봉에 실제 체결가(평균)로 손절을 한 번 재계산한다.
+				if (!stopFromFillDone)
+				{
+					RecomputeStopOnFill();
+					if (Position.MarketPosition == MarketPosition.Flat)
+						return;		// 갭 손절 초과로 즉시 청산된 경우
+				}
+
+				// spec 5장: 진입 시점 레짐의 익절·청산 상태 머신
+				ManageExits();
+			}
 		}
+
+		// spec 7장: 분할 진입 여러 건은 신호 1회. 미보유(Flat)→보유 전환 시점에만 1 증가시킨다
+		protected override void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition)
+		{
+			if (lastPosition == MarketPosition.Flat && marketPosition != MarketPosition.Flat)
+			{
+				entryCount++;
+				Print(string.Format("[{0}][{1}][TQ_Strategy] 신규 진입 #{2} 방향={3} 평균가={4} 수량={5}",
+					Time[0], Instrument.FullName, entryCount, marketPosition, averagePrice, quantity));
+			}
+
+			lastPosition = marketPosition;
+		}
+
+		#region 진입 라우팅 (spec 3장·5장·6장)
+		// 진입 시점 레짐으로 세부 전략을 고르고, 그 방향 신호가 있으면 분할 진입한다 (spec 3장).
+		// 같은 봉에 롱·숏 신호가 동시에 나는 극단적 경우는 각 레짐의 주력 방향을 우선한다 (spec 미정, 사람 확인 필요).
+		private void RouteEntry()
+		{
+			int r = (int)regime.Regime[0];
+
+			if (r == 1)			// 상승추세: 주력 롱(5.1) 우선, 역추세 숏(5.2)
+			{
+				if      (signals.EntryUpLong[0])	EnterUpLong();
+				else if (signals.EntryUpShort[0])	EnterUpShort();
+			}
+			else if (r == -1)	// 하락추세: 주력 숏(5.4) 우선, 역추세 롱(5.3)
+			{
+				if      (signals.EntryDnShort[0])	EnterDnShort();
+				else if (signals.EntryDnLong[0])	EnterDnLong();
+			}
+			else				// 횡보(0): 롱(5.5)·숏(5.6)
+			{
+				if      (signals.EntrySideLong[0])	EnterSideLong();
+				else if (signals.EntrySideShort[0])	EnterSideShort();
+			}
+		}
+
+		// spec 5.1 상승추세 롱(주력): 1/5 + 2/5 + 나머지
+		private void EnterUpLong()
+		{
+			BeginTrade(true, 1, ActiveStrategy.UpLong);
+			int q1 = Split(1, 5), q2 = Split(2, 5), q3 = EntryQuantity - q1 - q2;
+			SubmitChunk("UpL1", q1);
+			SubmitChunk("UpL2", q2);
+			SubmitChunk("UpL3", q3);
+			LogEntry("상승추세 롱(5.1)", q1, q2, q3);
+		}
+
+		// spec 5.2 상승추세 숏(역추세): 1/2 + 나머지
+		private void EnterUpShort()
+		{
+			BeginTrade(false, 1, ActiveStrategy.UpShort);
+			int q1 = Split(1, 2), q2 = EntryQuantity - q1;
+			SubmitChunk("UpS1", q1);
+			SubmitChunk("UpS2", q2);
+			LogEntry("상승추세 숏(5.2)", q1, q2, 0);
+		}
+
+		// spec 5.3 하락추세 롱(역추세): 1/3 + 나머지
+		private void EnterDnLong()
+		{
+			BeginTrade(true, -1, ActiveStrategy.DnLong);
+			int q1 = Split(1, 3), q2 = EntryQuantity - q1;
+			SubmitChunk("DnL1", q1);
+			SubmitChunk("DnL2", q2);
+			LogEntry("하락추세 롱(5.3)", q1, q2, 0);
+		}
+
+		// spec 5.4 하락추세 숏(주력): 1/3 + 1/3 + 나머지
+		private void EnterDnShort()
+		{
+			BeginTrade(false, -1, ActiveStrategy.DnShort);
+			int q1 = Split(1, 3), q2 = Split(1, 3), q3 = EntryQuantity - q1 - q2;
+			SubmitChunk("DnS1", q1);
+			SubmitChunk("DnS2", q2);
+			SubmitChunk("DnS3", q3);
+			LogEntry("하락추세 숏(5.4)", q1, q2, q3);
+		}
+
+		// spec 5.5 횡보 롱: 1/2 + 나머지
+		private void EnterSideLong()
+		{
+			BeginTrade(true, 0, ActiveStrategy.SideLong);
+			int q1 = Split(1, 2), q2 = EntryQuantity - q1;
+			SubmitChunk("SideL1", q1);
+			SubmitChunk("SideL2", q2);
+			LogEntry("횡보 롱(5.5)", q1, q2, 0);
+		}
+
+		// spec 5.6 횡보 숏: 1/2 + 나머지
+		private void EnterSideShort()
+		{
+			BeginTrade(false, 0, ActiveStrategy.SideShort);
+			int q1 = Split(1, 2), q2 = EntryQuantity - q1;
+			SubmitChunk("SideS1", q1);
+			SubmitChunk("SideS2", q2);
+			LogEntry("횡보 숏(5.6)", q1, q2, 0);
+		}
+
+		// 진입 공통: 상태 리셋 + 방향·레짐·전략 기록 + 신호 봉 종가 기준 손절가 계산 (spec 1장 3, 4장)
+		private void BeginTrade(bool isLong, int regimeAtEntry, ActiveStrategy act)
+		{
+			ResetTradeState();
+			isLongPos	= isLong;
+			entryRegime	= regimeAtEntry;
+			active		= act;
+			// 전고점·전저점은 신호 봉 기준 (spec 4장). 신호 봉 = 현재 마감된 봉([0])
+			stopSwing	= isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
+			stopPrice	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 임시 계산
+		}
+
+		// spec 4·6장: 시그널명별 분할 진입. 진입 주문 제출 전에 손절을 먼저 걸어 체결 즉시 손절이 서도록 한다
+		private void SubmitChunk(string sig, int qty)
+		{
+			if (qty <= 0)
+				return;
+			chunkQty[sig] = qty;
+			liveSignals.Add(sig);
+			// SetStopLoss는 진입 전에 호출해야 초기 손절가가 보장된다 (NT8 공식 문서)
+			SetStopLoss(sig, CalculationMode.Price, stopPrice, false);
+			if (isLongPos)	EnterLong(qty, sig);
+			else			EnterShort(qty, sig);
+		}
+
+		// spec 6장: 진입 수량 × (num/den)을 내림. 양수 정수 나눗셈이 곧 내림이다
+		private int Split(int num, int den)
+		{
+			return (EntryQuantity * num) / den;
+		}
+
+		private void LogEntry(string name, int q1, int q2, int q3)
+		{
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2} 수량={3}/{4}/{5} (레짐={6}) 손절={7}",
+				Time[0], Instrument.FullName, name, q1, q2, q3, entryRegime, stopPrice));
+		}
+		#endregion
+
+		#region 손절·본절 (spec 4장 — task3)
+		// spec 4장 손절가: 전저점(롱)/전고점(숏)과 진입가 ±StopPercent% 중 진입가에 가까운 쪽.
+		// 롱은 둘 중 높은 값, 숏은 둘 중 낮은 값. 전고점·전저점이 없으면(NaN) %만 쓴다(방어).
+		private double CalcStop(double entryPrice)
+		{
+			double pct = isLongPos
+				? entryPrice * (1 - StopPercent / 100.0)
+				: entryPrice * (1 + StopPercent / 100.0);
+			if (double.IsNaN(stopSwing))	// 지표 미완성·데이터 부족 방어
+				return pct;
+			return isLongPos ? Math.Max(stopSwing, pct) : Math.Min(stopSwing, pct);
+		}
+
+		// 아직 보유 중인 모든 진입 시그널의 손절가를 price로 (재)설정
+		private void SetStopForLive(double price)
+		{
+			foreach (string sig in liveSignals)
+				SetStopLoss(sig, CalculationMode.Price, price, false);
+		}
+
+		// spec 4장: 체결되면 실제 체결가(평균)로 손절을 다시 계산한다(보유 중 1회).
+		// 갭으로 체결가가 이미 손절가를 넘어섰으면 즉시 전량 청산한다.
+		private void RecomputeStopOnFill()
+		{
+			stopFromFillDone = true;
+
+			// 본절이 이미 이동했으면(1차 익절 선행) 체결가 기준으로 되돌리지 않는다
+			if (breakevenDone)
+				return;
+
+			double avg = Position.AveragePrice;
+			double s   = CalcStop(avg);
+
+			bool breached = isLongPos ? s >= avg : s <= avg;
+			if (breached)
+			{
+				Print(string.Format("[{0}][{1}][TQ_Strategy] 갭 손절 초과 → 즉시 전량 청산 체결가={2} 손절={3}",
+					Time[0], Instrument.FullName, avg, s));
+				FlattenRemaining("spec 4장 갭 손절 초과");
+				return;
+			}
+
+			stopPrice = s;
+			SetStopForLive(s);
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 손절 재계산(체결가 기준) 체결가={2} 손절={3}",
+				Time[0], Instrument.FullName, avg, s));
+		}
+
+		// spec 4장 본절: 첫 부분 익절이 체결되면 남은 수량의 손절을 평균 진입가로 옮긴다.
+		// 단, 그 시점 가격이 평균 진입가보다 불리하면(손실 중) 원래 손절가를 유지한다.
+		private void MoveBreakeven()
+		{
+			if (breakevenDone)
+				return;
+
+			double avg		= Position.AveragePrice;
+			bool   losing	= isLongPos ? Close[0] < avg : Close[0] > avg;
+			if (losing)
+			{
+				Print(string.Format("[{0}][{1}][TQ_Strategy] 본절 보류(손실 중) 평균가={2} 현재가={3} 손절 유지={4}",
+					Time[0], Instrument.FullName, avg, Close[0], stopPrice));
+				return;
+			}
+
+			stopPrice		= avg;
+			breakevenDone	= true;
+			SetStopForLive(avg);
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 본절 이동 손절→평균가={2}",
+				Time[0], Instrument.FullName, avg));
+		}
+		#endregion
+
+		#region 익절·청산 상태 머신 (spec 5장 — task4)
+		// 진입 시점 레짐·전략에 맞는 청산 로직으로 분기 (spec 1장 3: 레짐 고정)
+		private void ManageExits()
+		{
+			switch (active)
+			{
+				case ActiveStrategy.UpLong:		ManageUpLong();		break;
+				case ActiveStrategy.UpShort:	ManageUpShort();	break;
+				case ActiveStrategy.DnLong:		ManageDnLong();		break;
+				case ActiveStrategy.DnShort:	ManageDnShort();	break;
+				case ActiveStrategy.SideLong:	ManageSideLong();	break;
+				case ActiveStrategy.SideShort:	ManageSideShort();	break;
+			}
+		}
+
+		// 특정 진입 시그널 수량만 시장가 청산 (주문은 BIP 0 대상). 분할 익절용
+		private void ExitChunk(string sig, string reason)
+		{
+			if (!liveSignals.Contains(sig))
+				return;
+			int q = chunkQty[sig];
+			if (isLongPos)	ExitLong(0, q, "x" + sig, sig);
+			else			ExitShort(0, q, "x" + sig, sig);
+			liveSignals.Remove(sig);
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 익절 {2} 시그널={3} 수량={4}",
+				Time[0], Instrument.FullName, reason, sig, q));
+		}
+
+		// 남은 전량 시장가 청산 (손절 스탑은 포지션 청산 시 자동 취소). 청산 후 중복 주문 방지
+		private void FlattenRemaining(string reason)
+		{
+			if (isLongPos)	ExitLong();
+			else			ExitShort();
+			liveSignals.Clear();
+			active = ActiveStrategy.None;
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 전량 청산 {2}",
+				Time[0], Instrument.FullName, reason));
+		}
+
+		// spec 5.1 상승추세 롱(주력)
+		private void ManageUpLong()
+		{
+			if (strongMomentum)
+			{
+				// 강한 모멘텀 청산: 종가 < 3분봉 SMA20 → 나머지 전량
+				if (Close[0] < signals.Sma20[0])
+					FlattenRemaining("5.1 강한 모멘텀 청산(종가<SMA20)");
+				return;
+			}
+
+			bool up3  = signals.CrossAboveUp3[0];	// 강한 모멘텀 전환(+3배 상방 돌파)
+			bool up2  = signals.CrossAboveUp2[0];	// 1차 익절(+2배 상방 돌파)
+			bool weak = signals.T2Bear[0];			// 약한 모멘텀 청산(MACD 하락 전환 AND 데드크로스)
+
+			// 강한 모멘텀 전환: 보유 중 언제든. 1/5를 아직 안 했으면 1/5+2/5 같이, 했으면 2/5만
+			if (up3)
+			{
+				if (!tp1Done) ExitChunk("UpL1", "5.1 강한모멘텀 1/5");
+				ExitChunk("UpL2", "5.1 강한모멘텀 2/5");
+				tp1Done			= true;
+				strongMomentum	= true;		// 이후 약한 모멘텀 청산 적용 안 함
+				MoveBreakeven();
+				return;
+			}
+
+			if (!tp1Done)
+			{
+				// 공통 규칙: 1차 익절 전/동시에 나머지 청산 조건이 나오면 전량 청산
+				if (up2 && weak)	{ FlattenRemaining("5.1 1차+약한모멘텀 동시 → 전량"); return; }
+				if (weak)			{ FlattenRemaining("5.1 약한모멘텀 청산(1차 전) → 전량"); return; }
+				if (up2)			{ ExitChunk("UpL1", "5.1 1차 익절 1/5"); tp1Done = true; MoveBreakeven(); }
+			}
+			else if (weak)			{ FlattenRemaining("5.1 약한모멘텀 청산 → 나머지 전량"); }
+		}
+
+		// spec 5.2 상승추세 숏(역추세). 10분봉 저가 조건은 BIP 1에서 별도 처리
+		private void ManageUpShort()
+		{
+			bool tp1  = signals.K20CrossDown[0] || Close[0] <= channels.Dn1[0];
+			bool rest = signals.T2Bull[0];			// 골든크로스 AND MACD 상승 전환
+
+			if (!tp1Done)
+			{
+				if (tp1 && rest)	{ FlattenRemaining("5.2 1차+나머지 동시 → 전량"); return; }
+				if (rest)			{ FlattenRemaining("5.2 나머지 청산(1차 전) → 전량"); return; }
+				if (tp1)			{ ExitChunk("UpS1", "5.2 1차 익절 1/2"); tp1Done = true; MoveBreakeven(); }
+			}
+			else if (rest)			{ FlattenRemaining("5.2 나머지 전량 청산"); }
+		}
+
+		// spec 5.3 하락추세 롱(역추세)
+		private void ManageDnLong()
+		{
+			bool tp1  = Close[0] >= channels.Up1[0] || signals.MacdDown[0] || signals.K[0] >= CrossHigh;
+			bool rest = signals.T2Bear[0];			// MACD 하락 전환 AND 데드크로스
+
+			if (!tp1Done)
+			{
+				if (tp1 && rest)	{ FlattenRemaining("5.3 1차+나머지 동시 → 전량"); return; }
+				if (rest)			{ FlattenRemaining("5.3 나머지 청산(1차 전) → 전량"); return; }
+				if (tp1)			{ ExitChunk("DnL1", "5.3 1차 익절 1/3"); tp1Done = true; MoveBreakeven(); }
+			}
+			else if (rest)			{ FlattenRemaining("5.3 나머지 전량 청산"); }
+		}
+
+		// spec 5.4 하락추세 숏(주력): 3단계 (1차·2차·최종)
+		private void ManageDnShort()
+		{
+			bool final = signals.Rsi[0] < RsiLow;		// 최종 청산
+			bool tp1   = Close[0] <= channels.Dn2[0] || signals.MacdUp[0] || signals.K20CrossDown[0];
+			bool tp2   = Close[0] <= channels.Dn3[0];	// 2차 익절(-3배 도달)
+
+			if (!tp1Done)
+			{
+				// 공통 규칙: 1차 익절 전/동시에 최종 청산 조건이 나오면 전량 청산
+				if (final)	{ FlattenRemaining("5.4 최종 청산(1차 전/동시) → 전량"); return; }
+				if (tp1)	{ ExitChunk("DnS1", "5.4 1차 익절 1/3"); tp1Done = true; MoveBreakeven(); }
+				// -2·-3 동시 돌파면 1차·2차를 같은 봉에서 함께 실행 (spec T3)
+				if (tp2 && !tp2Done) { ExitChunk("DnS2", "5.4 2차 익절 1/3"); tp2Done = true; }
+			}
+			else
+			{
+				if (final)	{ FlattenRemaining("5.4 최종 청산 → 나머지 전량"); return; }
+				if (tp2 && !tp2Done) { ExitChunk("DnS2", "5.4 2차 익절 1/3"); tp2Done = true; }
+			}
+		}
+
+		// spec 5.5 횡보 롱: 1차 익절이 먼저 충족된 세트만 끝까지 사용
+		private void ManageSideLong()
+		{
+			if (sideSet == SideSet.None)
+			{
+				bool aTp1  = Close[0] >= channels.Up2[0] || signals.MacdDown[0] || signals.Dead[0];
+				bool bTp1  = signals.K80CrossUp[0];
+				bool aRest = High[0] >= channels.Up3[0];	// A 나머지 청산: 고가 +3배 터치
+				bool bRest = signals.T2Bear[0];				// B 나머지 청산: MACD 하락 전환 AND 데드크로스
+				bool anyTp1  = aTp1 || bTp1;
+				bool anyRest = aRest || bRest;
+
+				// 공통 규칙: 1차 익절 전/동시에 A·B 어느 세트든 나머지 청산 조건이 나오면 전량 청산
+				if (anyTp1 && anyRest)	{ FlattenRemaining("5.5 1차+나머지 동시 → 전량"); return; }
+				if (anyRest)			{ FlattenRemaining("5.5 나머지 청산(1차 전) → 전량"); return; }
+				if (anyTp1)
+				{
+					sideSet = aTp1 ? SideSet.A : SideSet.B;	// 동시 충족이면 A (기본값)
+					ExitChunk("SideL1", "5.5 1차 익절 1/2 (세트 " + sideSet + ")");
+					tp1Done = true;
+					MoveBreakeven();
+				}
+			}
+			else if (sideSet == SideSet.A)
+			{
+				if (High[0] >= channels.Up3[0])	FlattenRemaining("5.5 A 나머지 청산(고가 +3배 터치)");
+			}
+			else	// 세트 B
+			{
+				if (signals.T2Bear[0])			FlattenRemaining("5.5 B 나머지 청산(T2 하락)");
+			}
+		}
+
+		// spec 5.6 횡보 숏: 1차 익절이 먼저 충족된 세트만 끝까지 사용
+		private void ManageSideShort()
+		{
+			if (sideSet == SideSet.None)
+			{
+				bool aTp1  = Close[0] <= channels.Dn2[0] || signals.MacdUp[0] || signals.Golden[0];
+				bool bTp1  = signals.K20CrossDown[0];
+				bool aRest = Low[0] <= channels.Dn3[0];		// A 나머지 청산: 저가 -3배 터치
+				bool bRest = signals.T2Bull[0];				// B 나머지 청산: MACD 상승 전환 AND 골든크로스
+				bool anyTp1  = aTp1 || bTp1;
+				bool anyRest = aRest || bRest;
+
+				if (anyTp1 && anyRest)	{ FlattenRemaining("5.6 1차+나머지 동시 → 전량"); return; }
+				if (anyRest)			{ FlattenRemaining("5.6 나머지 청산(1차 전) → 전량"); return; }
+				if (anyTp1)
+				{
+					sideSet = aTp1 ? SideSet.A : SideSet.B;	// 동시 충족이면 A (기본값)
+					ExitChunk("SideS1", "5.6 1차 익절 1/2 (세트 " + sideSet + ")");
+					tp1Done = true;
+					MoveBreakeven();
+				}
+			}
+			else if (sideSet == SideSet.A)
+			{
+				if (Low[0] <= channels.Dn3[0])	FlattenRemaining("5.6 A 나머지 청산(저가 −3배 터치)");
+			}
+			else	// 세트 B
+			{
+				if (signals.T2Bull[0])			FlattenRemaining("5.6 B 나머지 청산(T2 상승)");
+			}
+		}
+
+		// 미보유 전환 시 호출: 진입·익절·손절 상태 전체 초기화 (strategy.md).
+		// 손절값은 다음 진입의 SubmitChunk에서 시그널별로 SetStopLoss를 다시 하므로 직전 값이 남지 않는다.
+		private void ResetTradeState()
+		{
+			active			= ActiveStrategy.None;
+			entryRegime		= 0;
+			isLongPos		= false;
+			stopSwing		= double.NaN;
+			stopPrice		= double.NaN;
+			stopFromFillDone	= false;
+			breakevenDone	= false;
+			tp1Done			= false;
+			tp2Done			= false;
+			strongMomentum	= false;
+			sideSet			= SideSet.None;
+			liveSignals.Clear();
+			chunkQty.Clear();
+		}
+		#endregion
+
+		#region 헬퍼 (대회 시간 — spec 7장)
+		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(22:30)~EntryEndTime(00:15). 자정을 넘는다
+		private bool InEntryWindow()
+		{
+			return IsTimeInWindow(ToTime(Time[0]), ContestStartTime, EntryEndTime);
+		}
+
+		// 자정을 넘는 구간(start > end)도 처리하는 HHmmss 시간 비교
+		private bool IsTimeInWindow(int t, int start, int end)
+		{
+			if (start <= end)
+				return t >= start && t <= end;		// 같은 날 구간
+			return t >= start || t <= end;			// 자정을 넘는 구간
+		}
+
+		// 종료 청산 시각: FlattenTime(00:27)부터 다음 대회 시작(ContestStartTime) 전까지.
+		// 이 구간에서 포지션이 있으면 청산하고, 첫 청산 뒤에는 미보유라 추가 주문이 나가지 않는다
+		private bool IsFlattenTime()
+		{
+			int t = ToTime(Time[0]);
+			return t >= FlattenTime && t < ContestStartTime;
+		}
+		#endregion
 
 		#region Properties
 		[NinjaScriptProperty]
