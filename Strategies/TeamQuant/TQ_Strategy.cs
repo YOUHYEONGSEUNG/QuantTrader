@@ -57,6 +57,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private SideSet			sideSet		= SideSet.None;		// 5.5·5.6 먼저 충족된 세트
 		private enum SideSet { None, A, B }
 
+		// 검증용 임시 진입 (task5, UseTestEntry). 보유 봉 수로 분할 익절·본절·청산을 결정적으로 재현
+		private int				testHoldBars;					// 테스트 진입 후 경과한 보유 봉 수
+		private const int		TestTp1Bar	= 2;				// 이 봉에 1차 익절 + 본절
+		private const int		TestTp2Bar	= 3;				// 이 봉에 2차(강한 모멘텀) 익절
+		private const int		TestExitBar	= 4;				// 이 봉에 나머지 전량 청산
+
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -99,6 +105,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				UseRule12			= true;		// spec 3장 1.2·2.2
 				EntryQuantity		= 30;
 				MaxQuantity			= 40;
+				MinEntries			= 2;		// spec 7장: 종목당 최소 진입 (나스닥 2, 골드 2)
 				ContestStartTime	= 223000;	// 22:30:00 KST
 				EntryEndTime		= 1500;		// 00:15:00 KST
 				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
@@ -123,6 +130,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								MacdFast, MacdSlow, MacdSmooth,
 								StochPeriodK, StochSmooth, StochPeriodD,
 								MomentumSmaPeriod, MacdConfirmBars, MacdMinChangeAtr, false);
+
+				// spec 6장: 분할 진입 합계는 EntryQuantity이고 불타기가 없으므로 보유 수량은 EntryQuantity를 넘지 않는다.
+				// MaxQuantity(= 대회 한도, NQ 4계약 상당)보다 크게 설정하면 한도를 넘을 수 있어 경고한다.
+				if (EntryQuantity > MaxQuantity)
+					Print(string.Format("[{0}][TQ_Strategy] 경고: 기본 진입 수량({1}) > 최대 보유 수량({2}, 대회 한도). 설정 확인 필요 (spec 6장)",
+						Instrument.FullName, EntryQuantity, MaxQuantity));
 			}
 		}
 
@@ -169,9 +182,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			wasInEntryWindow = inEntryWindow;
 
-			// spec 7장: 진입 횟수 화면 표시. 분할 진입 여러 건은 OnPositionUpdate에서 신호 1회로 센다
+			// spec 7장: 종목별 진입 횟수와 최소 진입 목표를 화면에 표시. 분할 진입 여러 건은 OnPositionUpdate에서 신호 1회로 센다.
+			// 최소 진입 미달이면 경고를 덧붙인다 (미달 대책 자체는 spec 9장 미정 → 표시만 한다)
+			string entryStatus = entryCount >= MinEntries ? "" : string.Format(" (최소 {0} 미달)", MinEntries);
 			Draw.TextFixed(this, "TQ_EntryCount",
-				string.Format("{0} 진입: {1}회", Instrument.MasterInstrument.Name, entryCount),
+				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryStatus),
 				TextPosition.TopRight);
 
 			// spec 7장: 종료 청산 — FlattenTime(00:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
@@ -199,9 +214,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 22:30~00:15)일 때만 신규 진입
 				if (InEntryWindow())
-					RouteEntry();
-
-				// TODO UseTestEntry: 주문 흐름 검증용 임시 진입 (task5)
+				{
+					if (UseTestEntry)	RouteTestEntry();	// task5: 주문 흐름 검증용 임시 진입
+					else				RouteEntry();
+				}
 			}
 			else
 			{
@@ -215,11 +231,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					return;
 				}
 
-				// spec 4장 이익 보호 본절: 1차 익절 전이라도 유리폭이 기준에 닿으면 본절로 옮긴다
-				CheckBreakevenAtR();
+				if (UseTestEntry)
+				{
+					// task5: 보유 봉 수 기반으로 분할 익절·본절·나머지 청산을 결정적으로 재현
+					testHoldBars++;
+					ManageTestExits();
+				}
+				else
+				{
+					// spec 4장 이익 보호 본절: 1차 익절 전이라도 유리폭이 기준에 닿으면 본절로 옮긴다
+					CheckBreakevenAtR();
 
-				// spec 5장: 진입 시점 레짐의 익절·청산 상태 머신
-				ManageExits();
+					// spec 5장: 진입 시점 레짐의 익절·청산 상태 머신
+					ManageExits();
+				}
 
 			}
 		}
@@ -751,8 +776,48 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tp2Done			= false;
 			strongMomentum	= false;
 			sideSet			= SideSet.None;
+			testHoldBars	= 0;
 			liveSignals.Clear();
 			chunkQty.Clear();
+		}
+		#endregion
+
+		#region 검증 — 임시 진입 (task5, UseTestEntry)
+		// UseTestEntry가 켜지면 실제 신호(지표) 대신 결정적 흐름으로 주문 플럼빙을 검증한다.
+		// 진입·손절·분할 익절·본절·청산 모두 운영과 같은 헬퍼를 써서 Market Replay에서 그대로 확인한다.
+		// A의 신호가 완성되면 UseTestEntry를 끄고 실제 신호로 연결한다 (strategy.md).
+
+		// 테스트 진입: 가장 복잡한 5.1 상승추세 롱 분할(1/5·2/5·나머지)로 들어가 2단계 분할 익절을 재현한다
+		private void RouteTestEntry()
+		{
+			BeginTrade(true, 1, ActiveStrategy.UpLong);
+			int q1 = Split(1, 5), q2 = Split(2, 5), q3 = EntryQuantity - q1 - q2;
+			SubmitChunk("UpL1", q1);
+			SubmitChunk("UpL2", q2);
+			SubmitChunk("UpL3", q3);
+			Print(string.Format("[{0}][{1}][TQ_Strategy] TEST 진입(롱, 5.1 분할) 수량={2}/{3}/{4} 손절={5}",
+				Time[0], Instrument.FullName, q1, q2, q3, stopPrice));
+		}
+
+		// 보유 봉 수에 따라 1차 익절(+본절) → 2차 익절 → 나머지 전량 청산을 순서대로 낸다.
+		// 체결 기반 손절 재계산·본절 이동은 OnExecutionUpdate가 운영과 동일하게 처리한다.
+		private void ManageTestExits()
+		{
+			if (testHoldBars == TestTp1Bar && !tp1Done)
+			{
+				ExitChunk("UpL1", "TEST 1차 익절");
+				tp1Done = true;
+				MoveBreakeven();	// 체결되면 OnFirstTakeProfitFill에서 본절 이동
+			}
+			else if (testHoldBars == TestTp2Bar && !tp2Done)
+			{
+				ExitChunk("UpL2", "TEST 2차 익절");
+				tp2Done = true;
+			}
+			else if (testHoldBars >= TestExitBar)
+			{
+				FlattenRemaining("TEST 최종 청산");
+			}
 		}
 		#endregion
 
@@ -962,6 +1027,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(0, 235959)]
 		[Display(Name = "FlattenTime", Description = "종료 청산, 이 시각 봉 마감 (HHmmss, KST)", GroupName = "6. 대회", Order = 2)]
 		public int FlattenTime { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, int.MaxValue)]
+		[Display(Name = "MinEntries", Description = "종목당 최소 진입 횟수 (화면 표시용, spec 7장)", GroupName = "6. 대회", Order = 3)]
+		public int MinEntries { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "UseTestEntry", Description = "주문 흐름 검증용 임시 진입", GroupName = "7. 테스트", Order = 0)]
