@@ -7,6 +7,7 @@ using System.Xml.Serialization;
 using NinjaTrader.Data;
 using NinjaTrader.Gui;
 using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;
 #endregion
 
 namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
@@ -14,10 +15,26 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 	/// <summary>
 	/// 3분봉 신호 엔진: 숫자 값, 이벤트, 6개 진입 신호 (spec 2장·5장, docs/interface.md)
 	/// 포지션·주문·시간대와 무관한 값만 낸다.
-	/// 스켈레톤: 모든 속성이 있고 값은 false/NaN.
 	/// </summary>
 	public class TQ_Signals : Indicator
 	{
+		private TQ_ATRChannels	channels;
+		private Stochastics		stoch;
+		private RSI				rsi;
+		private MACD			macd;
+		private SMA				sma;
+		private MAX				swingHigh;
+		private MIN				swingLow;
+		private int				minBars;
+
+		// spec 2장 T1 대기 상태: 진입 신호마다 따로 둔다. -1 = 대기 없음, 0 = 밴드 조건 봉 t, 1~N = t 이후 봉 수
+		private int waitUpLong;
+		private int waitUpShort;
+		private int waitDnLong;
+		private int waitDnShort;
+		private int waitSideLong;
+		private int waitSideShort;
+
 		// 이벤트 (spec 2장)
 		private Series<bool> crossAboveUp1;
 		private Series<bool> crossAboveUp2;
@@ -111,47 +128,192 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				entryDnShort	= new Series<bool>(this);
 				entrySideLong	= new Series<bool>(this);
 				entrySideShort	= new Series<bool>(this);
+
+				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
+				stoch		= Stochastics(StochPeriodD, StochPeriodK, StochSmooth);	// 인자 순서: periodD, periodK, smooth
+				rsi			= RSI(RsiPeriod, 3);									// 두 번째 인자는 평균선용, RSI 값과 무관
+				macd		= MACD(MacdFast, MacdSlow, MacdSmooth);
+				sma			= SMA(SmaPeriod);
+				swingHigh	= MAX(High, SwingBars);
+				swingLow	= MIN(Low, SwingBars);
+
+				// 참조하는 가장 먼 인덱스: 다이버전스 DivTo봉 전, 크로스 필터 CrossFilterBars - 1봉 전, 직전 봉
+				minBars		= Math.Max(1, Math.Max(DivTo, CrossFilterBars - 1));
+
+				waitUpLong		= -1;
+				waitUpShort		= -1;
+				waitDnLong		= -1;
+				waitDnShort		= -1;
+				waitSideLong	= -1;
+				waitSideShort	= -1;
 			}
 		}
 
 		protected override void OnBarUpdate()
 		{
-			// TODO(A) 숫자 값: Stochastics(StochPeriodD, StochPeriodK, StochSmooth), RSI(RsiPeriod),
-			//         MACD(MacdFast, MacdSlow, MacdSmooth).Diff, SMA(SmaPeriod), 최근 SwingBars봉 고가·저가
-			// TODO(A) 밴드는 TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3)에서 읽는다
-			K[0]			= double.NaN;
-			D[0]			= double.NaN;
-			Rsi[0]			= double.NaN;
-			MacdHist[0]		= double.NaN;
-			Sma20[0]		= double.NaN;
-			SwingHigh5[0]	= double.NaN;
-			SwingLow5[0]	= double.NaN;
+			// 숫자 값 (docs/interface.md)
+			K[0]			= stoch.K[0];
+			D[0]			= stoch.D[0];
+			Rsi[0]			= rsi[0];
+			MacdHist[0]		= macd.Diff[0];
+			Sma20[0]		= sma[0];
+			SwingHigh5[0]	= swingHigh[0];	// spec 2장 전고점: 현재 봉 포함 최근 SwingBars봉
+			SwingLow5[0]	= swingLow[0];	// spec 2장 전저점
 
-			// TODO(A) spec 2장 이벤트: 돌파, MACD 전환, 필터된 크로스, %K 80/20, 하락 다이버전스, T2
-			crossAboveUp1[0]	= false;
-			crossAboveUp2[0]	= false;
-			crossAboveUp3[0]	= false;
-			crossBelowDn1[0]	= false;
-			crossBelowDn2[0]	= false;
-			crossBelowDn3[0]	= false;
-			macdUp[0]			= false;
-			macdDown[0]			= false;
-			golden[0]			= false;
-			dead[0]				= false;
-			k80CrossUp[0]		= false;
-			k20CrossDown[0]		= false;
-			bearDiv[0]			= false;
-			t2Bull[0]			= false;
-			t2Bear[0]			= false;
+			// 데이터 부족 가드: 이벤트·신호는 false로 남는다
+			if (CurrentBar < minBars)
+				return;
 
-			// TODO(A) spec 2장 T1 + 5.1~5.6 진입 신호: 신호마다 대기 상태를 따로 둔다
-			// TODO(A) ShowDebugVisuals: 진입 신호 위치에 화살표
-			entryUpLong[0]		= false;
-			entryUpShort[0]		= false;
-			entryDnLong[0]		= false;
-			entryDnShort[0]		= false;
-			entrySideLong[0]	= false;
-			entrySideShort[0]	= false;
+			double c0 = Close[0];
+			double c1 = Close[1];
+			double k0 = K[0];
+			double k1 = K[1];
+			double d0 = D[0];
+			double d1 = D[1];
+			double r0 = Rsi[0];
+
+			// spec 2장 상방/하방 돌파: 직전 봉 종가는 밴드 안쪽, 현재 봉 종가가 바깥 (갭 포함, spec T3)
+			bool xUp1 = c1 <= channels.Up1[1] && c0 > channels.Up1[0];
+			bool xUp2 = c1 <= channels.Up2[1] && c0 > channels.Up2[0];
+			bool xUp3 = c1 <= channels.Up3[1] && c0 > channels.Up3[0];
+			bool xDn1 = c1 >= channels.Dn1[1] && c0 < channels.Dn1[0];
+			bool xDn2 = c1 >= channels.Dn2[1] && c0 < channels.Dn2[0];
+			bool xDn3 = c1 >= channels.Dn3[1] && c0 < channels.Dn3[0];
+
+			// spec 2장 MACD 상승/하락 전환: 히스토그램이 직전 봉보다 큼/작음
+			bool mUp = MacdHist[0] > MacdHist[1];
+			bool mDn = MacdHist[0] < MacdHist[1];
+
+			// spec 2장 골든/데드크로스: %K·%D 교차 AND 최근 CrossFilterBars봉(현재 포함) 안에 %K가 20 아래/80 위
+			bool kWasLow	= false;
+			bool kWasHigh	= false;
+			for (int i = 0; i < CrossFilterBars; i++)
+			{
+				if (K[i] < CrossLow)	kWasLow = true;
+				if (K[i] > CrossHigh)	kWasHigh = true;
+			}
+			bool gold	= k1 <= d1 && k0 > d0 && kWasLow;
+			bool dd		= k1 >= d1 && k0 < d0 && kWasHigh;
+
+			// spec 2장 %K 80 상향 돌파 / 20 하방 돌파
+			bool k80Up	= k1 <= CrossHigh && k0 > CrossHigh;
+			bool k20Dn	= k1 >= CrossLow && k0 < CrossLow;
+
+			// spec 2장 하락 다이버전스: DivFrom~DivTo봉 전 구간의 최고 고가 봉과 비교.
+			// 최고 고가 봉이 여러 개면 가장 최근 봉 (최근 → 과거 순으로 보면서 더 클 때만 바꾼다)
+			bool div = false;
+			if (DivFrom <= DivTo)
+			{
+				int		hiIdx	= DivFrom;
+				double	hi		= High[DivFrom];
+				for (int i = DivFrom + 1; i <= DivTo; i++)
+				{
+					if (High[i] > hi)
+					{
+						hi		= High[i];
+						hiIdx	= i;
+					}
+				}
+				div = High[0] > hi && r0 < Rsi[hiIdx];
+			}
+
+			crossAboveUp1[0]	= xUp1;
+			crossAboveUp2[0]	= xUp2;
+			crossAboveUp3[0]	= xUp3;
+			crossBelowDn1[0]	= xDn1;
+			crossBelowDn2[0]	= xDn2;
+			crossBelowDn3[0]	= xDn3;
+			macdUp[0]			= mUp;
+			macdDown[0]			= mDn;
+			golden[0]			= gold;
+			dead[0]				= dd;
+			k80CrossUp[0]		= k80Up;
+			k20CrossDown[0]		= k20Dn;
+			bearDiv[0]			= div;
+
+			// spec 2장 T2: 같은 봉에서 둘 다, 또는 하나가 나온 바로 다음 봉에 나머지
+			bool tBull = (mUp && gold) || (macdUp[1] && gold) || (golden[1] && mUp);
+			bool tBear = (mDn && dd) || (macdDown[1] && dd) || (dead[1] && mDn);
+			t2Bull[0]			= tBull;
+			t2Bear[0]			= tBear;
+
+			// 반전 신호 (spec 5장 진입 조건의 [대괄호])
+			bool revUp	= mUp || gold;
+			bool revDn	= mDn || dd;
+
+			// spec 5.1 상승추세 롱: 종가 −1배 하방 돌파 → T1 [MACD 상승 전환 OR 골든크로스]
+			bool eUpLong	= StepT1(ref waitUpLong, xDn1, revUp);
+			// spec 5.2 상승추세 숏: 고가 +3배 터치 AND RSI ≥ 70 AND 하락 다이버전스 → T1 [MACD 하락 전환 OR 데드크로스]
+			bool eUpShort	= StepT1(ref waitUpShort, High[0] >= channels.Up3[0] && r0 >= RsiHigh && div, revDn);
+			// spec 5.3 하락추세 롱: 종가 −3배 하방 돌파 → T1 [RSI < 20 OR MACD 상승 전환 OR 골든크로스]
+			bool eDnLong	= StepT1(ref waitDnLong, xDn3, r0 < RsiLow || revUp);
+			// spec 5.4 하락추세 숏: 종가 +2배 상방 돌파 → T1 [MACD 하락 전환 OR 데드크로스 OR (RSI ≥ 70 AND 하락 다이버전스)]
+			bool eDnShort	= StepT1(ref waitDnShort, xUp2, revDn || (r0 >= RsiHigh && div));
+			// spec 5.5 횡보 롱: (−2배 또는 −3배 하방 돌파 → T1 [MACD 상승 전환 OR 골든크로스]) 또는 T2. 동시 충족은 1회 (spec T3)
+			bool t1SideLong	= StepT1(ref waitSideLong, xDn2 || xDn3, revUp);
+			bool eSideLong	= t1SideLong || tBull;
+			// spec 5.6 횡보 숏: (+2배 또는 +3배 상방 돌파 → T1 [MACD 하락 전환 OR 데드크로스]) 또는 T2
+			bool t1SideShort	= StepT1(ref waitSideShort, xUp2 || xUp3, revDn);
+			bool eSideShort		= t1SideShort || tBear;
+
+			entryUpLong[0]		= eUpLong;
+			entryUpShort[0]		= eUpShort;
+			entryDnLong[0]		= eDnLong;
+			entryDnShort[0]		= eDnShort;
+			entrySideLong[0]	= eSideLong;
+			entrySideShort[0]	= eSideShort;
+
+			if (eUpLong)	MarkSignal("EntryUpLong", true, 0, Brushes.Lime);
+			if (eDnLong)	MarkSignal("EntryDnLong", true, 1, Brushes.Cyan);
+			if (eSideLong)	MarkSignal("EntrySideLong", true, 2, Brushes.Yellow);
+			if (eUpShort)	MarkSignal("EntryUpShort", false, 0, Brushes.Red);
+			if (eDnShort)	MarkSignal("EntryDnShort", false, 1, Brushes.Magenta);
+			if (eSideShort)	MarkSignal("EntrySideShort", false, 2, Brushes.Orange);
+		}
+
+		/// <summary>
+		/// spec 2장 T1. 한 봉에 한 번 호출한다. 진입 신호가 나가면 true.
+		/// </summary>
+		private bool StepT1(ref int wait, bool bandCondition, bool reversal)
+		{
+			bool fire = false;
+
+			// 먼저 기존 대기로 신호를 판정한다. 봉 t 자체(wait == 0이 되는 봉)의 반전 신호는 세지 않는다
+			if (wait >= 0)
+			{
+				wait++;						// t 다음 봉이 1
+				if (reversal)
+				{
+					fire = true;			// 밴드 조건 1번당 신호 1번: 대기 소멸
+					wait = -1;
+				}
+				else if (wait >= T1Window)
+					wait = -1;				// N봉 안에 반전 신호가 없으면 무효
+			}
+
+			// 그다음 이 봉이 밴드 조건 봉이면 새 t로 등록한다 (다음 봉부터 센다)
+			if (bandCondition)
+				wait = 0;
+
+			return fire;
+		}
+
+		/// <summary>
+		/// 진입 신호 로그와 검증용 화살표. slot은 같은 봉에서 화살표가 겹치지 않게 하는 순번.
+		/// </summary>
+		private void MarkSignal(string name, bool isLong, int slot, Brush brush)
+		{
+			Print(string.Format("[{0}][{1}][TQ_Signals] 진입 신호 {2}", Time[0], Instrument.FullName, name));
+
+			if (!ShowDebugVisuals)
+				return;
+
+			string	tag		= "TQ_" + name + "_" + CurrentBar;
+			double	offset	= TickSize * 8 * (slot + 1);
+			if (isLong)
+				Draw.ArrowUp(this, tag, false, 0, Low[0] - offset, brush);
+			else
+				Draw.ArrowDown(this, tag, false, 0, High[0] + offset, brush);
 		}
 
 		#region Properties

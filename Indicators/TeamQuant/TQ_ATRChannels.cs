@@ -13,10 +13,12 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 {
 	/// <summary>
 	/// ATR Channels: 중심선 EMA ± ATR × 1·2·3 (spec 2장 밴드, docs/interface.md)
-	/// 스켈레톤: 플롯·속성만 있고 값은 모두 NaN.
 	/// </summary>
 	public class TQ_ATRChannels : Indicator
 	{
+		private EMA	ema;
+		private ATR	atr;
+
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -43,18 +45,26 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				AddPlot(Brushes.RoyalBlue, "Dn2");
 				AddPlot(Brushes.Blue, "Dn3");
 			}
+			else if (State == State.DataLoaded)
+			{
+				ema	= EMA(MidPeriod);
+				atr	= ATR(AtrPeriod);
+			}
 		}
 
 		protected override void OnBarUpdate()
 		{
-			// TODO(A) spec 2장 밴드: Mid = EMA(MidPeriod), Up/Dn = Mid ± ATR(AtrPeriod) × Mult1·Mult2·Mult3
-			Mid[0] = double.NaN;
-			Up1[0] = double.NaN;
-			Up2[0] = double.NaN;
-			Up3[0] = double.NaN;
-			Dn1[0] = double.NaN;
-			Dn2[0] = double.NaN;
-			Dn3[0] = double.NaN;
+			// spec 2장 밴드: 중심선 EMA ± ATR × 배수
+			double mid	= ema[0];
+			double a	= atr[0];
+
+			Mid[0] = mid;
+			Up1[0] = mid + a * Mult1;
+			Up2[0] = mid + a * Mult2;
+			Up3[0] = mid + a * Mult3;
+			Dn1[0] = mid - a * Mult1;
+			Dn2[0] = mid - a * Mult2;
+			Dn3[0] = mid - a * Mult3;
 		}
 
 		#region Properties

@@ -14,10 +14,22 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 	/// <summary>
 	/// 10분봉 레짐: +1 상승추세, −1 하락추세, 0 횡보 (spec 3장, docs/interface.md)
 	/// 입력 시리즈가 10분봉이어야 한다. 전략에서는 TQ_Regime(BarsArray[1])로 호출한다.
-	/// 스켈레톤: 플롯·속성만 있고 값은 모두 NaN.
+	/// SMA Slow가 채워지기 전(봉 수 부족)에는 Regime이 NaN이다.
 	/// </summary>
 	public class TQ_Regime : Indicator
 	{
+		// spec 9장 1.2·2.2 초안의 비교 구간 (최근 5봉 vs 그 전 5봉). 정의가 확정되면 고친다
+		private const int Rule12Bars = 5;
+
+		private SMA		smaFast;
+		private SMA		smaMid;
+		private SMA		smaSlow;
+		private MAX		maxHigh;
+		private MIN		minLow;
+		private Brush	upBrush;
+		private Brush	downBrush;
+		private int		lastRegime;
+
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -39,15 +51,69 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				AddPlot(Brushes.Gold, "Regime");
 				AddPlot(Brushes.Gray, "Sma20");
 			}
+			else if (State == State.DataLoaded)
+			{
+				smaFast		= SMA(Fast);
+				smaMid		= SMA(Mid);
+				smaSlow		= SMA(Slow);
+				maxHigh		= MAX(High, Rule12Bars);
+				minLow		= MIN(Low, Rule12Bars);
+				lastRegime	= int.MinValue;
+
+				// 검증용 배경색. 직접 만든 브러시는 한 번만 만들고 Freeze한다
+				upBrush		= new SolidColorBrush(Color.FromArgb(45, 0, 200, 0));
+				downBrush	= new SolidColorBrush(Color.FromArgb(45, 230, 0, 0));
+				upBrush.Freeze();
+				downBrush.Freeze();
+			}
 		}
 
 		protected override void OnBarUpdate()
 		{
-			// TODO(A) spec 3장 (1.1)(2.1)(3.1): SMA Fast/Mid/Slow 정배열·역배열과 종가 vs SMA Fast
-			// TODO(A) UseRule12가 켜졌을 때의 1.2·2.2는 정의 확정 후 (spec 9장)
-			// TODO(A) ShowDebugVisuals: 레짐별 배경색
-			Regime[0]	= double.NaN;
-			Sma20[0]	= double.NaN;
+			Sma20[0] = smaFast[0];	// spec 5.2 1차 익절용 10분봉 SMA20
+
+			// 데이터 부족 가드: SMA Slow가 채워지기 전에는 레짐을 내지 않는다
+			if (CurrentBar < Slow - 1)
+			{
+				Regime[0] = double.NaN;
+				return;
+			}
+
+			double f = smaFast[0];
+			double m = smaMid[0];
+			double s = smaSlow[0];
+
+			int r = 0;									// spec 3장 (3.1) 횡보
+			if (f > m && m > s && Close[0] > f)
+				r = 1;									// spec 3장 (1.1) 상승추세
+			else if (f < m && m < s && Close[0] < f)
+				r = -1;									// spec 3장 (2.1) 하락추세
+			else if (UseRule12 && CurrentBar >= Rule12Bars * 2 - 1)
+			{
+				// spec 9장 초안 (1.2)(2.2): 최근 5봉의 최고 고가·최저 저가를 그 전 5봉과 비교.
+				// 이동평균 조건(1.1·2.1)이 우선이라 여기는 둘 다 아닐 때만 온다
+				double hiNow	= maxHigh[0];
+				double hiPrev	= maxHigh[Rule12Bars];
+				double loNow	= minLow[0];
+				double loPrev	= minLow[Rule12Bars];
+
+				if (hiNow > hiPrev && loNow > loPrev)
+					r = 1;
+				else if (hiNow < hiPrev && loNow < loPrev)
+					r = -1;
+			}
+
+			Regime[0] = r;
+
+			if (r != lastRegime)
+			{
+				Print(string.Format("[{0}][{1}][TQ_Regime] 레짐 전환 {2} → {3}",
+					Time[0], Instrument.FullName, lastRegime == int.MinValue ? "없음" : lastRegime.ToString(), r));
+				lastRegime = r;
+			}
+
+			if (ShowDebugVisuals)
+				BackBrushAll = r > 0 ? upBrush : r < 0 ? downBrush : null;
 		}
 
 		#region Properties
