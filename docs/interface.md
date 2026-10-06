@@ -25,13 +25,29 @@
 | 설정값 | 기본값 |
 | --- | --- |
 | Fast / Mid / Slow (SMA) | 20 / 60 / 120 |
-| UseRule12 | false (spec 1.2·2.2, 정의 확정 전까지 끔) |
+| UseRule12 | true (spec 3장 1.2·2.2) |
 | ShowDebugVisuals | false (검증용 배경색) |
 
 | 플롯 | 의미 |
 | --- | --- |
 | Regime | +1 상승추세, −1 하락추세, 0 횡보 (spec 3장) |
 | Sma20 | 10분봉 SMA20 (spec 5.2 1차 익절용) |
+
+## TQ_MacdTurn (A) — 입력: 3분봉
+MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하고, 전략은 직접 호출하지 않는다.
+차트에 올리면 히스토그램 막대 색으로 판정을 볼 수 있다: 초록 = 상승 전환, 빨강 = 하락 전환, 회색 = 둘 다 아님.
+
+| 설정값 | 기본값 |
+| --- | --- |
+| Fast / Slow / Smooth | 12 / 26 / 9 |
+| ConfirmBars | 2 (연속 증가·감소 봉 수) |
+| AtrPeriod | 14 (TQ_Signals는 BandAtrPeriod를 넘김) |
+| MinChangeAtr | 0 (최소 변화폭, ATR 배수. 0 = 사용 안 함) |
+
+| 이름 | 타입 | 의미 |
+| --- | --- | --- |
+| Hist | 플롯 | MACD(Fast, Slow, Smooth).Diff |
+| Up, Down | Series&lt;bool&gt; | 히스토그램이 ConfirmBars봉 연속 증가 / 감소했고 그 구간의 변화폭이 MinChangeAtr × ATR 이상 |
 
 ## TQ_Signals (A) — 입력: 3분봉
 | 설정값 | 기본값 |
@@ -48,6 +64,8 @@
 | MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 |
 | StochPeriodK / StochSmooth / StochPeriodD | 10 / 5 / 5 (%K 길이 / %K 스무딩 / %D 스무딩) |
 | SmaPeriod | 20 (3분봉, spec 5.1 강한 모멘텀 청산) |
+| MacdConfirmBars | 2 (MACD 전환 확인 봉 수. TQ_MacdTurn의 ConfirmBars로 넘김) |
+| MacdMinChangeAtr | 0 (MACD 전환 최소 변화폭, ATR 배수. TQ_MacdTurn의 MinChangeAtr로 넘김) |
 | ShowDebugVisuals | false (검증용 화살표) |
 
 설정값 타입: 기간·봉 수는 int, 기준값(CrossLow/High, RsiHigh/Low)과 배수는 double, UseRule12·ShowDebugVisuals는 bool.
@@ -69,7 +87,7 @@
 | --- | --- |
 | CrossAboveUp1, CrossAboveUp2, CrossAboveUp3 | 종가 상방 돌파 |
 | CrossBelowDn1, CrossBelowDn2, CrossBelowDn3 | 종가 하방 돌파 |
-| MacdUp, MacdDown | 히스토그램이 직전 봉보다 큼 / 작음 |
+| MacdUp, MacdDown | TQ_MacdTurn의 Up / Down 그대로 (spec 2장 MACD 전환). 진입·T2·익절 조건 모두 이 값을 쓴다 |
 | Golden, Dead | 필터 적용된 골든·데드크로스 |
 | K80CrossUp, K20CrossDown | %K 80 상향 돌파 / 20 하방 돌파 |
 | BearDiv | 현재 봉 기준 하락 다이버전스 |
@@ -88,7 +106,8 @@
 | EntrySideShort | 5.6 | (CrossAboveUp2 또는 CrossAboveUp3) → T1: [MacdDown OR Dead], 또는 T2Bear |
 
 T1 처리 규칙 (spec 2장 T1)
-- 밴드 조건이 충족된 봉(t) 다음 봉부터 T1Window봉 안에서만 반전 신호를 본다. 봉 t 자체의 반전 신호는 세지 않는다.
+- 밴드 조건이 충족된 봉(t) 다음 봉부터 대기 봉 수 안에서만 반전 신호를 본다. 봉 t 자체의 반전 신호는 세지 않는다.
+- 대기 봉 수 = T1Window + (MacdConfirmBars − 1). 기본값이면 3 + 1 = 4봉.
 - 밴드 조건 1번당 진입 신호는 1번이다. 신호가 나가면 그 대기는 소멸한다. 지표는 포지션을 모르므로, B가 보유 중이라 쓰지 못한 신호도 그 밴드 조건의 기회를 쓴 것으로 본다.
 - 대기 중에 같은 밴드 조건이 새로 충족되면 그 봉을 새 t로 보고 다시 센다.
 - 신호가 나온 봉이 동시에 새 밴드 조건 봉이면, 먼저 기존 대기로 신호를 판정하고 그다음 그 봉을 새 t로 등록한다(다음 봉부터 센다).

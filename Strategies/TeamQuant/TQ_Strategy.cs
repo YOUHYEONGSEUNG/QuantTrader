@@ -15,7 +15,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 {
 	/// <summary>
 	/// 대회 전략 (docs/spec.md). 3분봉 차트에 올리고 10분봉은 내부에서 추가한다.
-	/// 스켈레톤: 데이터·설정값·지표 인스턴스와 로그만 있고 주문 로직은 없다.
+	/// 진입 라우팅, 손절·본절, 익절 상태 머신, 대회 시간 처리를 담당한다.
 	/// </summary>
 	public class TQ_Strategy : Strategy
 	{
@@ -36,7 +36,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool			isLongPos;						// 현재 포지션 방향 (롱/숏)
 		private double			stopSwing		= double.NaN;	// 신호 봉의 전저점(롱)/전고점(숏)
 		private double			stopPrice		= double.NaN;	// 현재 걸어둔 손절가 (로그·갭 판정용)
-		private bool			stopFromFillDone;				// 실제 체결가 기준 손절 재계산 완료
+		private double			initialStop		= double.NaN;	// 신호 봉 종가 기준 최초 손절가 (갭 판정용)
+		private double			entryFillSum;					// 진입 체결가 × 수량 합 (평균 체결가 계산용)
+		private int				entryFillQty;					// 진입 체결 수량 합
+		private bool			gapFlattened;					// 갭으로 손절가를 넘어 체결돼 즉시 청산 중
+		private bool			breakevenPending;				// 첫 부분 익절 주문을 냈고 체결을 기다리는 중
+		private bool			wasInEntryWindow;				// 진입 횟수 리셋용: 직전 봉이 진입 시간대였는지
+		private bool			blockLong;						// 이번 대회 구간에서 롱이 손실 손절로 끝남 → 롱 재진입 금지
+		private bool			blockShort;						// 이번 대회 구간에서 숏이 손실 손절로 끝남 → 숏 재진입 금지
+		private double			initialRisk		= double.NaN;	// 체결 직후 손절 거리 (1R)
+		private bool			reachedR;						// 최대 유리폭이 이익 보호 기준에 닿았음
 		private bool			breakevenDone;					// 본절 이동 완료
 		private readonly List<string>			liveSignals	= new List<string>();		// 아직 보유 중인 진입 시그널명
 		private readonly Dictionary<string, int>	chunkQty	= new Dictionary<string, int>();	// 진입 시그널별 수량
@@ -67,6 +76,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				MacdFast			= 12;
 				MacdSlow			= 26;
 				MacdSmooth			= 9;
+				MacdConfirmBars		= 2;
+				MacdMinChangeAtr	= 0;
 				StochPeriodK		= 10;
 				StochSmooth			= 5;
 				StochPeriodD		= 5;
@@ -85,12 +96,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				RegimeMid			= 60;
 				RegimeSlow			= 120;
 				MomentumSmaPeriod	= 20;
-				UseRule12			= false;
+				UseRule12			= true;		// spec 3장 1.2·2.2
 				EntryQuantity		= 30;
 				MaxQuantity			= 40;
 				ContestStartTime	= 223000;	// 22:30:00 KST
 				EntryEndTime		= 1500;		// 00:15:00 KST
 				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
+				BlockReentryAfterStop	= true;
+				BreakevenAtR		= 1;
+				UseCounterTrend		= true;
 				UseTestEntry		= false;
 			}
 			else if (State == State.Configure)
@@ -108,7 +122,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3,
 								MacdFast, MacdSlow, MacdSmooth,
 								StochPeriodK, StochSmooth, StochPeriodD,
-								MomentumSmaPeriod, false);
+								MomentumSmaPeriod, MacdConfirmBars, MacdMinChangeAtr, false);
 			}
 		}
 
@@ -144,6 +158,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				signals.EntryUpLong[0], signals.EntryUpShort[0],
 				signals.EntryDnLong[0], signals.EntryDnShort[0],
 				signals.EntrySideLong[0], signals.EntrySideShort[0]));
+
+			// spec 7장: 진입 횟수는 대회 구간마다 0부터 센다. 진입 시간대에 들어서는 첫 봉에서 리셋한다
+			bool inEntryWindow = InEntryWindow();
+			if (inEntryWindow && !wasInEntryWindow)
+			{
+				entryCount	= 0;
+				blockLong	= false;	// 재진입 제한도 대회 구간마다 푼다
+				blockShort	= false;
+			}
+			wasInEntryWindow = inEntryWindow;
 
 			// spec 7장: 진입 횟수 화면 표시. 분할 진입 여러 건은 OnPositionUpdate에서 신호 1회로 센다
 			Draw.TextFixed(this, "TQ_EntryCount",
@@ -182,16 +206,21 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			else
 			{
 				// 보유 중: 새 진입 신호는 무시 (spec 1장 2).
-				// spec 4장: 체결 다음 봉에 실제 체결가(평균)로 손절을 한 번 재계산한다.
-				if (!stopFromFillDone)
+				// 손절 재계산·갭 청산·본절 이동은 체결 시점에 OnExecutionUpdate에서 처리한다 (spec 4장)
+				if (gapFlattened)
 				{
-					RecomputeStopOnFill();
-					if (Position.MarketPosition == MarketPosition.Flat)
-						return;		// 갭 손절 초과로 즉시 청산된 경우
+					// 갭 청산 주문 뒤에도 포지션이 남아 있으면 다시 전량 청산한다
+					if (Position.MarketPosition == MarketPosition.Long)			ExitLong();
+					else if (Position.MarketPosition == MarketPosition.Short)	ExitShort();
+					return;
 				}
+
+				// spec 4장 이익 보호 본절: 1차 익절 전이라도 유리폭이 기준에 닿으면 본절로 옮긴다
+				CheckBreakevenAtR();
 
 				// spec 5장: 진입 시점 레짐의 익절·청산 상태 머신
 				ManageExits();
+
 			}
 		}
 
@@ -215,20 +244,25 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			int r = (int)regime.Regime[0];
 
+			// spec 4장 재진입 제한: 손실 손절로 끝난 방향은 이번 대회 구간에서 다시 진입하지 않는다.
+			// 주력 진입(5.1 상승추세 롱, 5.4 하락추세 숏)은 제한을 받지 않는다
+			bool canLong	= !(BlockReentryAfterStop && blockLong);
+			bool canShort	= !(BlockReentryAfterStop && blockShort);
+
 			if (r == 1)			// 상승추세: 주력 롱(5.1) 우선, 역추세 숏(5.2)
 			{
-				if      (signals.EntryUpLong[0])	EnterUpLong();
-				else if (signals.EntryUpShort[0])	EnterUpShort();
+				if      (signals.EntryUpLong[0])							EnterUpLong();
+				else if (canShort && UseCounterTrend && signals.EntryUpShort[0])	EnterUpShort();
 			}
 			else if (r == -1)	// 하락추세: 주력 숏(5.4) 우선, 역추세 롱(5.3)
 			{
-				if      (signals.EntryDnShort[0])	EnterDnShort();
-				else if (signals.EntryDnLong[0])	EnterDnLong();
+				if      (signals.EntryDnShort[0])						EnterDnShort();
+				else if (canLong && UseCounterTrend && signals.EntryDnLong[0])		EnterDnLong();
 			}
 			else				// 횡보(0): 롱(5.5)·숏(5.6)
 			{
-				if      (signals.EntrySideLong[0])	EnterSideLong();
-				else if (signals.EntrySideShort[0])	EnterSideShort();
+				if      (canLong && signals.EntrySideLong[0])	EnterSideLong();
+				else if (canShort && signals.EntrySideShort[0])	EnterSideShort();
 			}
 		}
 
@@ -303,7 +337,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			active		= act;
 			// 전고점·전저점은 신호 봉 기준 (spec 4장). 신호 봉 = 현재 마감된 봉([0])
 			stopSwing	= isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
-			stopPrice	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 임시 계산
+			initialStop	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 계산 (spec 4장)
+			stopPrice	= initialStop;
 		}
 
 		// spec 4·6장: 시그널명별 분할 진입. 진입 주문 제출 전에 손절을 먼저 걸어 체결 즉시 손절이 서도록 한다
@@ -314,7 +349,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			chunkQty[sig] = qty;
 			liveSignals.Add(sig);
 			// SetStopLoss는 진입 전에 호출해야 초기 손절가가 보장된다 (NT8 공식 문서)
-			SetStopLoss(sig, CalculationMode.Price, stopPrice, false);
+			// 걸어두는 가격은 신호 봉 종가에서 최소 1틱 띄운다. 체결되면 OnExecutionUpdate에서 체결가 기준으로 다시 건다
+			SetStopLoss(sig, CalculationMode.Price, OrderSafeStop(stopPrice, Close[0]), false);
+
 			if (isLongPos)	EnterLong(qty, sig);
 			else			EnterShort(qty, sig);
 		}
@@ -341,8 +378,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				? entryPrice * (1 - StopPercent / 100.0)
 				: entryPrice * (1 + StopPercent / 100.0);
 			if (double.IsNaN(stopSwing))	// 지표 미완성·데이터 부족 방어
-				return pct;
-			return isLongPos ? Math.Max(stopSwing, pct) : Math.Min(stopSwing, pct);
+				return Instrument.MasterInstrument.RoundToTickSize(pct);
+			return Instrument.MasterInstrument.RoundToTickSize(isLongPos ? Math.Max(stopSwing, pct) : Math.Min(stopSwing, pct));
 		}
 
 		// 아직 보유 중인 모든 진입 시그널의 손절가를 price로 (재)설정
@@ -352,55 +389,154 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				SetStopLoss(sig, CalculationMode.Price, price, false);
 		}
 
-		// spec 4장: 체결되면 실제 체결가(평균)로 손절을 다시 계산한다(보유 중 1회).
-		// 갭으로 체결가가 이미 손절가를 넘어섰으면 즉시 전량 청산한다.
-		private void RecomputeStopOnFill()
+		// 주문으로 걸어둘 스탑 가격: 기준가(신호 봉 종가)와 같거나 넘어서면 주문이 거부될 수 있어 최소 1틱 띄운다.
+		// 손절 규칙(spec 4장)의 값은 CalcStop이 정하고, 이 함수는 체결 전 임시 주문 가격에만 쓴다
+		private double OrderSafeStop(double stop, double refPrice)
 		{
-			stopFromFillDone = true;
+			return isLongPos ? Math.Min(stop, refPrice - TickSize) : Math.Max(stop, refPrice + TickSize);
+		}
 
-			// 본절이 이미 이동했으면(1차 익절 선행) 체결가 기준으로 되돌리지 않는다
-			if (breakevenDone)
+		// 체결 시점 처리 (spec 4장): 진입 체결 → 갭 판정과 손절 재계산, 첫 부분 익절 체결 → 본절 이동
+		protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity,
+			MarketPosition marketPosition, string orderId, DateTime time)
+		{
+			if (execution == null || execution.Order == null)
 				return;
 
-			double avg = Position.AveragePrice;
-			double s   = CalcStop(avg);
+			string name = execution.Order.Name;
 
-			bool breached = isLongPos ? s >= avg : s <= avg;
-			if (breached)
+			if (chunkQty.ContainsKey(name))
+				OnEntryFill(price, quantity, time);
+			else if (breakevenPending && name.StartsWith("x"))	// 분할 익절 주문 이름은 "x" + 진입 시그널명
+				OnFirstTakeProfitFill(price, time);
+			else if (name == "Stop loss")						// SetStopLoss가 내는 주문 이름
+				OnStopLossFill(price, time);
+		}
+
+		// spec 4장 재진입 제한: 손절이 손실로 체결되면 이번 대회 구간에서 같은 방향 진입을 막는다.
+		// 본절 손절(손실 없음)은 막지 않는다
+		private void OnStopLossFill(double exitPrice, DateTime time)
+		{
+			if (entryFillQty <= 0)
+				return;
+
+			double avg	= entryFillSum / entryFillQty;
+			bool loss	= isLongPos ? exitPrice < avg : exitPrice > avg;
+			if (!loss)
+				return;
+
+			// 주력 진입(5.1, 5.4)의 손절은 재진입 제한을 걸지 않는다. 추세 방향 진입은 여러 번 시도하는 것이 전략의 취지다
+			if (active == ActiveStrategy.UpLong || active == ActiveStrategy.DnShort)
+				return;
+
+			bool already = isLongPos ? blockLong : blockShort;
+			if (isLongPos)	blockLong = true;
+			else			blockShort = true;
+
+			if (!already && BlockReentryAfterStop)
+				Print(string.Format("[{0}][{1}][TQ_Strategy] 손실 손절 → 이번 대회 구간 {2} 재진입 금지",
+					time, Instrument.FullName, isLongPos ? "롱" : "숏"));
+		}
+
+		// spec 4장 이익 보호 본절: 보유 중 최대 유리폭이 처음 손절 거리(1R)의 BreakevenAtR배에 닿으면
+		// 1차 익절 전이라도 손절을 평균 진입가로 옮긴다. 봉 마감 시 그 봉의 고가(롱)·저가(숏)로 판단한다
+		private void CheckBreakevenAtR()
+		{
+			// 주력 진입(5.1, 5.4)에는 적용하지 않는다. 추세를 길게 끌고 가는 거래라 진입가를 되짚는 움직임을 버텨야 한다
+			if (active == ActiveStrategy.UpLong || active == ActiveStrategy.DnShort)
+				return;
+
+			if (BreakevenAtR <= 0 || breakevenDone || liveSignals.Count == 0 || entryFillQty <= 0
+				|| double.IsNaN(initialRisk) || initialRisk <= 0)
+				return;
+
+			double avg	= entryFillSum / entryFillQty;
+			double be	= Instrument.MasterInstrument.RoundToTickSize(avg);
+
+			double favorable = isLongPos ? High[0] - avg : avg - Low[0];
+			if (favorable >= BreakevenAtR * initialRisk)
+				reachedR = true;
+			if (!reachedR)
+				return;
+
+			// 스탑 가격이 현재가와 같거나 넘어서면 주문이 거부될 수 있어, 종가가 평균 진입가보다 유리할 때만 옮긴다
+			bool valid = isLongPos ? Close[0] > be : Close[0] < be;
+			if (!valid)
+				return;
+
+			stopPrice		= be;
+			breakevenDone	= true;
+			SetStopForLive(be);
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 이익 보호 본절 이동 손절→평균가={2} (유리폭 기준 {3})",
+				Time[0], Instrument.FullName, be, BreakevenAtR * initialRisk));
+		}
+
+		// spec 4장: 체결되면 실제 체결가(평균)로 손절을 다시 계산한다.
+		// 갭으로 체결가가 이미 걸어둔 손절가(신호 봉 종가 기준)를 넘어섰으면 즉시 전량 청산한다
+		private void OnEntryFill(double fillPrice, int fillQty, DateTime time)
+		{
+			entryFillSum += fillPrice * fillQty;
+			entryFillQty += fillQty;
+
+			bool breached = !double.IsNaN(initialStop)
+				&& (isLongPos ? fillPrice <= initialStop : fillPrice >= initialStop);
+			if (breached || gapFlattened)
 			{
+				gapFlattened = true;
 				Print(string.Format("[{0}][{1}][TQ_Strategy] 갭 손절 초과 → 즉시 전량 청산 체결가={2} 손절={3}",
-					Time[0], Instrument.FullName, avg, s));
+					time, Instrument.FullName, fillPrice, initialStop));
 				FlattenRemaining("spec 4장 갭 손절 초과");
 				return;
 			}
 
-			stopPrice = s;
+			// 본절이 이미 이동했으면 체결가 기준으로 되돌리지 않는다
+			if (breakevenDone)
+				return;
+
+			double avg	= entryFillSum / entryFillQty;
+			double s	= CalcStop(avg);
+			stopPrice	= s;
+			initialRisk	= Math.Abs(avg - s);	// 이익 보호 본절의 기준 거리 (1R)
 			SetStopForLive(s);
-			Print(string.Format("[{0}][{1}][TQ_Strategy] 손절 재계산(체결가 기준) 체결가={2} 손절={3}",
-				Time[0], Instrument.FullName, avg, s));
+			Print(string.Format("[{0}][{1}][TQ_Strategy] 손절 재계산(체결가 기준) 평균 체결가={2} 손절={3}",
+				time, Instrument.FullName, avg, s));
 		}
 
 		// spec 4장 본절: 첫 부분 익절이 체결되면 남은 수량의 손절을 평균 진입가로 옮긴다.
-		// 단, 그 시점 가격이 평균 진입가보다 불리하면(손실 중) 원래 손절가를 유지한다.
+		// 익절 주문을 낼 때 이 함수로 예약만 하고, 실제 이동은 체결 시 OnFirstTakeProfitFill에서 한다
 		private void MoveBreakeven()
 		{
 			if (breakevenDone)
 				return;
+			breakevenPending = true;
+		}
 
-			double avg		= Position.AveragePrice;
-			bool   losing	= isLongPos ? Close[0] < avg : Close[0] > avg;
-			if (losing)
+		// 체결 시점 가격이 평균 진입가보다 유리하지 않으면(손실 중이거나 같으면) 원래 손절가를 유지한다 (spec 4장).
+		// 같을 때도 유지하는 것은 스탑 가격이 현재가와 같으면 주문이 거부될 수 있기 때문이다
+		private void OnFirstTakeProfitFill(double exitPrice, DateTime time)
+		{
+			breakevenPending = false;
+			initialRisk		= double.NaN;
+			reachedR		= false;
+			if (breakevenDone || liveSignals.Count == 0)
+				return;
+
+			double avg	= entryFillQty > 0 ? entryFillSum / entryFillQty : Position.AveragePrice;
+			double be	= Instrument.MasterInstrument.RoundToTickSize(avg);
+
+			bool favorable = isLongPos ? exitPrice > be : exitPrice < be;
+			if (!favorable)
 			{
-				Print(string.Format("[{0}][{1}][TQ_Strategy] 본절 보류(손실 중) 평균가={2} 현재가={3} 손절 유지={4}",
-					Time[0], Instrument.FullName, avg, Close[0], stopPrice));
+				Print(string.Format("[{0}][{1}][TQ_Strategy] 본절 보류(손실 중) 평균가={2} 익절 체결가={3} 손절 유지={4}",
+					time, Instrument.FullName, be, exitPrice, stopPrice));
 				return;
 			}
 
-			stopPrice		= avg;
+			stopPrice		= be;
 			breakevenDone	= true;
-			SetStopForLive(avg);
+			SetStopForLive(be);
 			Print(string.Format("[{0}][{1}][TQ_Strategy] 본절 이동 손절→평균가={2}",
-				Time[0], Instrument.FullName, avg));
+				time, Instrument.FullName, be));
 		}
 		#endregion
 
@@ -425,9 +561,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (!liveSignals.Contains(sig))
 				return;
 			int q = chunkQty[sig];
+			liveSignals.Remove(sig);	// 체결 콜백이 주문 호출 도중에 올 수 있어 먼저 뺀다
 			if (isLongPos)	ExitLong(0, q, "x" + sig, sig);
 			else			ExitShort(0, q, "x" + sig, sig);
-			liveSignals.Remove(sig);
 			Print(string.Format("[{0}][{1}][TQ_Strategy] 익절 {2} 시그널={3} 수량={4}",
 				Time[0], Instrument.FullName, reason, sig, q));
 		}
@@ -605,7 +741,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			isLongPos		= false;
 			stopSwing		= double.NaN;
 			stopPrice		= double.NaN;
-			stopFromFillDone	= false;
+			initialStop		= double.NaN;
+			entryFillSum	= 0;
+			entryFillQty	= 0;
+			gapFlattened	= false;
+			breakevenPending	= false;
 			breakevenDone	= false;
 			tp1Done			= false;
 			tp2Done			= false;
@@ -743,6 +883,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
+		[Display(Name = "MacdConfirmBars", Description = "MACD 전환 확인 봉 수 (1 = 직전 봉 대비, 2 = 2봉 연속)", GroupName = "2. 신호", Order = 15)]
+		public int MacdConfirmBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "MacdMinChangeAtr", Description = "MACD 전환 최소 변화폭 (ATR 배수, 0 = 사용 안 함)", GroupName = "2. 신호", Order = 16)]
+		public double MacdMinChangeAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
 		[Display(Name = "RegimeFast", Description = "레짐 SMA 단기 (10분봉)", GroupName = "3. 레짐", Order = 0)]
 		public int RegimeFast { get; set; }
 
@@ -757,7 +907,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int RegimeSlow { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "UseRule12", Description = "레짐 1.2·2.2 사용 (정의 확정 전까지 끔)", GroupName = "3. 레짐", Order = 3)]
+		[Display(Name = "UseRule12", Description = "레짐 1.2·2.2 사용 (spec 3장)", GroupName = "3. 레짐", Order = 3)]
 		public bool UseRule12 { get; set; }
 
 		[NinjaScriptProperty]
@@ -774,6 +924,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, int.MaxValue)]
 		[Display(Name = "MomentumSmaPeriod", Description = "강한 모멘텀 청산 SMA 기간 (3분봉)", GroupName = "4. 손절·청산", Order = 2)]
 		public int MomentumSmaPeriod { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "BlockReentryAfterStop", Description = "손실 손절 뒤 그 대회 구간에서 같은 방향 재진입 금지", GroupName = "4. 손절·청산", Order = 3)]
+		public bool BlockReentryAfterStop { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "BreakevenAtR", Description = "이익 보호 본절: 유리폭이 처음 손절 거리의 몇 배에 닿으면 본절로 옮길지 (0 = 사용 안 함)", GroupName = "4. 손절·청산", Order = 4)]
+		public double BreakevenAtR { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "UseCounterTrend", Description = "역추세 진입(5.2 상승추세 숏, 5.3 하락추세 롱) 사용", GroupName = "3. 레짐", Order = 4)]
+		public bool UseCounterTrend { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]

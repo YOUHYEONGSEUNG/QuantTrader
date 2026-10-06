@@ -18,7 +18,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 	/// </summary>
 	public class TQ_Regime : Indicator
 	{
-		// spec 9장 1.2·2.2 초안의 비교 구간 (최근 5봉 vs 그 전 5봉). 정의가 확정되면 고친다
+		// spec 3장 1.2·2.2의 비교 구간 (최근 5봉 vs 그 전 5봉). 백테스트 후 확정 (spec 9장)
 		private const int Rule12Bars = 5;
 
 		private SMA		smaFast;
@@ -44,7 +44,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				Fast						= 20;
 				Mid							= 60;
 				Slow						= 120;
-				UseRule12					= false;	// spec 1.2·2.2, 정의 확정 전까지 끔
+				UseRule12					= true;		// spec 3장 1.2·2.2
 				ShowDebugVisuals			= false;
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
@@ -90,7 +90,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				r = -1;									// spec 3장 (2.1) 하락추세
 			else if (UseRule12 && CurrentBar >= Rule12Bars * 2 - 1)
 			{
-				// spec 9장 초안 (1.2)(2.2): 최근 5봉의 최고 고가·최저 저가를 그 전 5봉과 비교.
+				// spec 3장 (1.2)(2.2): 최근 5봉의 최고 고가·최저 저가를 그 전 5봉과 비교.
 				// 이동평균 조건(1.1·2.1)이 우선이라 여기는 둘 다 아닐 때만 온다
 				double hiNow	= maxHigh[0];
 				double hiPrev	= maxHigh[Rule12Bars];
@@ -133,7 +133,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		public int Slow { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "UseRule12", Description = "spec 1.2·2.2 사용 (정의 확정 전까지 끔)", GroupName = "Parameters", Order = 3)]
+		[Display(Name = "UseRule12", Description = "spec 3장 1.2·2.2 사용", GroupName = "Parameters", Order = 3)]
 		public bool UseRule12 { get; set; }
 
 		[NinjaScriptProperty]
