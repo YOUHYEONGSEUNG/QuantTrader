@@ -27,6 +27,12 @@
 | Fast / Mid / Slow (SMA) | 20 / 60 / 120 |
 | UseRule12 | true (spec 3장 1.2·2.2) |
 | ShowDebugVisuals | false (검증용 배경색) |
+| Rule12Bars | 5 (1.2·2.2 비교 구간 봉 수. spec 3장은 5) |
+| Rule12PriceFilter | false (실험: 1.2·2.2를 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정) |
+| FastTrendBars | 0 (실험: 종가가 N봉 연속 SMA Fast 위·아래면 상승·하락추세. 0 = 사용 안 함) |
+| FastTrendSlope | false (실험: 위 판정에 SMA Fast가 FastTrendBars봉 전보다 높아야 상승, 낮아야 하락이라는 조건 추가) |
+
+판정 순서: 이동평균 조건(1.1·2.1) → FastTrendBars(켰을 때) → 1.2·2.2(UseRule12) → 횡보.
 
 | 플롯 | 의미 |
 | --- | --- |
@@ -111,6 +117,28 @@ T1 대기 상태 (int) — 전략의 화면 표시용. 매매 판단에는 쓰�
 | --- | --- |
 | WaitUpLong, WaitUpShort, WaitDnLong, WaitDnShort, WaitSideLong, WaitSideShort | 진입 신호별 대기 상태. −1 = 대기 없음, 0 = 밴드 조건이 충족된 봉, 1 이상 = 그 뒤 지난 봉 수 |
 | T1Bars | 실제 대기 봉 수 (T1Window + MacdConfirmBars − 1) |
+
+진입 밴드 배수와 레짐별 대기 봉 수 (설정값, int) — 기본값이면 위 표의 spec 조건과 같다
+
+| 설정값 | 기본값 | 의미 |
+| --- | --- | --- |
+| UpLongBand | 1 | EntryUpLong의 밴드 조건: 몇 배 밴드 하방 돌파. UpLongBand·DnLongBand·DnShortBand는 0도 받는다(0 = 중심선 Mid 돌파) |
+| UpShortBand | 3 | EntryUpShort의 밴드 조건: 고가가 몇 배 밴드에 터치 |
+| DnLongBand | 3 | EntryDnLong의 밴드 조건: 몇 배 밴드 하방 돌파 |
+| DnShortBand | 2 | EntryDnShort의 밴드 조건: 몇 배 밴드 상방 돌파 |
+| SideBand | 2 | EntrySideLong·EntrySideShort의 밴드 조건: 이 배수와 그 바깥 밴드의 돌파 |
+| T1WindowUp / T1WindowDn / T1WindowSide | 0 | 상승추세(5.1·5.2) / 하락추세(5.3·5.4) / 횡보(5.5·5.6) 진입 신호의 T1 대기 봉 수. 0이면 T1Window를 쓴다 |
+
+실험용 진입 신호 — spec에 없는 변형. 전략의 `DnShortNeedBoth`를 켰을 때만 쓴다. 채택되면 spec과 이 표를 고치고, 버리면 지운다
+
+| 이름 | 타입 | 조건 요약 |
+| --- | --- | --- |
+| EntryDnShortBoth | Series&lt;bool&gt; | EntryDnShort와 같은 밴드 조건 → T1: T2Bear. 반전 신호로 MACD 하락 전환과 데드크로스가 둘 다 필요 |
+| WaitDnShortBoth | int | 위 신호의 T1 대기 상태 (화면 표시용) |
+| BullDiv | Series&lt;bool&gt; | 상승 다이버전스. BearDiv의 거울상: 저가가 DivFrom~DivTo봉 전 구간의 최저 저가보다 낮은데 RSI는 그 봉보다 높음 |
+| EntryDnLongDiv | Series&lt;bool&gt; | 5.3을 5.2와 대칭으로 조인 변형. Low ≤ −DnLongBand배 AND Rsi ≤ 100 − RsiHigh AND BullDiv → T1: [MacdUp OR Golden]. 전략의 `DnLongNeedDiv`를 켰을 때만 쓴다 |
+| WaitDnLongDiv | int | 위 신호의 T1 대기 상태 (화면 표시용) |
+| T1BarsUp, T1BarsDn, T1BarsSide | int | 레짐별 실제 대기 봉 수 (화면 표시용) |
 
 T1 처리 규칙 (spec 2장 T1)
 - 밴드 조건이 충족된 봉(t) 다음 봉부터 대기 봉 수 안에서만 반전 신호를 본다. 봉 t 자체의 반전 신호는 세지 않는다.

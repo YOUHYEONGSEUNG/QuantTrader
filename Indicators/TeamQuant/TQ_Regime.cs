@@ -18,9 +18,6 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 	/// </summary>
 	public class TQ_Regime : Indicator
 	{
-		// spec 3장 1.2·2.2의 비교 구간 (최근 5봉 vs 그 전 5봉). 백테스트 후 확정 (spec 9장)
-		private const int Rule12Bars = 5;
-
 		private SMA		smaFast;
 		private SMA		smaMid;
 		private SMA		smaSlow;
@@ -46,6 +43,12 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				Slow						= 120;
 				UseRule12					= true;		// spec 3장 1.2·2.2
 				ShowDebugVisuals			= false;
+
+				// 실험 옵션 (레짐 전환을 빠르게). 기본값은 spec 3장과 같은 동작
+				Rule12Bars					= 5;		// spec 3장 1.2·2.2의 비교 구간 (최근 5봉 vs 그 전 5봉)
+				Rule12PriceFilter			= false;
+				FastTrendBars				= 0;		// 0 = 사용 안 함
+				FastTrendSlope				= false;
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
 				AddPlot(Brushes.Gold, "Regime");
@@ -88,19 +91,48 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				r = 1;									// spec 3장 (1.1) 상승추세
 			else if (f < m && m < s && Close[0] < f)
 				r = -1;									// spec 3장 (2.1) 하락추세
-			else if (UseRule12 && CurrentBar >= Rule12Bars * 2 - 1)
+			else
 			{
-				// spec 3장 (1.2)(2.2): 최근 5봉의 최고 고가·최저 저가를 그 전 5봉과 비교.
-				// 이동평균 조건(1.1·2.1)이 우선이라 여기는 둘 다 아닐 때만 온다
-				double hiNow	= maxHigh[0];
-				double hiPrev	= maxHigh[Rule12Bars];
-				double loNow	= minLow[0];
-				double loPrev	= minLow[Rule12Bars];
+				// 실험 (spec 3장 1.3·2.3 자리, 미확정): 정배열·역배열을 기다리지 않고,
+				// 종가가 FastTrendBars봉 연속 SMA Fast 위에서 마감하면 상승추세, 연속 아래면 하락추세로 본다
+				if (FastTrendBars > 0 && CurrentBar >= FastTrendBars - 1)
+				{
+					bool allAbove = true;
+					bool allBelow = true;
+					for (int i = 0; i < FastTrendBars; i++)
+					{
+						if (!(Close[i] > smaFast[i]))	allAbove = false;
+						if (!(Close[i] < smaFast[i]))	allBelow = false;
+					}
+					// 실험: 단기선이 FastTrendBars봉 전보다 오르는(내리는) 중일 때만 인정한다. 가격이 선을 잠깐 넘나드는 것을 거른다
+					if (FastTrendSlope && CurrentBar >= FastTrendBars)
+					{
+						allAbove = allAbove && smaFast[0] > smaFast[FastTrendBars];
+						allBelow = allBelow && smaFast[0] < smaFast[FastTrendBars];
+					}
 
-				if (hiNow > hiPrev && loNow > loPrev)
-					r = 1;
-				else if (hiNow < hiPrev && loNow < loPrev)
-					r = -1;
+					if (allAbove)		r = 1;
+					else if (allBelow)	r = -1;
+				}
+
+				if (r == 0 && UseRule12 && CurrentBar >= Rule12Bars * 2 - 1)
+				{
+					// spec 3장 (1.2)(2.2): 최근 Rule12Bars봉의 최고 고가·최저 저가를 그 전 Rule12Bars봉과 비교.
+					// 이동평균 조건(1.1·2.1)이 우선이라 여기는 둘 다 아닐 때만 온다
+					bool up		= maxHigh[0] > maxHigh[Rule12Bars] && minLow[0] > minLow[Rule12Bars];
+					bool down	= maxHigh[0] < maxHigh[Rule12Bars] && minLow[0] < minLow[Rule12Bars];
+
+					// 실험: 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정한다.
+					// 가격이 이미 20선을 되찾았는데 지난 구간의 낮은 고점·저점 때문에 하락추세로 남는 것을 막는다
+					if (Rule12PriceFilter)
+					{
+						up		= up && Close[0] > f;
+						down	= down && Close[0] < f;
+					}
+
+					if (up)			r = 1;
+					else if (down)	r = -1;
+				}
 			}
 
 			Regime[0] = r;
@@ -140,6 +172,24 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Display(Name = "ShowDebugVisuals", Description = "검증용 배경색 표시", GroupName = "Parameters", Order = 4)]
 		public bool ShowDebugVisuals { get; set; }
 
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "Rule12Bars", Description = "1.2·2.2 비교 구간 봉 수 (최근 N봉 vs 그 전 N봉)", GroupName = "Parameters", Order = 5)]
+		public int Rule12Bars { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Rule12PriceFilter", Description = "실험: 1.2·2.2를 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정", GroupName = "Parameters", Order = 6)]
+		public bool Rule12PriceFilter { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, int.MaxValue)]
+		[Display(Name = "FastTrendBars", Description = "실험: 종가가 N봉 연속 SMA Fast 위(아래)면 상승(하락)추세. 0 = 사용 안 함", GroupName = "Parameters", Order = 7)]
+		public int FastTrendBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "FastTrendSlope", Description = "실험: FastTrendBars 판정에 SMA Fast의 기울기 조건 추가 (N봉 전보다 높아야 상승, 낮아야 하락)", GroupName = "Parameters", Order = 8)]
+		public bool FastTrendSlope { get; set; }
+
 		[Browsable(false)]
 		[XmlIgnore]
 		public Series<double> Regime { get { return Values[0]; } }
@@ -158,18 +208,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_Regime[] cacheTQ_Regime;
-		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
-			return TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals);
+			return TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals, rule12Bars, rule12PriceFilter, fastTrendBars, fastTrendSlope);
 		}
 
-		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
 			if (cacheTQ_Regime != null)
 				for (int idx = 0; idx < cacheTQ_Regime.Length; idx++)
-					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].UseRule12 == useRule12 && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].EqualsInput(input))
+					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].UseRule12 == useRule12 && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].Rule12Bars == rule12Bars && cacheTQ_Regime[idx].Rule12PriceFilter == rule12PriceFilter && cacheTQ_Regime[idx].FastTrendBars == fastTrendBars && cacheTQ_Regime[idx].FastTrendSlope == fastTrendSlope && cacheTQ_Regime[idx].EqualsInput(input))
 						return cacheTQ_Regime[idx];
-			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, UseRule12 = useRule12, ShowDebugVisuals = showDebugVisuals }, input, ref cacheTQ_Regime);
+			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, UseRule12 = useRule12, ShowDebugVisuals = showDebugVisuals, Rule12Bars = rule12Bars, Rule12PriceFilter = rule12PriceFilter, FastTrendBars = fastTrendBars, FastTrendSlope = fastTrendSlope }, input, ref cacheTQ_Regime);
 		}
 	}
 }
@@ -178,14 +228,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals);
+			return indicator.TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals, rule12Bars, rule12PriceFilter, fastTrendBars, fastTrendSlope);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, useRule12, showDebugVisuals);
+			return indicator.TQ_Regime(input, fast, mid, slow, useRule12, showDebugVisuals, rule12Bars, rule12PriceFilter, fastTrendBars, fastTrendSlope);
 		}
 	}
 }
@@ -194,14 +244,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals);
+			return indicator.TQ_Regime(Input, fast, mid, slow, useRule12, showDebugVisuals, rule12Bars, rule12PriceFilter, fastTrendBars, fastTrendSlope);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool useRule12, bool showDebugVisuals)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool useRule12, bool showDebugVisuals, int rule12Bars, bool rule12PriceFilter, int fastTrendBars, bool fastTrendSlope)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, useRule12, showDebugVisuals);
+			return indicator.TQ_Regime(input, fast, mid, slow, useRule12, showDebugVisuals, rule12Bars, rule12PriceFilter, fastTrendBars, fastTrendSlope);
 		}
 	}
 }
