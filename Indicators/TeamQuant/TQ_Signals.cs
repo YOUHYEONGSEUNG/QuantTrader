@@ -477,6 +477,36 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[XmlIgnore]
 		public Series<double> SwingLow5 { get { return Values[6]; } }
 
+		// T1 대기 상태 (전략의 화면 표시용). -1 = 대기 없음, 0 = 밴드 조건 봉, 1 이상 = 그 뒤 지난 봉 수
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitUpLong { get { Update(); return waitUpLong; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitUpShort { get { Update(); return waitUpShort; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitDnLong { get { Update(); return waitDnLong; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitDnShort { get { Update(); return waitDnShort; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitSideLong { get { Update(); return waitSideLong; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public int WaitSideShort { get { Update(); return waitSideShort; } }
+
+		// 실제 T1 대기 봉 수 = T1Window + MacdConfirmBars - 1
+		[Browsable(false)]
+		[XmlIgnore]
+		public int T1Bars { get { Update(); return t1Bars; } }
+
 		// 이벤트: Update()로 호출 시점 값을 최신화
 		[Browsable(false)]
 		[XmlIgnore]

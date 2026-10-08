@@ -46,6 +46,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool			blockShort;						// 이번 대회 구간에서 숏이 손실 손절로 끝남 → 숏 재진입 금지
 		private double			initialRisk		= double.NaN;	// 체결 직후 손절 거리 (1R)
 		private bool			reachedR;						// 최대 유리폭이 이익 보호 기준에 닿았음
+		private string			lastExecText	= "";			// 화면 표시용: 마지막 체결 한 줄
 		private bool			breakevenDone;					// 본절 이동 완료
 		private readonly List<string>			liveSignals	= new List<string>();		// 아직 보유 중인 진입 시그널명
 		private readonly Dictionary<string, int>	chunkQty	= new Dictionary<string, int>();	// 진입 시그널별 수량
@@ -113,6 +114,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				BreakevenAtR		= 1;
 				UseCounterTrend		= true;
 				UseTestEntry		= false;
+				ShowStatus			= true;
 			}
 			else if (State == State.Configure)
 			{
@@ -204,6 +206,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 						Time[0], Instrument.FullName, Position.Quantity));
 					ExitShort();
 				}
+				UpdateStatusPanel();
 				return;	// 종료 시각 이후에는 신규 진입·익절 판단을 하지 않는다
 			}
 
@@ -228,6 +231,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					// 갭 청산 주문 뒤에도 포지션이 남아 있으면 다시 전량 청산한다
 					if (Position.MarketPosition == MarketPosition.Long)			ExitLong();
 					else if (Position.MarketPosition == MarketPosition.Short)	ExitShort();
+					UpdateStatusPanel();
 					return;
 				}
 
@@ -247,6 +251,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				}
 
 			}
+
+			// 화면 표시: 이번 봉의 판단이 끝난 뒤 상태를 갱신한다
+			UpdateStatusPanel();
 		}
 
 		// spec 7장: 분할 진입 여러 건은 신호 1회. 미보유(Flat)→보유 전환 시점에만 1 증가시킨다
@@ -430,12 +437,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			string name = execution.Order.Name;
 
+			MarkExecution(name, price, quantity, marketPosition, time, executionId);
+
 			if (chunkQty.ContainsKey(name))
 				OnEntryFill(price, quantity, time);
 			else if (breakevenPending && name.StartsWith("x"))	// 분할 익절 주문 이름은 "x" + 진입 시그널명
 				OnFirstTakeProfitFill(price, time);
 			else if (name == "Stop loss")						// SetStopLoss가 내는 주문 이름
 				OnStopLossFill(price, time);
+
+			UpdateStatusPanel();
 		}
 
 		// spec 4장 재진입 제한: 손절이 손실로 체결되면 이번 대회 구간에서 같은 방향 진입을 막는다.
@@ -821,6 +832,214 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		}
 		#endregion
 
+		#region 화면 표시 (ShowStatus) — 매매 판단에는 영향 없음
+		// 차트 왼쪽 위에 지금 상태를 글로 보여 준다: 추세, 지표 상태, 어떤 조건을 기다리는지, 보유 중이면 다음 청산 조건.
+		// 손절가와 평균 진입가는 가로선으로, 체결은 화살표로 표시한다
+		private void UpdateStatusPanel()
+		{
+			if (!ShowStatus || CurrentBars[0] < DivTo || CurrentBars[1] < RegimeSlow)
+				return;
+
+			// Draw 계열은 무거우므로 과거 봉(백테스트 포함)에서는 그리지 않는다. 실시간·Playback에서만 갱신한다.
+			// 그리는 것은 고정 글 1개와 가로선 2개뿐이고, 같은 태그를 다시 써서 개수가 늘지 않는다
+			if (State != State.Realtime)
+				return;
+
+			System.Text.StringBuilder sb = new System.Text.StringBuilder();
+
+			double rv		= regime.Regime[0];
+			int r			= double.IsNaN(rv) ? 0 : (int)rv;
+			double close	= Closes[0][0];
+
+			sb.AppendFormat("[{0:HH:mm}] 추세: {1}\n", Times[0][0], r == 1 ? "상승추세" : r == -1 ? "하락추세" : "횡보");
+			sb.AppendFormat("MACD {0} | %K {1:F0} / %D {2:F0} | RSI {3:F0}\n",
+				signals.MacdUp[0] ? "상승 전환" : signals.MacdDown[0] ? "하락 전환" : "전환 없음",
+				signals.K[0], signals.D[0], signals.Rsi[0]);
+			sb.AppendFormat("가격 위치: {0}\n", BandZone(close));
+
+			if (Position.MarketPosition == MarketPosition.Flat)
+			{
+				RemoveDrawObject("TQ_StopLine");
+				RemoveDrawObject("TQ_AvgLine");
+
+				if (IsFlattenTime())
+					sb.Append("대회 시간 밖: 진입하지 않음\n");
+				else if (!InEntryWindow())
+					sb.Append("진입 시간 아님: 신호가 나와도 진입하지 않음\n");
+				else if (active != ActiveStrategy.None)
+					sb.Append("진입 주문 냄: 체결 대기\n");
+				else if (UseTestEntry)
+					sb.Append("TEST 모드: 다음 봉에 검증용 진입\n");
+				else
+				{
+					string longBlock	= BlockReentryAfterStop && blockLong ? "오늘 손절돼서 재진입 금지" : null;
+					string shortBlock	= BlockReentryAfterStop && blockShort ? "오늘 손절돼서 재진입 금지" : null;
+					string counterOff	= UseCounterTrend ? null : "역추세 진입 꺼짐";
+
+					if (r == 1)
+					{
+						sb.Append(WaitLine("상승추세 매수(주력)", signals.WaitUpLong,
+							"종가가 −1배 아래로 이탈", "MACD 상승 전환 또는 골든크로스", null));
+						sb.Append(WaitLine("상승추세 매도(역추세)", signals.WaitUpShort,
+							"고가 +3배 터치 + RSI 70 이상 + 하락 다이버전스", "MACD 하락 전환 또는 데드크로스", counterOff ?? shortBlock));
+					}
+					else if (r == -1)
+					{
+						sb.Append(WaitLine("하락추세 매도(주력)", signals.WaitDnShort,
+							"종가가 +2배 위로 돌파", "MACD 하락 전환, 데드크로스, RSI 70 이상 + 다이버전스 중 하나", null));
+						sb.Append(WaitLine("하락추세 매수(역추세)", signals.WaitDnLong,
+							"종가가 −3배 아래로 이탈", "RSI 20 아래, MACD 상승 전환, 골든크로스 중 하나", counterOff ?? longBlock));
+					}
+					else
+					{
+						sb.Append(WaitLine("횡보 매수", signals.WaitSideLong,
+							"종가가 −2배·−3배 아래로 이탈, 또는 MACD 상승 전환 + 골든크로스", "MACD 상승 전환 또는 골든크로스", longBlock));
+						sb.Append(WaitLine("횡보 매도", signals.WaitSideShort,
+							"종가가 +2배·+3배 위로 돌파, 또는 MACD 하락 전환 + 데드크로스", "MACD 하락 전환 또는 데드크로스", shortBlock));
+					}
+				}
+			}
+			else
+			{
+				bool isLong	= Position.MarketPosition == MarketPosition.Long;
+				double avg	= entryFillQty > 0 ? entryFillSum / entryFillQty : Position.AveragePrice;
+				double pts	= isLong ? close - avg : avg - close;
+
+				sb.AppendFormat("보유: {0} {1}계약 @ {2:N2} ({3})\n", isLong ? "매수" : "매도", Position.Quantity, avg, ActiveName());
+				sb.AppendFormat("평가: {0}{1:N2}포인트", pts >= 0 ? "+" : "", pts);
+				if (!double.IsNaN(stopPrice))
+				{
+					sb.AppendFormat(" | 손절: {0:N2}{1}", stopPrice, breakevenDone ? " (평단으로 올림)" : "");
+					Draw.HorizontalLine(this, "TQ_StopLine", stopPrice, System.Windows.Media.Brushes.Magenta);
+				}
+				sb.Append("\n");
+				Draw.HorizontalLine(this, "TQ_AvgLine", avg, System.Windows.Media.Brushes.Gray);
+
+				sb.Append("다음: ").Append(NextExitText()).Append("\n");
+			}
+
+			if (lastExecText.Length > 0)
+				sb.Append("마지막 체결: ").Append(lastExecText).Append("\n");
+
+			Draw.TextFixed(this, "TQ_Status", sb.ToString(), TextPosition.TopLeft);
+		}
+
+		// 진입 후보 한 줄: 밴드 조건을 기다리는지, 반전 신호를 기다리는지
+		private string WaitLine(string name, int wait, string bandText, string reversalText, string blockedReason)
+		{
+			if (blockedReason != null)
+				return string.Format("· {0}: {1}\n", name, blockedReason);
+			if (wait < 0)
+				return string.Format("· {0}: 밴드 조건 대기 ({1})\n", name, bandText);
+			return string.Format("· {0}: 밴드 조건 충족 → 반전 신호 대기, 남은 봉 {1} ({2})\n",
+				name, Math.Max(0, signals.T1Bars - wait), reversalText);
+		}
+
+		// 종가가 밴드의 어느 칸에 있는지
+		private string BandZone(double close)
+		{
+			if (close > channels.Up3[0])	return "+3배 위";
+			if (close > channels.Up2[0])	return "+2배 ~ +3배";
+			if (close > channels.Up1[0])	return "+1배 ~ +2배";
+			if (close > channels.Mid[0])	return "중심선 ~ +1배";
+			if (close > channels.Dn1[0])	return "−1배 ~ 중심선";
+			if (close > channels.Dn2[0])	return "−2배 ~ −1배";
+			if (close > channels.Dn3[0])	return "−3배 ~ −2배";
+			return "−3배 아래";
+		}
+
+		private string ActiveName()
+		{
+			if (UseTestEntry)	return "TEST 진입";
+			switch (active)
+			{
+				case ActiveStrategy.UpLong:		return "상승추세 매수";
+				case ActiveStrategy.UpShort:	return "상승추세 매도";
+				case ActiveStrategy.DnLong:		return "하락추세 매수";
+				case ActiveStrategy.DnShort:	return "하락추세 매도";
+				case ActiveStrategy.SideLong:	return "횡보 매수";
+				case ActiveStrategy.SideShort:	return "횡보 매도";
+				default:						return "청산 주문 냄";
+			}
+		}
+
+		// 보유 중일 때 다음에 기다리는 청산 조건 (spec 5장)
+		private string NextExitText()
+		{
+			if (UseTestEntry)
+				return "TEST: 보유 2봉째 1차 익절, 3봉째 2차 익절, 4봉째 전량 청산";
+
+			switch (active)
+			{
+				case ActiveStrategy.UpLong:
+					if (strongMomentum)	return "종가가 20선 아래로 내려가면 전량 청산 (강한 모멘텀)";
+					if (tp1Done)		return "+3배 돌파면 2/5 익절 / MACD 하락 전환 + 데드크로스면 전량 청산";
+					return "+2배 돌파면 1/5 익절 / +3배 돌파면 1/5 + 2/5 익절 / MACD 하락 전환 + 데드크로스면 전량 청산";
+				case ActiveStrategy.UpShort:
+					if (tp1Done)		return "골든크로스 + MACD 상승 전환이면 전량 청산";
+					return "%K 20 하방 돌파, −1배 도달, 10분봉 저가의 10분봉 20선 도달 중 하나면 1/2 익절";
+				case ActiveStrategy.DnLong:
+					if (tp1Done)		return "MACD 하락 전환 + 데드크로스면 전량 청산";
+					return "+1배 도달, MACD 하락 전환, %K 80 이상 중 하나면 1/3 익절";
+				case ActiveStrategy.DnShort:
+					if (!tp1Done)		return "−2배 도달, MACD 상승 전환, %K 20 하방 돌파 중 하나면 1/3 익절 / RSI 20 아래면 전량 청산";
+					if (!tp2Done)		return "−3배 도달이면 1/3 익절 / RSI 20 아래면 전량 청산";
+					return "RSI 20 아래면 전량 청산";
+				case ActiveStrategy.SideLong:
+					if (sideSet == SideSet.A)	return "고가가 +3배에 닿으면 전량 청산";
+					if (sideSet == SideSet.B)	return "MACD 하락 전환 + 데드크로스면 전량 청산";
+					return "+2배 도달·MACD 하락 전환·데드크로스 중 하나, 또는 %K 80 상향 돌파면 1/2 익절";
+				case ActiveStrategy.SideShort:
+					if (sideSet == SideSet.A)	return "저가가 −3배에 닿으면 전량 청산";
+					if (sideSet == SideSet.B)	return "MACD 상승 전환 + 골든크로스면 전량 청산";
+					return "−2배 도달·MACD 상승 전환·골든크로스 중 하나, 또는 %K 20 하방 돌파면 1/2 익절";
+				default:
+					return "청산 체결 대기";
+			}
+		}
+
+		// 체결을 차트에 화살표로 표시한다. 매수는 봉 아래 위쪽 화살표, 매도는 봉 위 아래쪽 화살표.
+		// 색: 진입 = 연두(매수)·빨강(매도), 분할 익절 = 금색, 손절 = 자홍, 그 밖의 청산 = 흰색
+		private void MarkExecution(string name, double price, int quantity, MarketPosition side, DateTime time, string executionId)
+		{
+			if (!ShowStatus)
+				return;
+
+			bool isBuy = side == MarketPosition.Long;
+			string kind;
+			System.Windows.Media.Brush brush;
+
+			if (chunkQty.ContainsKey(name))
+			{
+				kind	= "진입";
+				brush	= isBuy ? System.Windows.Media.Brushes.Lime : System.Windows.Media.Brushes.Red;
+			}
+			else if (name.StartsWith("x"))
+			{
+				kind	= "분할 익절";
+				brush	= System.Windows.Media.Brushes.Gold;
+			}
+			else if (name == "Stop loss")
+			{
+				kind	= "손절";
+				brush	= System.Windows.Media.Brushes.Magenta;
+			}
+			else
+			{
+				kind	= "청산";
+				brush	= System.Windows.Media.Brushes.White;
+			}
+
+			string tag = "TQ_Ex_" + executionId;
+			if (isBuy)
+				Draw.ArrowUp(this, tag, false, time, price - TickSize * 12, brush);
+			else
+				Draw.ArrowDown(this, tag, false, time, price + TickSize * 12, brush);
+
+			lastExecText = string.Format("{0:HH:mm} {1} {2} {3}계약 @ {4:N2}", time, kind, isBuy ? "매수" : "매도", quantity, price);
+		}
+		#endregion
+
 		#region 헬퍼 (대회 시간 — spec 7장)
 		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(22:30)~EntryEndTime(00:15). 자정을 넘는다
 		private bool InEntryWindow()
@@ -1036,6 +1255,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "UseTestEntry", Description = "주문 흐름 검증용 임시 진입", GroupName = "7. 테스트", Order = 0)]
 		public bool UseTestEntry { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "ShowStatus", Description = "차트에 상태 글, 손절선, 체결 화살표 표시 (매매 판단과 무관)", GroupName = "8. 화면", Order = 0)]
+		public bool ShowStatus { get; set; }
 		#endregion
 	}
 }

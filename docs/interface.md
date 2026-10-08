@@ -105,6 +105,13 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 | EntrySideLong | 5.5 | (CrossBelowDn2 또는 CrossBelowDn3) → T1: [MacdUp OR Golden], 또는 T2Bull |
 | EntrySideShort | 5.6 | (CrossAboveUp2 또는 CrossAboveUp3) → T1: [MacdDown OR Dead], 또는 T2Bear |
 
+T1 대기 상태 (int) — 전략의 화면 표시용. 매매 판단에는 쓰지 않는다
+
+| 이름 | 의미 |
+| --- | --- |
+| WaitUpLong, WaitUpShort, WaitDnLong, WaitDnShort, WaitSideLong, WaitSideShort | 진입 신호별 대기 상태. −1 = 대기 없음, 0 = 밴드 조건이 충족된 봉, 1 이상 = 그 뒤 지난 봉 수 |
+| T1Bars | 실제 대기 봉 수 (T1Window + MacdConfirmBars − 1) |
+
 T1 처리 규칙 (spec 2장 T1)
 - 밴드 조건이 충족된 봉(t) 다음 봉부터 대기 봉 수 안에서만 반전 신호를 본다. 봉 t 자체의 반전 신호는 세지 않는다.
 - 대기 봉 수 = T1Window + (MacdConfirmBars − 1). 기본값이면 3 + 1 = 4봉.
