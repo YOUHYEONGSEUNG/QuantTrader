@@ -34,7 +34,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				Description					= "10분봉 레짐 (+1 상승 / −1 하락 / 0 횡보)과 10분봉 SMA20 (spec 3장)";
 				Name						= "TQ_Regime";
 				Calculate					= Calculate.OnBarClose;	// spec 3장: 10분봉 마감 때마다 다시 계산
-				IsOverlay					= false;
+				IsOverlay					= true;		// 가격 패널에 얹어 별도 패널을 만들지 않는다(ShowPlots 꺼지면 투명이라 안 보임)
+				IsAutoScale					= false;	// 오버레이로 올라가도 가격 패널 스케일을 건드리지 않게 한다(Regime −1~1, Sma20 가격)
 				IsSuspendedWhileInactive	= true;
 
 				// spec 8장 기본값
@@ -43,6 +44,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				Slow						= 36;
 				UseRule12					= true;		// spec 3장 1.2·2.2
 				ShowDebugVisuals			= false;
+				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다(값은 그대로, 전략 동작 무관)
 
 				// 레짐 전환을 빠르게 하는 옵션. 기본값은 운용 기본값이다 (spec 8장). Fast/Mid/Slow도 6/18/36(명세 20/60/120)
 				Rule12Bars					= 3;		// 1.2·2.2의 비교 구간. 명세는 5 (최근 5봉 vs 그 전 5봉)
@@ -53,6 +55,14 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
 				AddPlot(Brushes.Gold, "Regime");
 				AddPlot(Brushes.Gray, "Sma20");
+			}
+			else if (State == State.Configure)
+			{
+				// ShowPlots가 꺼져 있으면 플롯 선을 투명으로 바꿔 시각적으로만 숨긴다.
+				// SetDefaults가 아니라 여기서 하는 이유: 저장된 설정값이 적용된 뒤라 사용자가 켠 값이 반영된다
+				if (!ShowPlots)
+					for (int i = 0; i < Plots.Length; i++)
+						Plots[i].Brush = Brushes.Transparent;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -189,6 +199,10 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "FastTrendSlope", Description = "실험: FastTrendBars 판정에 SMA Fast의 기울기 조건 추가 (N봉 전보다 높아야 상승, 낮아야 하락)", GroupName = "Parameters", Order = 8)]
 		public bool FastTrendSlope { get; set; }
+
+		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다(전략 호출부·생성 코드 그대로)
+		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 9)]
+		public bool ShowPlots { get; set; }
 
 		[Browsable(false)]
 		[XmlIgnore]

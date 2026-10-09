@@ -19,7 +19,11 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 	public class TQ_Signals : Indicator
 	{
 		private TQ_ATRChannels	channels;
-		private Stochastics		stoch;
+		private MIN				stochLow;	// 스토캐스틱 원시 %K용: periodK 구간 최저 저가
+		private MAX				stochHigh;	// 스토캐스틱 원시 %K용: periodK 구간 최고 고가
+		private SMA				stochK;		// %K = SMA(원시 %K, smoothK)
+		private SMA				stochD;		// %D = SMA(%K, periodD)
+		private Series<double>	stochRawK;	// 원시 %K (스무딩 전)
 		private RSI				rsi;
 		private TQ_MacdTurn	macdTurn;
 		private SMA				sma;
@@ -80,7 +84,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				Description					= "3분봉 신호 엔진: 이벤트와 진입 신호 (spec 2장·5장)";
 				Name						= "TQ_Signals";
 				Calculate					= Calculate.OnBarClose;	// spec 1장 1: 봉 마감 후 판단
-				IsOverlay					= false;
+				IsOverlay					= true;		// 가격 패널에 얹어 별도 패널을 만들지 않는다(ShowPlots 꺼지면 투명이라 안 보임)
+				IsAutoScale					= false;	// 오버레이로 올라가도 가격 패널 스케일을 건드리지 않게 한다(K/D/Rsi 0~100 등)
 				IsSuspendedWhileInactive	= true;
 
 				// spec 8장 기본값
@@ -120,6 +125,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				T1WindowDn					= 0;
 				T1WindowSide				= 0;
 				T2CountConfirmBars			= true;	// T2에서 MACD 확인에 걸린 봉 수만큼 앞의 크로스도 인정
+				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다(값은 그대로, 전략 동작 무관)
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
 				AddPlot(Brushes.DodgerBlue, "K");
@@ -129,6 +135,14 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				AddPlot(Brushes.Goldenrod, "Sma20");
 				AddPlot(Brushes.Red, "SwingHigh5");
 				AddPlot(Brushes.Blue, "SwingLow5");
+			}
+			else if (State == State.Configure)
+			{
+				// ShowPlots가 꺼져 있으면 플롯 선을 투명으로 바꿔 시각적으로만 숨긴다.
+				// SetDefaults가 아니라 여기서 하는 이유: 저장된 설정값이 적용된 뒤라 사용자가 켠 값이 반영된다
+				if (!ShowPlots)
+					for (int i = 0; i < Plots.Length; i++)
+						Plots[i].Brush = Brushes.Transparent;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -160,7 +174,14 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				waitDnLongDiv		= -1;
 
 				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
-				stoch		= Stochastics(StochPeriodD, StochPeriodK, StochSmooth);	// 인자 순서: periodD, periodK, smooth
+				// 스토캐스틱: TradingView Pine v6 Stochastic과 동일하게 직접 계산 (SMA 스무딩)
+				// 원시 %K = 100 × (종가 − 최저 저가) / (최고 고가 − 최저 저가), periodK = StochPeriodK
+				// %K = SMA(원시 %K, StochSmooth), %D = SMA(%K, StochPeriodD)
+				stochRawK	= new Series<double>(this);
+				stochLow	= MIN(Low, StochPeriodK);
+				stochHigh	= MAX(High, StochPeriodK);
+				stochK		= SMA(stochRawK, StochSmooth);
+				stochD		= SMA(K, StochPeriodD);	// K 플롯(Values[0])의 SMA
 				rsi			= RSI(RsiPeriod, 3);									// 두 번째 인자는 평균선용, RSI 값과 무관
 				macdTurn	= TQ_MacdTurn(MacdFast, MacdSlow, MacdSmooth, MacdConfirmBars, BandAtrPeriod, MacdMinChangeAtr);
 				sma			= SMA(SmaPeriod);
@@ -190,9 +211,15 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		protected override void OnBarUpdate()
 		{
-			// 숫자 값 (docs/interface.md) 
-			K[0]			= stoch.K[0];
-			D[0]			= stoch.D[0];
+			// 숫자 값 (docs/interface.md)
+			// 스토캐스틱 (TradingView Pine v6과 동일): 원시 %K → SMA(smoothK)=%K → SMA(periodD)=%D
+			double stochLL		= stochLow[0];
+			double stochHH		= stochHigh[0];
+			double stochRange	= stochHH - stochLL;
+			// 범위가 0이면(고가=저가) 직전 값 유지. 유동성 있는 선물에서는 거의 없음
+			stochRawK[0]	= stochRange == 0 ? (CurrentBar == 0 ? 50 : stochRawK[1]) : 100 * (Close[0] - stochLL) / stochRange;
+			K[0]			= stochK[0];		// 원시 %K를 StochSmooth로 스무딩
+			D[0]			= stochD[0];		// %K를 StochPeriodD로 스무딩
 			Rsi[0]			= rsi[0];
 			MacdHist[0]		= macdTurn.Hist[0];
 			Sma20[0]		= sma[0];
@@ -539,6 +566,10 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "ShowDebugVisuals", Description = "검증용 화살표 표시", GroupName = "Parameters", Order = 24)]
 		public bool ShowDebugVisuals { get; set; }
+
+		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다(전략 호출부·생성 코드 그대로)
+		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 25)]
+		public bool ShowPlots { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 3)]
