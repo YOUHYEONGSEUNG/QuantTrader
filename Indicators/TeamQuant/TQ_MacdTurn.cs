@@ -42,6 +42,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				MinChangeAtr				= 0;
 
 				AddPlot(new Stroke(Brushes.Gray, 2), PlotStyle.Bar, "Hist");
+				AddPlot(new Stroke(Brushes.DodgerBlue, 2), PlotStyle.Line, "MacdLine");	// MACD선 (파란색)
+				AddPlot(new Stroke(Brushes.Orange, 2), PlotStyle.Line, "SignalLine");	// 시그널선 (주황색)
 				AddLine(Brushes.DarkGray, 0, "Zero");
 			}
 			else if (State == State.DataLoaded)
@@ -55,7 +57,9 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		protected override void OnBarUpdate()
 		{
-			Hist[0] = macd.Diff[0];
+			Hist[0]			= macd.Diff[0];
+			Values[1][0]	= macd.Default[0];	// MACD선
+			Values[2][0]	= macd.Avg[0];		// 시그널선
 
 			bool isUp	= false;
 			bool isDown	= false;
