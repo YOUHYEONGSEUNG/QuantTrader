@@ -38,16 +38,16 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				IsSuspendedWhileInactive	= true;
 
 				// spec 8장 기본값
-				Fast						= 20;
-				Mid							= 60;
-				Slow						= 120;
+				Fast						= 6;
+				Mid							= 18;
+				Slow						= 36;
 				UseRule12					= true;		// spec 3장 1.2·2.2
 				ShowDebugVisuals			= false;
 
-				// 실험 옵션 (레짐 전환을 빠르게). 기본값은 spec 3장과 같은 동작
-				Rule12Bars					= 5;		// spec 3장 1.2·2.2의 비교 구간 (최근 5봉 vs 그 전 5봉)
-				Rule12PriceFilter			= false;
-				FastTrendBars				= 0;		// 0 = 사용 안 함
+				// 레짐 전환을 빠르게 하는 옵션. 기본값은 운용 기본값이다 (spec 8장). Fast/Mid/Slow도 6/18/36(명세 20/60/120)
+				Rule12Bars					= 3;		// 1.2·2.2의 비교 구간. 명세는 5 (최근 5봉 vs 그 전 5봉)
+				Rule12PriceFilter			= true;
+				FastTrendBars				= 2;		// 0 = 사용 안 함
 				FastTrendSlope				= false;
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다

@@ -99,7 +99,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				EntriesPerDirection	= 1;
 				EntryHandling		= EntryHandling.UniqueEntries;	// 시그널명별 분할 진입
 
-				// spec 8장 기본값
+				// 기본값 = 운용 기본값 (spec 8장의 "운용 기본값" 열, 2026-10-09 기준).
+				// 뒤에 "명세 N"이라고 적힌 줄은 원래 명세 값과 다르게 둔 것이다. 팀 확정 전까지의 임시 값이다
+
+				// 지표 계산값 (명세와 같음)
 				BandMidPeriod		= 26;
 				BandAtrPeriod		= 14;
 				BandMult1			= 1;
@@ -121,51 +124,62 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				RsiLow				= 20;
 				DivFrom				= 5;
 				DivTo				= 30;
-				SwingBars			= 5;
-				StopPercent			= 0.2;
-				T1Window			= 3;
-				RegimeFast			= 20;
-				RegimeMid			= 60;
-				RegimeSlow			= 120;
-				MomentumSmaPeriod	= 20;
-				UseRule12			= true;		// spec 3장 1.2·2.2
-				EntryQuantity		= 30;
-				MaxQuantity			= 40;
-				MinEntries			= 2;		// spec 7장: 종목당 최소 진입 (나스닥 2, 골드 2)
-				ContestStartTime	= 223000;	// 22:30:00 KST
-				EntryEndTime		= 1500;		// 00:15:00 KST
-				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
-				BlockReentryAfterStop	= true;
-				BreakevenAtR		= 1;
-				UseCounterTrend		= true;
-				UseTestEntry		= false;
-				ShowStatus			= true;
 
-				// 실험 옵션 (spec 미반영, 백테스트 비교용). 기본값은 모두 지금 명세와 같은 동작이다
-				MinStopAtr			= 0;		// 0 = 사용 안 함
-				UseSwingStop		= true;
-				DnShortNeedBoth		= false;
-				LogToFile			= true;
-				TrendT2Entry		= false;
-				TradeLogToFile		= true;
-				FastTrendSlope		= false;
-				DnLongNeedDiv		= false;
-				CounterQtyPercent	= 100;
-
-				// 진입 밴드 배수와 추세별 대기 봉 수. 기본값은 spec 5장
-				UpLongBand			= 1;
+				// 진입 — 추세별 밴드 배수와 반전 신호 대기 봉 수
+				UpLongBand			= 0;		// 명세 1. 0 = 중심선
 				UpShortBand			= 3;
+				DnShortBand			= 0;		// 명세 2. 0 = 중심선
+				DnShortNeedBoth		= false;
 				DnLongBand			= 3;
-				DnShortBand			= 2;
+				DnLongNeedDiv		= false;
 				SideBand			= 2;
+				T1Window			= 5;		// 명세 3
 				T1WindowUp			= 0;		// 0 = T1Window 사용
 				T1WindowDn			= 0;
 				T1WindowSide		= 0;
+
+				// 진입 — 공통
+				TrendT2Entry		= true;		// 명세에 없음 (끔과 같음)
+				T2CountConfirmBars	= true;		// 명세에 없음 (끔과 같음)
+				UseCounterTrend		= false;	// 명세 켬
+				CounterQtyPercent	= 100;
+				BlockReentryAfterStop	= true;
+
+				// 추세 판단 (10분봉)
+				RegimeFast			= 6;		// 명세 20
+				RegimeMid			= 18;		// 명세 60
+				RegimeSlow			= 36;		// 명세 120
+				UseRule12			= true;
+				Rule12Bars			= 3;		// 명세 5
+				Rule12PriceFilter	= true;		// 명세에 없음 (끔과 같음)
+				FastTrendBars		= 2;		// 명세에 없음 (0과 같음)
+				FastTrendSlope		= false;
+
+				// 손절·본절
+				StopPercent			= 0.2;
+				UseSwingStop		= true;
+				SwingBars			= 5;
+				MinStopAtr			= 1;		// 명세에 없음 (0과 같음)
+				BreakevenAtR		= 1;
+
+				// 청산
 				SideRestBand		= 3;
 				SideRestNarrowTime	= 223000;
-				Rule12Bars			= 5;
-				Rule12PriceFilter	= false;
-				FastTrendBars		= 0;		// 0 = 사용 안 함
+				MomentumSmaPeriod	= 20;
+
+				// 수량·대회 시간 (spec 6·7장)
+				EntryQuantity		= 30;
+				MaxQuantity			= 40;
+				MinEntries			= 2;		// 종목당 최소 진입 (나스닥 2, 골드 2)
+				ContestStartTime	= 223000;	// 22:30:00 KST
+				EntryEndTime		= 1500;		// 00:15:00 KST
+				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
+
+				// 화면·기록·테스트
+				ShowStatus			= true;
+				LogToFile			= true;
+				TradeLogToFile		= true;
+				UseTestEntry		= false;
 			}
 			else if (State == State.Configure)
 			{
@@ -185,7 +199,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								StochPeriodK, StochSmooth, StochPeriodD,
 								MomentumSmaPeriod, MacdConfirmBars, MacdMinChangeAtr, false,
 								UpLongBand, UpShortBand, DnLongBand, DnShortBand, SideBand,
-								T1WindowUp, T1WindowDn, T1WindowSide);
+								T1WindowUp, T1WindowDn, T1WindowSide, T2CountConfirmBars);
 
 				// 로그 파일: 내 문서\NinjaTrader 8\TQ_log_종목.txt (LogToFile)
 				logPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -221,12 +235,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로 (기본값에서 자주 바꾸는 것만). 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30}",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31}",
 				Instrument.FullName, BarsPeriod.Value, UpLongBand, UpShortBand, DnShortBand, DnLongBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, UseCounterTrend, BlockReentryAfterStop, DnShortNeedBoth,
 				RegimeFast, RegimeMid, RegimeSlow, UseRule12, Rule12Bars, Rule12PriceFilter, FastTrendBars,
 				StopPercent, UseSwingStop, MinStopAtr, BreakevenAtR, SideRestBand, MacdConfirmBars, TrendT2Entry,
-				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent);
+				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -1480,6 +1494,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "추세 방향 진입: 밴드 조건 없이 MACD 전환 + 크로스로도 (TrendT2Entry)", Description = "켜면 상승추세에서 MACD 상승 전환 + 골든크로스가 같이 나오면 주력 매수, 하락추세에서 MACD 하락 전환 + 데드크로스면 주력 매도. 밴드까지 눌리지(반등하지) 않는 추세에서 진입하기 위함. 명세에는 횡보에만 있는 조건", GroupName = "4. 진입 — 공통", Order = 5)]
 		public bool TrendT2Entry { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "MACD + 크로스 동시 조건: MACD가 꺾인 봉의 크로스도 인정 (T2CountConfirmBars)", Description = "MACD 전환은 2봉 연속이어야 확인되므로 실제로 꺾인 봉은 확인 봉보다 앞이다. 켜면 전환이 처음 확인된 봉에서, 확인에 걸린 봉 수만큼 앞에서 나온 골든·데드크로스도 같이 나온 것으로 인정한다. 진입과 청산의 'MACD 전환 + 크로스' 조건 모두에 적용", GroupName = "4. 진입 — 공통", Order = 7)]
+		public bool T2CountConfirmBars { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "역추세 진입 사용 (UseCounterTrend)", Description = "상승추세 매도(5.2)와 하락추세 매수(5.3)를 할지. 끄면 추세 방향 진입과 횡보 진입만", GroupName = "4. 진입 — 공통", Order = 1)]

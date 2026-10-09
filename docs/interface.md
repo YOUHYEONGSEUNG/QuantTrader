@@ -24,12 +24,12 @@
 ## TQ_Regime (A) — 입력: 10분봉 (전략에서 `TQ_Regime(BarsArray[1])`)
 | 설정값 | 기본값 |
 | --- | --- |
-| Fast / Mid / Slow (SMA) | 20 / 60 / 120 |
+| Fast / Mid / Slow (SMA) | 6 / 18 / 36 (운용 기본값. 명세 20 / 60 / 120) |
 | UseRule12 | true (spec 3장 1.2·2.2) |
 | ShowDebugVisuals | false (검증용 배경색) |
-| Rule12Bars | 5 (1.2·2.2 비교 구간 봉 수. spec 3장은 5) |
-| Rule12PriceFilter | false (실험: 1.2·2.2를 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정) |
-| FastTrendBars | 0 (실험: 종가가 N봉 연속 SMA Fast 위·아래면 상승·하락추세. 0 = 사용 안 함) |
+| Rule12Bars | 3 (운용 기본값. 1.2·2.2 비교 구간 봉 수. spec 3장은 5) |
+| Rule12PriceFilter | true (운용 기본값. 실험: 1.2·2.2를 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정) |
+| FastTrendBars | 2 (운용 기본값. 실험: 종가가 N봉 연속 SMA Fast 위·아래면 상승·하락추세. 0 = 사용 안 함) |
 | FastTrendSlope | false (실험: 위 판정에 SMA Fast가 FastTrendBars봉 전보다 높아야 상승, 낮아야 하락이라는 조건 추가) |
 
 판정 순서: 이동평균 조건(1.1·2.1) → FastTrendBars(켰을 때) → 1.2·2.2(UseRule12) → 횡보.
@@ -58,7 +58,7 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 ## TQ_Signals (A) — 입력: 3분봉
 | 설정값 | 기본값 |
 | --- | --- |
-| T1Window (N) | 3 |
+| T1Window (N) | 5 (운용 기본값. 명세 3) |
 | CrossFilterBars | 5 |
 | CrossLow / CrossHigh | 20 / 80 |
 | RsiPeriod | 14 |
@@ -73,6 +73,7 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 | MacdConfirmBars | 2 (MACD 전환 확인 봉 수. TQ_MacdTurn의 ConfirmBars로 넘김) |
 | MacdMinChangeAtr | 0 (MACD 전환 최소 변화폭, ATR 배수. TQ_MacdTurn의 MinChangeAtr로 넘김) |
 | ShowDebugVisuals | false (검증용 화살표) |
+| T2CountConfirmBars | true (T2에서 MACD 확인에 걸린 봉 수만큼 앞의 크로스도 인정. spec 2장 T2) |
 
 설정값 타입: 기간·봉 수는 int, 기준값(CrossLow/High, RsiHigh/Low)과 배수는 double, UseRule12·ShowDebugVisuals는 bool.
 전략은 TQ_ATRChannels와 TQ_Signals에 같은 밴드 설정값을 넘긴다.
@@ -97,8 +98,8 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 | Golden, Dead | 필터 적용된 골든·데드크로스 |
 | K80CrossUp, K20CrossDown | %K 80 상향 돌파 / 20 하방 돌파 |
 | BearDiv | 현재 봉 기준 하락 다이버전스 |
-| T2Bull | MacdUp AND Golden (같은 봉 또는 연속 2봉, spec T2) |
-| T2Bear | MacdDown AND Dead (같은 봉 또는 연속 2봉, spec T2) |
+| T2Bull | MacdUp AND Golden (같은 봉 또는 연속 2봉, spec T2). T2CountConfirmBars가 켜져 있으면 MacdUp이 처음 참이 된 봉에서 2~MacdConfirmBars봉 전의 Golden도 인정 |
+| T2Bear | MacdDown AND Dead (같은 봉 또는 연속 2봉, spec T2). T2CountConfirmBars는 위와 같이 Dead에 적용 |
 
 진입 신호 (Series&lt;bool&gt;) — 레짐과 무관하게 계산, B가 레짐에 맞는 것만 사용
 
@@ -118,14 +119,14 @@ T1 대기 상태 (int) — 전략의 화면 표시용. 매매 판단에는 쓰�
 | WaitUpLong, WaitUpShort, WaitDnLong, WaitDnShort, WaitSideLong, WaitSideShort | 진입 신호별 대기 상태. −1 = 대기 없음, 0 = 밴드 조건이 충족된 봉, 1 이상 = 그 뒤 지난 봉 수 |
 | T1Bars | 실제 대기 봉 수 (T1Window + MacdConfirmBars − 1) |
 
-진입 밴드 배수와 레짐별 대기 봉 수 (설정값, int) — 기본값이면 위 표의 spec 조건과 같다
+진입 밴드 배수와 레짐별 대기 봉 수 (설정값, int) — 괄호 안의 명세 값이면 위 표의 spec 조건과 같다. 지표 기본값은 운용 기본값이다 (spec 8장)
 
 | 설정값 | 기본값 | 의미 |
 | --- | --- | --- |
-| UpLongBand | 1 | EntryUpLong의 밴드 조건: 몇 배 밴드 하방 돌파. UpLongBand·DnLongBand·DnShortBand는 0도 받는다(0 = 중심선 Mid 돌파) |
+| UpLongBand | 0 (명세 1) | EntryUpLong의 밴드 조건: 몇 배 밴드 하방 돌파. UpLongBand·DnLongBand·DnShortBand는 0도 받는다(0 = 중심선 Mid 돌파) |
 | UpShortBand | 3 | EntryUpShort의 밴드 조건: 고가가 몇 배 밴드에 터치 |
 | DnLongBand | 3 | EntryDnLong의 밴드 조건: 몇 배 밴드 하방 돌파 |
-| DnShortBand | 2 | EntryDnShort의 밴드 조건: 몇 배 밴드 상방 돌파 |
+| DnShortBand | 0 (명세 2) | EntryDnShort의 밴드 조건: 몇 배 밴드 상방 돌파 |
 | SideBand | 2 | EntrySideLong·EntrySideShort의 밴드 조건: 이 배수와 그 바깥 밴드의 돌파 |
 | T1WindowUp / T1WindowDn / T1WindowSide | 0 | 상승추세(5.1·5.2) / 하락추세(5.3·5.4) / 횡보(5.5·5.6) 진입 신호의 T1 대기 봉 수. 0이면 T1Window를 쓴다 |
 
@@ -142,7 +143,7 @@ T1 대기 상태 (int) — 전략의 화면 표시용. 매매 판단에는 쓰�
 
 T1 처리 규칙 (spec 2장 T1)
 - 밴드 조건이 충족된 봉(t) 다음 봉부터 대기 봉 수 안에서만 반전 신호를 본다. 봉 t 자체의 반전 신호는 세지 않는다.
-- 대기 봉 수 = T1Window + (MacdConfirmBars − 1). 기본값이면 3 + 1 = 4봉.
+- 대기 봉 수 = T1Window + (MacdConfirmBars − 1). 운용 기본값이면 5 + 1 = 6봉 (명세 값이면 3 + 1 = 4봉).
 - 밴드 조건 1번당 진입 신호는 1번이다. 신호가 나가면 그 대기는 소멸한다. 지표는 포지션을 모르므로, B가 보유 중이라 쓰지 못한 신호도 그 밴드 조건의 기회를 쓴 것으로 본다.
 - 대기 중에 같은 밴드 조건이 새로 충족되면 그 봉을 새 t로 보고 다시 센다.
 - 신호가 나온 봉이 동시에 새 밴드 조건 봉이면, 먼저 기존 대기로 신호를 판정하고 그다음 그 봉을 새 t로 등록한다(다음 봉부터 센다).
