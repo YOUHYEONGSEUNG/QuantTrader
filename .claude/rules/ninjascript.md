@@ -15,7 +15,8 @@
 - 멀티 시리즈: BarsInProgress로 어느 시리즈가 업데이트됐는지 확인한다. 3분봉과 10분봉이 같은 시각에 닫히면 primary(3분)가 먼저 처리되고 10분 값은 그 뒤에 갱신된다. 그래서 3분 로직은 직전에 마감된 10분 값을 본다. 1봉 지연 허용 (spec 3장).
 
 ## 내장 지표
-- 스토캐스틱 인자 순서는 Stochastics(periodD, periodK, smooth). spec 설정 = `Stochastics(5, 10, 5)`. 값은 `.K`, `.D`.
+- 스토캐스틱: `TQ_Signals`와 `TQ_Stochastic`은 2026-10-09부터 내장 지표를 부르지 않고 직접 계산한다. 원시 %K = 100 × (종가 − 최저 저가) / (최고 고가 − 최저 저가), 구간 %K 길이 → %K = SMA(원시 %K, %K 스무딩) → %D = SMA(%K, %D 스무딩). 내장 `Stochastics`와 같은 식이다(`Indicators/@Stochastics.cs`와 대조함). 스토캐스틱 계산을 고칠 때는 두 지표를 같이 고친다.
+  - 내장 지표를 따로 쓸 일이 있으면 인자 순서는 Stochastics(periodD, periodK, smooth)이고 spec 설정은 `Stochastics(5, 10, 5)`, 값은 `.K`, `.D`다.
 - MACD 히스토그램 = `MACD(12, 26, 9).Diff`.
 - RSI 값 = `RSI(14, 3)[0]` (두 번째 인자는 평균선용 smooth로 RSI 값에는 영향 없음).
 - ATR Channels는 내장 지표가 없다. KeltnerChannel로 대체하지 말고 spec 2장대로 직접 구현한다.

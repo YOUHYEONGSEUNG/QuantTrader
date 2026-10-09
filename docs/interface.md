@@ -31,6 +31,9 @@
 | Rule12PriceFilter | true (운용 기본값. 실험: 1.2·2.2를 종가가 SMA Fast의 맞는 쪽에 있을 때만 인정) |
 | FastTrendBars | 2 (운용 기본값. 실험: 종가가 N봉 연속 SMA Fast 위·아래면 상승·하락추세. 0 = 사용 안 함) |
 | FastTrendSlope | false (실험: 위 판정에 SMA Fast가 FastTrendBars봉 전보다 높아야 상승, 낮아야 하락이라는 조건 추가) |
+| ShowPlots | false (차트 표시 전용. 끄면 플롯 선을 투명으로 숨긴다. 생성자 인자가 아니라서 전략 호출부에는 없다) |
+
+차트에 올리면 가격 패널에 얹힌다(IsOverlay = true, IsAutoScale = false). 입력 시리즈는 전략이 정한다: 기본은 10분봉이고, 전략의 `RegimeBarMinutes`가 3이면 3분봉이다.
 
 판정 순서: 이동평균 조건(1.1·2.1) → FastTrendBars(켰을 때) → 1.2·2.2(UseRule12) → 횡보.
 
@@ -53,7 +56,19 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 | 이름 | 타입 | 의미 |
 | --- | --- | --- |
 | Hist | 플롯 | MACD(Fast, Slow, Smooth).Diff |
+| MacdLine, SignalLine | 플롯 | MACD선(파랑)과 시그널선(주황). 차트 표시용이고 판정에는 쓰지 않는다 (2026-10-09 추가) |
 | Up, Down | Series&lt;bool&gt; | 히스토그램이 ConfirmBars봉 연속 증가 / 감소했고 그 구간의 변화폭이 MinChangeAtr × ATR 이상 |
+
+## TQ_Stochastic — 입력: 3분봉 (차트 표시 전용, 2026-10-09 추가)
+TQ_Signals의 스토캐스틱과 같은 식으로 %K·%D를 계산해 독립 패널에 그린다. 눈으로 검증하는 용도이고 전략과 TQ_Signals는 이 지표를 호출하지 않는다.
+
+| 설정값 | 기본값 |
+| --- | --- |
+| PeriodK / SmoothK / PeriodD | 10 / 5 / 5 (TQ_Signals의 StochPeriodK / StochSmooth / StochPeriodD와 같은 값으로 맞춘다) |
+
+| 플롯 | 의미 |
+| --- | --- |
+| K, D | %K(파랑), %D(주황). 기준선 80 / 50 / 20 |
 
 ## TQ_Signals (A) — 입력: 3분봉
 | 설정값 | 기본값 |
@@ -74,6 +89,9 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 | MacdMinChangeAtr | 0 (MACD 전환 최소 변화폭, ATR 배수. TQ_MacdTurn의 MinChangeAtr로 넘김) |
 | ShowDebugVisuals | false (검증용 화살표) |
 | T2CountConfirmBars | true (T2에서 MACD 확인에 걸린 봉 수만큼 앞의 크로스도 인정. spec 2장 T2) |
+| ShowPlots | false (차트 표시 전용. 끄면 플롯 선을 투명으로 숨긴다. 값과 전략 동작은 그대로다. 생성자 인자가 아니라서 전략 호출부에는 없다) |
+
+차트에 올리면 가격 패널에 얹힌다(IsOverlay = true, IsAutoScale = false). 별도 패널을 만들지 않기 위함이고, 플롯 값을 눈으로 보려면 ShowPlots를 켠다.
 
 설정값 타입: 기간·봉 수는 int, 기준값(CrossLow/High, RsiHigh/Low)과 배수는 double, UseRule12·ShowDebugVisuals는 bool.
 전략은 TQ_ATRChannels와 TQ_Signals에 같은 밴드 설정값을 넘긴다.
@@ -82,7 +100,7 @@ MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하�
 
 | 이름 | 의미 |
 | --- | --- |
-| K, D | Stochastics(StochPeriodD, StochPeriodK, StochSmooth)의 %K, %D. 기본값 Stochastics(5, 10, 5) |
+| K, D | 스토캐스틱 %K, %D. 2026-10-09부터 지표 안에서 직접 계산한다: 원시 %K = 100 × (종가 − 최저 저가) / (최고 고가 − 최저 저가), 구간 StochPeriodK → %K = SMA(원시 %K, StochSmooth) → %D = SMA(%K, StochPeriodD). 내장 Stochastics(StochPeriodD, StochPeriodK, StochSmooth)와 같은 식이고 기본값은 Stochastics(5, 10, 5)에 해당한다 |
 | Rsi | RSI(RsiPeriod). 기본값 RSI(14) |
 | MacdHist | MACD(MacdFast, MacdSlow, MacdSmooth).Diff. 기본값 MACD(12, 26, 9) |
 | Sma20 | 3분봉 SMA(SmaPeriod). 기본값 SMA20 (spec 5.1 강한 모멘텀 청산용) |

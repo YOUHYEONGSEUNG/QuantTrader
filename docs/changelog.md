@@ -5,6 +5,19 @@
 
 ## 2026-10-09
 
+### 스토캐스틱을 직접 계산으로 변경, 시각화 지표와 표시 토글 추가 (팀원 커밋 `0c4c5ae`, `fceab84` — 사후 기록)
+코드는 팀원(YOUHYEONGSEUNG)이 올렸고, 이 항목은 받은 뒤 내용을 대조해 적은 것이다. 바꾼 이유는 커밋 주석에서 읽은 것이라 본인 확인이 필요하다.
+
+- **스토캐스틱 계산 (`TQ_Signals.cs`):** 내장 `Stochastics(5, 10, 5)` 호출을 없애고 지표 안에서 직접 계산한다. 원시 %K → SMA(%K 스무딩) = %K → SMA(%D 스무딩) = %D. 주석에 적힌 이유는 TradingView(Pine v6) 스토캐스틱과 같은 식으로 맞추는 것이다.
+  - **값이 달라지는가:** 내장 지표 소스(`Indicators/@Stochastics.cs`)와 식이 같다. 차이는 내장 쪽이 원시 %K를 0~100으로 자르는 것뿐인데, 종가는 구간의 최고가와 최저가 사이에 있어 실제로는 차이가 나지 않는다. 그래서 %K·%D와 골든·데드크로스, 진입·청산 신호는 그대로일 것으로 본다. **변경 전후를 같은 구간에서 돌려 비교한 것은 아니다.**
+  - TradingView 값과 실제로 맞는지 비교한 결과는 기록에 없다.
+- **`TQ_Stochastic.cs` (새 지표):** 같은 식의 %K·%D와 80 / 50 / 20 기준선을 독립 패널에 그린다. 차트 검증용이고 전략은 쓰지 않는다.
+- **`TQ_MacdTurn.cs`:** MACD선(파랑)과 시그널선(주황) 플롯 추가. 전환 판정은 그대로다.
+- **표시 토글 `ShowPlots` (`TQ_Signals`, `TQ_Regime`, 기본 끔):** 두 지표를 가격 패널에 얹고(IsOverlay = true, IsAutoScale = false) 플롯 선을 투명으로 숨긴다. 차트에 올렸을 때 별도 패널이 생기지 않게 하려는 것이다. 생성자 인자가 아니라서 전략 호출부와 자동 생성 영역은 바뀌지 않았다.
+- **확인한 것:** 받아서 합친 상태로 MSBuild 컴파일(에러 0). NinjaTrader에서 실행해 본 것은 아니다.
+- **문서:** `docs/interface.md`와 `.claude/rules/ninjascript.md`를 여기에 맞췄다. `docs/spec.md` 2장의 "(NinjaTrader: Stochastics(5, 10, 5))"는 값이 같아 그대로 뒀다.
+- **파일:** `TQ_Signals.cs`, `TQ_Regime.cs`, `TQ_MacdTurn.cs`, `TQ_Stochastic.cs`(신규), `docs/interface.md`, `.claude/rules/ninjascript.md`.
+
 ### 추세를 3분봉으로도 판단할 수 있는 옵션 (`RegimeBarMinutes`, 기본 10 — 기본값은 명세와 같은 동작)
 - **무엇을:** 추세(레짐)를 판단하는 봉을 10분봉(명세 3장) 또는 3분봉으로 고른다. 3과 10만 쓸 수 있다.
 - **구현:** 전략이 10분봉과 3분봉 시리즈를 항상 둘 다 추가하고(`AddDataSeries`는 인자를 변수로 줄 수 없다), `TQ_Regime`에 넘기는 시리즈만 바꾼다. 지표는 고치지 않았다.
