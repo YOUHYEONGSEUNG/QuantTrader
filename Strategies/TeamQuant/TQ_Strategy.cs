@@ -66,6 +66,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				trBars;
 		private string			trExits			= "";
 		private int				tradeQty;						// 이번 진입의 총 수량 (역추세는 CounterQtyPercent 적용)
+		private string			mlPath;							// MlLogToFile용 학습 데이터 파일 경로
+		private string			mlRunId			= "";			// 학습 데이터: 이번 실행 ID (같은 백테스트를 여러 번 돌린 중복 제거용)
+		private string			mlSettingsId	= "";			// 학습 데이터: 설정 요약의 해시 (설정별로 나눠 보기용)
+		private bool			mlHeaderWritten;				// 학습 데이터: 이번 실행의 설정 줄을 썼음
+		private string			mlFeatures		= "";			// 학습 데이터: 신호 봉에서 잰 특징값 (CSV 조각)
+		private double			mlPrevR			= double.NaN;	// 학습 데이터: 직전 거래의 손익(R)
+		private DateTime		mlPrevExit		= DateTime.MinValue;	// 학습 데이터: 직전 거래의 청산 시각
 		private ATR				atr;						// 실험 옵션 MinStopAtr용 3분봉 ATR
 		private double			stopAtr			= double.NaN;	// 신호 봉의 ATR (손절 거리 하한 계산용)
 		private Brush			upBackBrush;				// 화면 표시용: 상승추세 배경색
@@ -185,6 +192,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				ShowStatus			= true;
 				LogToFile			= true;
 				TradeLogToFile		= true;
+				MlLogToFile			= true;
 				UseTestEntry		= false;
 			}
 			else if (State == State.Configure)
@@ -221,6 +229,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								"NinjaTrader 8", "TQ_log_" + Instrument.MasterInstrument.Name + ".txt");
 				tradePath	= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
 								"NinjaTrader 8", "TQ_trades_" + Instrument.MasterInstrument.Name + ".csv");
+				mlPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+								"NinjaTrader 8", "TQ_ml_" + Instrument.MasterInstrument.Name + ".csv");
+				mlRunId		= DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+				// 설정 ID는 종목 이름([MNQ DEC26])을 빼고 만든다. 월물이 달라도 같은 설정이면 같은 ID
+				string summary	= SettingsSummary();
+				int cut			= summary.IndexOf("] ");
+				mlSettingsId	= HashText(cut >= 0 ? summary.Substring(cut + 2) : summary);
 
 				atr			= ATR(BandAtrPeriod);
 
@@ -303,6 +318,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (!trOpen)
 				return;
 			trOpen = false;
+			MlEnd();
 			if (!TradeLogToFile || tradePath == null || entryFillQty <= 0)
 				return;
 
@@ -343,6 +359,175 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			{
 				// 파일을 못 써도 매매에는 영향이 없게 한다
 			}
+		}
+		#endregion
+
+		#region 학습 데이터 파일 (MlLogToFile) — 매매 판단에는 영향 없음
+		// 거래 1건마다 한 줄을 내 문서\NinjaTrader 8\TQ_ml_종목.csv에 쓴다.
+		// 진입 신호 봉에서 잰 특징값(지표 상태)과 그 거래의 결과를 한 줄에 같이 둬서, 어떤 신호가 손절로 끝나는지 학습·분석하는 데 쓴다.
+		// 열 이름은 Python(pandas)에서 바로 쓰도록 영어로 둔다. '#'으로 시작하는 줄은 실행별 설정 요약이다 (read_csv(comment='#'))
+		private const string MlHeader =
+			"run_id,settings_id,mode,instrument,bar_min,"
+			+ "signal_time,weekday,hhmm,strategy,regime,dir,via_t2,"
+			+ "close,atr,atr_pct,stop_dist_atr,mid_dist_atr,sma20_dist_atr,"
+			+ "macd_hist_atr,macd_slope_atr,k,d,k_minus_d,rsi,"
+			+ "macd_up,macd_down,golden,dead,bar_range_atr,swing_range_atr,vol_ratio,"
+			+ "htf_sma20_dist_atr,regime_age,regime_changes6,session_entry_no,prev_r,min_since_prev_exit,"
+			+ "exit_time,hold_bars,qty,avg_price,risk_pts,pnl_pts,pnl_usd,pnl_r,mfe_pts,mae_pts,mfe_r,mae_r,win,exits";
+
+		// 신호 봉(BIP 0, 진입 주문을 내는 봉)에서 특징값을 잰다. BeginTrade 끝에서 부른다.
+		// ATR로 나눈 값은 종목·시기에 따라 가격 단위가 달라도 비교할 수 있게 하기 위함이다
+		private void MlBegin(ActiveStrategy act)
+		{
+			mlFeatures = "";
+			if (!MlLogToFile)
+				return;
+
+			double a	= atr[0];
+			double c	= Close[0];
+			bool okA	= a > 0;
+			int r		= (int)regime.Regime[0];
+
+			// 밴드 조건 없이 T2로만 들어간 추세 방향 진입인지 (TrendT2Entry)
+			int viaT2 = 0;
+			if (act == ActiveStrategy.UpLong && !signals.EntryUpLong[0])	viaT2 = 1;
+			if (act == ActiveStrategy.DnShort && !DnShortSignal())			viaT2 = 1;
+
+			// 거래량: 직전 20봉 평균 대비
+			int volBars = Math.Min(20, CurrentBar);
+			double volSum = 0;
+			for (int i = 1; i <= volBars; i++)
+				volSum += Volume[i];
+			double volRatio = volSum > 0 ? Volume[0] / (volSum / volBars) : double.NaN;
+
+			// 추세 봉 기준: 지금 추세가 몇 봉째 이어지는지, 최근 6봉 동안 추세가 몇 번 바뀌었는지
+			int maxBack = Math.Min(200, CurrentBars[regimeBip]);
+			int age = 1;
+			while (age < maxBack && (int)regime.Regime[age] == r)
+				age++;
+			int changes = 0;
+			for (int i = 0; i < 6 && i + 1 <= CurrentBars[regimeBip]; i++)
+				if ((int)regime.Regime[i] != (int)regime.Regime[i + 1])
+					changes++;
+
+			double htfDist = double.IsNaN(regime.Sma20[0]) ? double.NaN : Closes[regimeBip][0] - regime.Sma20[0];
+
+			mlFeatures = string.Join(",", new string[]
+			{
+				Time[0].ToString("yyyy-MM-dd HH:mm:ss"),
+				((int)Time[0].DayOfWeek).ToString(),
+				(ToTime(Time[0]) / 100).ToString(),
+				act.ToString(),
+				r.ToString(),
+				isLongPos ? "1" : "-1",
+				viaT2.ToString(),
+				Ml(c),
+				Ml(a),
+				Ml(c > 0 ? a / c * 100 : double.NaN),
+				Ml(okA ? Math.Abs(c - initialStop) / a : double.NaN),
+				Ml(okA ? (c - channels.Mid[0]) / a : double.NaN),
+				Ml(okA ? (c - signals.Sma20[0]) / a : double.NaN),
+				Ml(okA ? signals.MacdHist[0] / a : double.NaN),
+				Ml(okA ? (signals.MacdHist[0] - signals.MacdHist[1]) / a : double.NaN),
+				Ml(signals.K[0]),
+				Ml(signals.D[0]),
+				Ml(signals.K[0] - signals.D[0]),
+				Ml(signals.Rsi[0]),
+				signals.MacdUp[0] ? "1" : "0",
+				signals.MacdDown[0] ? "1" : "0",
+				signals.Golden[0] ? "1" : "0",
+				signals.Dead[0] ? "1" : "0",
+				Ml(okA ? (High[0] - Low[0]) / a : double.NaN),
+				Ml(okA ? (signals.SwingHigh5[0] - signals.SwingLow5[0]) / a : double.NaN),
+				Ml(volRatio),
+				Ml(okA ? htfDist / a : double.NaN),
+				age.ToString(),
+				changes.ToString(),
+				(entryCount + 1).ToString(),	// 이번 대회 구간의 몇 번째 진입인지 (entryCount는 체결 후 증가)
+				Ml(mlPrevR),
+				mlPrevExit == DateTime.MinValue ? "" : Ml((Time[0] - mlPrevExit).TotalMinutes)
+			});
+		}
+
+		// 거래가 끝나면(보유 → 미보유) 특징값 뒤에 결과를 붙여 한 줄을 쓴다. TradeEnd에서 부른다
+		private void MlEnd()
+		{
+			if (entryFillQty <= 0)
+				return;
+
+			double avg		= entryFillSum / entryFillQty;
+			double pnlPts	= trPnlPts / entryFillQty;	// 계약당 평균 손익 (포인트)
+			double risk		= double.IsNaN(trStop0) ? double.NaN : Math.Abs(avg - trStop0);
+			bool okR		= !double.IsNaN(risk) && risk > 0;
+			double pnlR		= okR ? pnlPts / risk : double.NaN;
+
+			// 다음 거래의 특징값(prev_r, min_since_prev_exit)용. 파일 기록을 꺼도 갱신한다
+			mlPrevR		= pnlR;
+			mlPrevExit	= trExitTime;
+
+			if (!MlLogToFile || mlPath == null || mlFeatures.Length == 0)
+				return;
+
+			System.Text.StringBuilder sb = new System.Text.StringBuilder();
+			try
+			{
+				if (!System.IO.File.Exists(mlPath))
+					sb.AppendLine(MlHeader);
+				if (!mlHeaderWritten)
+				{
+					sb.AppendLine("# " + mlRunId + " settings_id=" + mlSettingsId + " " + SettingsSummary().Replace(",", ";"));
+					mlHeaderWritten = true;
+				}
+				sb.AppendLine(string.Join(",", new string[]
+				{
+					mlRunId,
+					mlSettingsId,
+					State == State.Realtime ? "live" : "hist",
+					Instrument.FullName,
+					BarsPeriod.Value.ToString(),
+					mlFeatures,
+					trExitTime.ToString("yyyy-MM-dd HH:mm:ss"),
+					trBars.ToString(),
+					entryFillQty.ToString(),
+					Ml(avg),
+					Ml(risk),
+					Ml(pnlPts),
+					Ml(trPnlPts * Instrument.MasterInstrument.PointValue),
+					Ml(pnlR),
+					Ml(trMfe),
+					Ml(trMae),
+					Ml(okR ? trMfe / risk : double.NaN),
+					Ml(okR ? trMae / risk : double.NaN),
+					pnlPts > 0 ? "1" : "0",
+					trExits
+				}));
+				System.IO.File.AppendAllText(mlPath, sb.ToString(), new System.Text.UTF8Encoding(true));
+			}
+			catch (Exception)
+			{
+				// 파일을 못 써도 매매에는 영향이 없게 한다
+			}
+			mlFeatures = "";
+		}
+
+		// 숫자를 CSV 칸으로: 소수점은 항상 '.', 값이 없으면 빈칸
+		private string Ml(double v)
+		{
+			if (double.IsNaN(v) || double.IsInfinity(v))
+				return "";
+			return v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+		}
+
+		// 설정 요약 문자열의 짧은 해시 (FNV-1a 32비트). 실행이 달라도 같은 설정이면 같은 값이 나온다
+		private string HashText(string text)
+		{
+			uint h = 2166136261;
+			foreach (char ch in text)
+			{
+				h ^= ch;
+				h *= 16777619;
+			}
+			return h.ToString("x8");
 		}
 		#endregion
 
@@ -627,6 +812,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			stopSwing	= isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
 			initialStop	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 계산 (spec 4장)
 			stopPrice	= initialStop;
+			MlBegin(act);	// 학습 데이터: 신호 봉의 특징값 (매매 판단과 무관)
 		}
 
 		// spec 4·6장: 시그널명별 분할 진입. 진입 주문 제출 전에 손절을 먼저 걸어 체결 즉시 손절이 서도록 한다
@@ -1622,6 +1808,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "거래 요약을 파일로 저장 (TradeLogToFile)", Description = "거래 1건이 끝날 때마다 한 줄을 내 문서\\NinjaTrader 8\\TQ_trades_종목.csv에 저장. 백테스트에서도 저장하므로 여러 날 결과를 거래 단위로 볼 수 있음. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "0. 화면·기록·테스트", Order = 3)]
 		public bool TradeLogToFile { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 진입 신호 봉의 지표 상태(특징값)와 그 거래의 결과를 한 줄로 내 문서\\NinjaTrader 8\\TQ_ml_종목.csv에 저장. 백테스트에서도 저장하므로 여러 기간을 돌리면 계속 쌓임. 매매 판단과 무관. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "0. 화면·기록·테스트", Order = 4)]
+		public bool MlLogToFile { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "주문 테스트용 가짜 진입 (UseTestEntry)", Description = "실제 신호를 무시하고 주문 흐름만 확인. 백테스트 때는 반드시 끔", GroupName = "0. 화면·기록·테스트", Order = 2)]

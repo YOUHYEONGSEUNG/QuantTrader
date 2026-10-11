@@ -218,3 +218,42 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | 결과가 지난번과 전혀 다르다 | Data Series의 Value(1인지 3인지), 기간의 To 날짜를 확인한다 |
 | `TargetFrameworkAttribute` 중복 에러 | Visual Studio가 `obj` 폴더를 만들었다. 폴더를 지우고 Visual Studio를 닫는다 |
 | 설정값을 바꿨는데 차트의 지표가 그대로다 | 차트에 올려둔 지표는 예전 설정을 기억한다. 지웠다가 다시 올린다 |
+
+## 9. 학습 데이터 쌓기 (`MlLogToFile`)
+
+`MlLogToFile`(기본 켬)이 켜져 있으면 거래가 끝날 때마다 `내 문서\NinjaTrader 8\TQ_ml_종목.csv`에 한 줄이 쌓인다(예: `TQ_ml_MNQ.csv`). Strategy Analyzer 백테스트에서도 쌓이므로, 기간이나 설정을 바꿔 돌릴 때마다 데이터가 늘어난다. 매매 판단에는 영향이 없다. 머신러닝으로 "어떤 신호가 손절로 끝나는지"를 분석하는 데 쓴다.
+
+- 한 줄 = 거래 1건(분할 진입 한 덩어리). 왼쪽은 **진입 신호 봉에서 잰 특징값**, 오른쪽은 **그 거래의 결과**다.
+- `#`으로 시작하는 줄은 실행별 설정 요약이다. pandas에서는 `pd.read_csv(path, comment='#')`로 읽는다.
+- **같은 구간을 여러 번 돌리면 같은 거래가 중복으로 쌓인다.** 분석할 때 `signal_time`·`instrument`·`settings_id`가 같은 줄은 하나만 남긴다. 차트에 전략을 켤 때도 과거 구간 거래가 다시 쌓인다(`mode` = `hist`).
+- **최적화(Optimize)를 돌릴 때는 끈다.** 설정 조합마다 줄이 쌓이고, 동시에 쓰다가 일부 줄이 빠질 수 있다.
+- 파일을 처음부터 다시 모으려면 파일을 지우거나 이름을 바꾼다. 다음 실행 때 머리글부터 새로 쓴다.
+
+| 열 | 뜻 |
+| --- | --- |
+| run_id | 실행 ID(실행 시작 시각). 같은 실행의 거래는 같은 값 |
+| settings_id | 설정 요약의 해시. 같은 설정이면 월물이 달라도 같은 값. 설정 내용은 `#` 줄에 있다 |
+| mode | `hist` = 과거 데이터(백테스트 포함), `live` = 실시간·Playback |
+| instrument, bar_min | 종목(월물 포함), 진입 봉 분 |
+| signal_time, weekday, hhmm | 신호 봉 시각, 요일(0 = 일요일), 시분(예: 2245, 15 = 00:15) |
+| strategy, regime, dir | 세부 전략(UpLong 등), 추세(+1/0/−1), 방향(1 매수, −1 매도) |
+| via_t2 | 1 = 밴드 조건 없이 MACD 전환 + 크로스(`TrendT2Entry`)로만 들어간 주력 진입 |
+| close, atr, atr_pct | 신호 봉 종가, ATR(14), ATR / 종가 × 100 |
+| stop_dist_atr | 신호 봉 종가 기준 손절 거리 / ATR |
+| mid_dist_atr, sma20_dist_atr | 종가와 밴드 중심선(EMA26), 3분봉 SMA20의 거리 / ATR (+ 위, − 아래) |
+| macd_hist_atr, macd_slope_atr | MACD 히스토그램 / ATR, 직전 봉 대비 변화 / ATR |
+| k, d, k_minus_d, rsi | 스토캐스틱 %K, %D, 그 차이, RSI(14) |
+| macd_up, macd_down, golden, dead | 신호 봉에서 각 조건이 참이면 1 |
+| bar_range_atr, swing_range_atr | 신호 봉 고저폭 / ATR, 최근 5봉 고저폭 / ATR |
+| vol_ratio | 신호 봉 거래량 / 직전 20봉 평균 거래량 |
+| htf_sma20_dist_atr | 추세 봉(10분봉) 종가와 그 봉 SMA20의 거리 / ATR |
+| regime_age | 지금 추세가 추세 봉 기준 몇 봉째 이어지는지 (최대 200) |
+| regime_changes6 | 최근 추세 봉 6개 동안 추세가 바뀐 횟수. 추세가 자주 뒤집히는 날을 잡기 위함 |
+| session_entry_no | 이번 대회 구간에서 몇 번째 진입인지 |
+| prev_r, min_since_prev_exit | 직전 거래 손익(R), 직전 거래 청산 뒤 지난 분 |
+| exit_time, hold_bars, qty, avg_price | 마지막 청산 시각, 보유 봉 수, 체결 수량, 평단 |
+| risk_pts | 체결 직후 평단에서 손절가까지 거리(포인트, 1R). 갭으로 즉시 청산된 거래는 빈칸 |
+| pnl_pts, pnl_usd, pnl_r | 계약당 평균 손익(포인트), 전체 손익(달러, 수수료 제외), 손익 / 1R |
+| mfe_pts, mae_pts, mfe_r, mae_r | 최대 유리폭·불리폭(포인트, R) |
+| win | 손익이 0보다 크면 1 |
+| exits | 청산 순서(예: `xDnS1 > Stop loss`) |
