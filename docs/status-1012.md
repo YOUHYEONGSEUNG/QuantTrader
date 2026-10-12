@@ -116,6 +116,8 @@ Playback(Market Replay), 대회 시간 22:30~00:30, 30계약, 수수료 제외.
 
 ## 문서 상태
 
-- `docs/spec.md`: 회의 문서 규칙(v2)과 10/12 오전까지의 추가 옵션은 들어 있다. **유기 모드와 그 뒤의 옵션(점수 방식의 사건 항목, RSI 상대 기준, 추세 종료 점수 등)은 아직 없다.** 지금은 `docs/changelog.md`와 설정창의 설명이 가장 정확하다.
-- `docs/backtest-guide.md`: 설정값 표가 10/12 오전의 배치 기준이라 지금 설정창과 다르다.
-- `docs/interface.md`: 지표의 설정값 중 10/12 오후에 추가된 것(`ScoreEventBars`, `RsiRelative`, `ScoreExit`, `SuspectNeedsPrice` 등)이 빠져 있다.
+10/12 저녁에 세 문서를 지금 코드에 맞췄다.
+
+- `docs/spec.md`: 본문은 회의 문서 규칙(기본값), 추가 옵션은 3-1(추세 판단), 5-1(진입·청산), 5-2(유기 모드)에 따로 있다. 8장에 설정값 100개 전체와 기본값·태그가 있다.
+- `docs/backtest-guide.md`: 5장이 설정창의 14개 묶음 순서로 돼 있다.
+- `docs/interface.md`: 지표의 설정값과 생성자 인자 순서가 지금 코드와 같다.
