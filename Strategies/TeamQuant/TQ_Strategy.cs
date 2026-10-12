@@ -4,6 +4,7 @@ using System.Collections.Generic;	// 보유 시그널·수량 추적
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Windows.Media;					// Brush, Brushes (화면 표시)
+using System.Xml.Serialization;				// XmlIgnore (설정창의 버튼·표시 전용 항목)
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.Gui;						// DashStyleHelper
@@ -20,6 +21,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 	/// 대회 전략 (docs/spec.md v2). 1분봉 차트에 올리고 추세 봉(10분봉)은 내부에서 추가한다.
 	/// 진입 라우팅, 손절·본절, 단계별 익절, 대회 시간 처리를 담당한다.
 	/// </summary>
+	// 설정창에서 다른 설정 때문에 쓰이지 않는 항목을 잠근다 (TQ_StrategyConverter, 파일 맨 아래). NT8 공식 문서 "Using a TypeConverter to Customize Property Grid Behavior"
+	[TypeConverter("NinjaTrader.NinjaScript.Strategies.TeamQuant.TQ_StrategyConverter")]
 	public class TQ_Strategy : Strategy
 	{
 		private TQ_ATRChannels	channels;	// 진입 봉 밴드 (spec 2장)
@@ -256,6 +259,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				TradeLogToFile		= true;
 				MlLogToFile			= true;
 				UseTestEntry		= false;
+				PresetOrganicBase	= false;	// 설정 세트: 유기 기준 세트 (ApplyPreset)
+
+				// 여기까지가 회의 문서 규칙의 기본값이다. "기본값으로 되돌리기" 버튼이 쓰도록 담아 둔다
+				RememberSpecDefaults();
 			}
 			else if (State == State.Configure)
 			{
@@ -267,6 +274,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// 주문 오류를 NinjaTrader 기본 동작(포지션을 닫고 전략 종료)에 맡기지 않고 OnOrderUpdate에서 직접 처리한다.
 				// 이 값은 SetDefaults나 Configure에서만 정할 수 있다 (NT8 공식 문서)
+				// 설정 세트가 켜져 있으면 그 세트의 값을 다시 넣는다. 저장된 설정을 불러올 때 개별 값이 세트와 다르게 들어와 있을 수 있다
+				if (PresetOrganicBase)
+					ApplyPreset();
+
 				if (HandleOrderErrors)
 					RealtimeErrorHandling = RealtimeErrorHandling.IgnoreAllErrors;
 			}
@@ -346,7 +357,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로. 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승매수={2} 하락의심 매수/매도={3}/{4} 하락매도={5} 하락매수={6}(RSI<{7}) 상승의심 매수/매도={8}/{9} 횡보={10} | 대기 공통/상승/하락/횡보={11}/{12}/{13}/{14} 같은봉={15} 추세T2진입={16} T2앞봉인정={17} | 역추세={18} 역추세수량%={19} 재진입금지={20} | 추세봉={21}분 MA={22}/{23}/{24} RSI={25}/{26} 다이버전스={27}봉(고점폭{28}) 히스토그램={29}봉 의심복귀={30} | 손절%={31} 전저점={32} 넓은쪽={33} 최소ATR={34} 본절R={35} 2차익절손절이동={36} | 봉중익절={37} 청산MA={38} 마지막조각처음부터={39} 추세청산갈아타기={40} MACD확인={41} | 의심RSI봉수={42} 익절밴드넘은진입차단={43} 추세바뀌면청산={44} | 추세방식={45}(1문서/2점수) 최소점수={46} RSI폭={47} 횡보없음={48} 추세바뀌어도대기유지={49} | 규칙사용(상승매수/하락의심매수/하락의심매도/하락매도/하락매수/상승의심매수/상승의심매도/횡보매수/횡보매도)={50} | 유기모드={51} 역진입%={52} 확정봉진입={53} 손절ATR={54} 본절최소폭={55} 횡보차단점수={56} | 점수사건봉수={57} RSI상대기준={58} 중심봉수={59} 폭={60} 추세종료점수={61} 의심가격확인={62} 시작봉진입={63} 추세유지중청산무시={64}",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승매수={2} 하락의심 매수/매도={3}/{4} 하락매도={5} 하락매수={6}(RSI<{7}) 상승의심 매수/매도={8}/{9} 횡보={10} | 대기 공통/상승/하락/횡보={11}/{12}/{13}/{14} 같은봉={15} 추세T2진입={16} T2앞봉인정={17} | 역추세={18} 역추세수량%={19} 재진입금지={20} | 추세봉={21}분 MA={22}/{23}/{24} RSI={25}/{26} 다이버전스={27}봉(고점폭{28}) 히스토그램={29}봉 의심복귀={30} | 손절%={31} 전저점={32} 넓은쪽={33} 최소ATR={34} 본절R={35} 2차익절손절이동={36} | 봉중익절={37} 청산MA={38} 마지막조각처음부터={39} 추세청산갈아타기={40} MACD확인={41} | 의심RSI봉수={42} 익절밴드넘은진입차단={43} 추세바뀌면청산={44} | 추세방식={45}(1문서/2점수) 최소점수={46} RSI폭={47} 횡보없음={48} 추세바뀌어도대기유지={49} | 규칙사용(상승매수/하락의심매수/하락의심매도/하락매도/하락매수/상승의심매수/상승의심매도/횡보매수/횡보매도)={50} | 유기모드={51} 역진입%={52} 확정봉진입={53} 손절ATR={54} 본절최소폭={55} 횡보차단점수={56} | 점수사건봉수={57} RSI상대기준={58} 중심봉수={59} 폭={60} 추세종료점수={61} 의심가격확인={62} 시작봉진입={63} 추세유지중청산무시={64} 유기기준세트={65}",
 				Instrument.FullName, BarsPeriod.Value,
 				UpLongBand, UpSusLongBand, UpSusShortBand, DnShortBand, DnLongBand, DnLongRsi, DnSusLongBand, DnSusShortBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, T1SameBar, TrendT2Entry, T2CountConfirmBars,
@@ -363,7 +374,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ (UseSideLong ? "1" : "0") + (UseSideShort ? "1" : "0"),
 				OrganicMode, OrganicSuspectQtyPercent, OrganicEnterOnConfirm, OrganicStopAtr, OrganicBeMinR, OrganicSideBlockScore, RegimeScoreEventBars,
 				RegimeRsiRelative, RegimeRsiCenterBars, RegimeRsiOffset,
-				RegimeScoreExit, RegimeSuspectNeedsPrice, OrganicEnterAtOpen, OrganicHoldWhileTrend);
+				RegimeScoreExit, RegimeSuspectNeedsPrice, OrganicEnterAtOpen, OrganicHoldWhileTrend, PresetOrganicBase);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -2237,6 +2248,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int RegimeRsiBars { get; set; }
 
 		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[추가] 의심의 RSI 기준을 그때의 RSI 중심 대비로 (RegimeRsiRelative)", Description = "명세 끔(고정 기준: 60 이상이면 하락 전환 의심 쪽, 40 이하면 상승 전환 의심 쪽). 켜면 고정 기준 대신 추세 봉 RSI의 최근 평균(중심)에서 아래 폭만큼 위에 있으면 하락 전환 의심 쪽, 아래에 있으면 상승 전환 의심 쪽으로 봄. RSI는 오르는 날에는 60 위에 오래 머물고 내려와도 40까지는 잘 안 가서, 고정 기준으로는 하락 전환 의심만 자주 뜸. 켜면 위아래가 같은 빈도로 뜸. 켜면 위의 고정 기준 두 값은 쓰이지 않음", GroupName = "01. 추세 판단", Order = 19)]
 		public bool RegimeRsiRelative { get; set; }
 
@@ -2274,6 +2286,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(1, 2)]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[추가] 추세 판단 방식: 1 명세, 2 점수 (RegimeMode)", Description = "1(기본) = 명세: 정배열 + MACD선 양수면 상승추세(하락은 반대). 2 = 점수 방식: 추세 봉에서 [가격이 단기선 위 + 단기선 상승], [MACD 히스토그램 양수 + 줄지 않음], [RSI 55 이상], [스토캐스틱 %K가 %D 위 + 50 위], [최근 사건이 상승 쪽: MACD 상승 전환·골든크로스·상승 다이버전스]를 각각 +1(반대면 −1)로 세어, 가격 조건이 맞고 합이 최소 점수 이상이면 상승추세, 합이 0 이하로 내려가면 끝. 전환 의심 조건은 두 방식 모두 같음", GroupName = "01. 추세 판단", Order = 15)]
 		public int RegimeMode { get; set; }
 
@@ -2328,6 +2341,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int DnShortBand { get; set; }
 
 		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[명세] 역추세 매수 사용 (UseCounterTrend)", Description = "하락추세 매수를 할지. 명세 켬. 끄면 하락추세에서는 매도만", GroupName = "04. 진입 — 하락추세", Order = 1)]
 		public bool UseCounterTrend { get; set; }
 
@@ -2445,6 +2459,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public double StopPercent { get; set; }
 
 		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[명세] 전저점·전고점 손절 사용 (UseSwingStop)", Description = "명세 켬. 끄면 손절 %만 사용", GroupName = "08. 손절", Order = 1)]
 		public bool UseSwingStop { get; set; }
 
@@ -2635,6 +2650,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		// ── 14. 유기 모드 (회의 문서에 없는 실험. 켜면 진입 방향·손절·본절을 추세에 맞물리게 바꾼다) ──
 		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[추가] 유기 모드 사용 (OrganicMode)", Description = "명세 끔. 켜면 추세가 진입 방향을 정함: 상승추세는 매수만, 하락추세는 매도만(역추세 매수 없음). 하락 전환 의심에서는 하락추세 매도 규칙으로 매도만, 상승 전환 의심에서는 상승추세 매수 규칙으로 매수만 하고 수량은 아래 %로 줄임(역진입). 횡보는 명세 그대로. 손절은 0.2% 대신 아래 ATR 배수, 본절 이동은 1차 익절이 충분히 멀 때만, 2차 익절 때 손절을 1차 익절가로. 매수 보유 중 하락 전환 의심·하락추세가 되면(매도는 반대) 전량 청산. 이미 1차 익절 밴드를 넘은 가격에는 진입하지 않음. 켜면 무시되는 설정: 03·05 묶음의 의심 진입 밴드, 하락추세 역추세 매수, 08 손절 묶음, 2차 익절 손절 이동, 추세 바뀌면 전량 청산, 익절점 갈아타기", GroupName = "14. 유기 모드 (실험)", Order = 0)]
 		public bool OrganicMode { get; set; }
 
@@ -2644,6 +2660,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int OrganicSuspectQtyPercent { get; set; }
 
 		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
 		[Display(Name = "[추가] 유기 모드: 추세가 확정되는 봉에 바로 진입 (OrganicEnterOnConfirm)", Description = "기본 켬. 추세가 상승추세(하락추세)로 바뀐 것을 처음 본 봉에서, 밴드 조건과 반전 신호를 기다리지 않고 그 방향으로 진입. 추세를 만든 반전 신호는 추세가 확정되기 전에 이미 지나가 있어서, 기다리면 강한 추세에서는 진입이 나오지 않기 때문. 종가가 이미 1차 익절 밴드를 넘었으면 진입하지 않음. 끄면 추세 안에서 밴드 조건 + 반전 신호가 나올 때만 진입", GroupName = "14. 유기 모드 (실험)", Order = 2)]
 		public bool OrganicEnterOnConfirm { get; set; }
 
@@ -2669,6 +2686,405 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "[추가] 유기 모드: 추세가 유지되는 동안은 1분봉 전량 청산 조건을 무시 (OrganicHoldWhileTrend)", Description = "기본 끔. 상승추세 매수에는 명세의 전량 청산 조건(진입 봉에서 MACD 하락 전환 + 데드크로스)이 있어서, 추세 봉의 판정이 여전히 상승추세인데도 1분봉의 작은 눌림에 포지션이 통째로 청산됨. 하락추세 매도에는 이런 조건이 없어 매도만 길게 감. 켜면 매수 보유 중 판정이 상승추세인 동안(매도는 하락추세인 동안)은 이 조건을 무시하고, 추세가 바뀌면 그때 청산. 손절과 단계별 익절, 마지막 조각 조건은 그대로", GroupName = "14. 유기 모드 (실험)", Order = 7)]
 		public bool OrganicHoldWhileTrend { get; set; }
+
+		// ── 00. 설정 세트 ──
+		// 켜면 그 세트의 값들을 한 번에 넣고 설정창에서 잠근다. 전략을 다시 올릴 때마다 여러 값을 손으로 넣다가 빠뜨리는 것을 막는다
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창을 다시 그려 잠금 상태와 값을 갱신한다
+		[Display(Name = "[세트] 유기 기준 세트 적용 (PresetOrganicBase)", Description = "기본 끔(회의 문서 규칙 그대로). 켜면 지금까지 Playback 결과가 가장 좋았던 값들을 한 번에 넣고 잠금: 추세 봉 3분, 추세 판단 방식 2(점수), 의심의 RSI 기준을 RSI 중심 대비로 켬(중심 26봉, 폭 6), 유기 모드 켬, 추세가 유지되는 동안 1분봉 전량 청산 조건 무시 켬. 나머지 설정은 건드리지 않음. 끄면 값은 그대로 남고 잠금만 풀림. 결과와 한계는 docs/status-1012.md", GroupName = "00. 설정 세트", Order = 0)]
+		public bool PresetOrganicBase
+		{
+			get { return presetOrganicBase; }
+			set
+			{
+				presetOrganicBase = value;
+				if (value)
+					ApplyPreset();
+			}
+		}
+		private bool presetOrganicBase;
+
+		// 아래 셋은 "버튼"이다. 설정창에는 버튼이 없어서 체크 상자로 만든다: 체크하면 그 동작을 한 번 하고 스스로 체크가 풀린다.
+		// 값을 저장하지 않으므로 [NinjaScriptProperty]를 붙이지 않고 XML에도 쓰지 않는다 (전략을 복제·저장할 때 동작이 다시 실행되지 않게)
+		[XmlIgnore]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[버튼] 회의 문서 기본값으로 되돌리기 — 체크하면 실행", Description = "체크하면 매매 규칙 설정을 모두 회의 문서 규칙의 기본값으로 되돌리고, 유기 기준 세트도 끔. 실행한 뒤 체크는 스스로 풀림. 수량·대회 시간(11번 묶음)과 화면·기록·테스트(13번 묶음)는 건드리지 않음. 결과는 아래 '마지막 동작'에 나옴", GroupName = "00. 설정 세트", Order = 1)]
+		public bool PresetApplySpec
+		{
+			get { return ButtonRead("spec"); }
+			set { ButtonWrite("spec", value); }
+		}
+
+		[XmlIgnore]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[버튼] 지금 설정을 내 세트로 저장 — 체크하면 실행", Description = "체크하면 지금 설정창에 있는 매매 규칙 설정을 내 문서\\NinjaTrader 8\\TQ_settings_custom.txt에 저장. 실행한 뒤 체크는 스스로 풀림. 저장은 한 벌만 되고 다시 저장하면 덮어씀. 수량·대회 시간과 화면·기록·테스트 묶음은 저장하지 않음(종목마다 다를 수 있어서). 다른 PC로 옮기려면 그 파일을 복사", GroupName = "00. 설정 세트", Order = 2)]
+		public bool PresetSaveCustom
+		{
+			get { return ButtonRead("save"); }
+			set { ButtonWrite("save", value); }
+		}
+
+		[XmlIgnore]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[버튼] 내 세트 불러오기 — 체크하면 실행", Description = "체크하면 위 버튼으로 저장해 둔 설정을 불러와 설정창에 넣음. 실행한 뒤 체크는 스스로 풀림. 전략을 차트에 다시 올린 뒤 이 버튼 하나로 지난번 설정을 되살릴 수 있음. 저장한 뒤에 새로 생긴 설정은 지금 값 그대로 둠", GroupName = "00. 설정 세트", Order = 3)]
+		public bool PresetLoadCustom
+		{
+			get { return ButtonRead("load"); }
+			set { ButtonWrite("load", value); }
+		}
+
+		[XmlIgnore]
+		[Display(Name = "[표시] 마지막 동작", Description = "위 버튼들이 마지막으로 한 일과 그 결과. 직접 바꿀 수 없음", GroupName = "00. 설정 세트", Order = 4)]
+		public string PresetStatus
+		{
+			get { return presetStatus; }
+		}
+		private string presetStatus = "";
+
+		// 버튼의 값. 설정창은 값을 넣은 뒤 다시 읽어서 "값이 바뀌었을 때만" 화면을 다시 그린다.
+		// 그래서 누른 직후 처음 한 번은 true로 읽히게 하고(화면 갱신), 그다음부터는 false로 읽히게 한다(체크가 풀림).
+		// 2초가 지나면 무조건 false: 전략이 복제될 때 true가 넘어가 동작이 다시 실행되는 일을 막는다
+		private string		buttonPressed = "";
+		private DateTime	buttonPressedAt;
+
+		private bool ButtonRead(string name)
+		{
+			if (buttonPressed != name)
+				return false;
+			buttonPressed = "";
+			return (DateTime.Now - buttonPressedAt).TotalSeconds < 2;
+		}
+
+		private void ButtonWrite(string name, bool value)
+		{
+			if (!value)
+			{
+				if (buttonPressed == name)
+					buttonPressed = "";
+				return;
+			}
+			if (name == "spec")			ApplySpecDefaults();
+			else if (name == "save")	SaveCustomSettings();
+			else						LoadCustomSettings();
+			buttonPressed	= name;
+			buttonPressedAt	= DateTime.Now;
+			LogPresetAction(name);
+		}
+
+		// 버튼이 실제로 실행됐는지 확인하는 기록 (내 문서\NinjaTrader 8\TQ_settings_log.txt). 설정창 동작은 Output 창에 남지 않아서 파일에 적는다
+		private void LogPresetAction(string name)
+		{
+			try
+			{
+				System.IO.File.AppendAllText(
+					System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "TQ_settings_log.txt"),
+					string.Format("{0:yyyy-MM-dd HH:mm:ss.fff} 버튼={1} 결과=[{2}] 세트={3} 유기모드={4} 추세봉={5} 추세방식={6} 인스턴스={7}{8}",
+						DateTime.Now, name, presetStatus, presetOrganicBase, OrganicMode, RegimeBarMinutes, RegimeMode, GetHashCode(), Environment.NewLine),
+					new System.Text.UTF8Encoding(false));
+			}
+			catch (Exception) { }
+		}
 		#endregion
+
+		#region 설정 세트와 설정창 잠금
+		// 유기 기준 세트의 값 (docs/status-1012.md의 "시험 중인 설정 세트"). 세트에 들어가는 설정은 PresetSettings와 같이 고친다
+		private void ApplyPreset()
+		{
+			RegimeBarMinutes		= 3;
+			RegimeMode				= 2;
+			RegimeRsiRelative		= true;
+			RegimeRsiCenterBars		= 26;
+			RegimeRsiOffset			= 6;
+			OrganicMode				= true;
+			OrganicHoldWhileTrend	= true;
+		}
+
+		private static readonly string[] PresetSettings =
+		{
+			"RegimeBarMinutes", "RegimeMode", "RegimeRsiRelative", "RegimeRsiCenterBars", "RegimeRsiOffset", "OrganicMode", "OrganicHoldWhileTrend"
+		};
+
+		// SetDefaults가 끝난 직후의 설정값 = 회의 문서 규칙의 기본값. "기본값으로 되돌리기" 버튼이 쓴다 (모든 인스턴스가 같으므로 한 번만 담는다)
+		private static Dictionary<string, object> specDefaults;
+
+		// 설정값 속성 목록. [NinjaScriptProperty]가 붙은 int·double·bool만 고른다.
+		// rulesOnly면 수량·대회 시간(11번 묶음)과 화면·기록·테스트(13번 묶음)를 뺀다
+		private List<System.Reflection.PropertyInfo> SettingProperties(bool rulesOnly)
+		{
+			List<System.Reflection.PropertyInfo> list = new List<System.Reflection.PropertyInfo>();
+			foreach (System.Reflection.PropertyInfo p in typeof(TQ_Strategy).GetProperties(
+				System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+			{
+				if (!p.CanRead || !p.CanWrite)
+					continue;
+				if (p.GetCustomAttributes(typeof(NinjaScriptPropertyAttribute), false).Length == 0)
+					continue;
+				if (p.PropertyType != typeof(int) && p.PropertyType != typeof(double) && p.PropertyType != typeof(bool))
+					continue;
+				if (rulesOnly)
+				{
+					object[] display = p.GetCustomAttributes(typeof(DisplayAttribute), false);
+					string group = display.Length > 0 ? ((DisplayAttribute)display[0]).GroupName ?? "" : "";
+					if (group.StartsWith("11.") || group.StartsWith("13."))
+						continue;
+				}
+				list.Add(p);
+			}
+			return list;
+		}
+
+		// SetDefaults 끝에서 부른다: 기본값을 담아 둔다
+		private void RememberSpecDefaults()
+		{
+			if (specDefaults != null)
+				return;
+			Dictionary<string, object> values = new Dictionary<string, object>();
+			foreach (System.Reflection.PropertyInfo p in SettingProperties(false))
+				values[p.Name] = p.GetValue(this, null);
+			specDefaults = values;
+		}
+
+		// [버튼] 회의 문서 기본값으로 되돌리기
+		private void ApplySpecDefaults()
+		{
+			try
+			{
+				if (specDefaults == null)
+				{
+					presetStatus = "기본값으로 되돌리기 실패: 기본값을 아직 읽지 못함";
+					return;
+				}
+				presetOrganicBase = false;
+				int count = 0;
+				foreach (System.Reflection.PropertyInfo p in SettingProperties(true))
+				{
+					object value;
+					if (p.Name == "PresetOrganicBase" || !specDefaults.TryGetValue(p.Name, out value))
+						continue;
+					p.SetValue(this, value, null);
+					count++;
+				}
+				presetStatus = string.Format("{0:HH:mm:ss} 회의 문서 기본값으로 되돌림 ({1}개. 수량·시간·화면 설정은 그대로)", DateTime.Now, count);
+			}
+			catch (Exception e)
+			{
+				presetStatus = "기본값으로 되돌리기 실패: " + e.Message;
+			}
+		}
+
+		private static string CustomSettingsPath()
+		{
+			return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "TQ_settings_custom.txt");
+		}
+
+		// [버튼] 지금 설정을 내 세트로 저장. 한 줄에 "이름=값". 숫자의 소수점은 항상 '.'
+		private void SaveCustomSettings()
+		{
+			try
+			{
+				System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
+				System.Text.StringBuilder sb = new System.Text.StringBuilder();
+				sb.AppendLine("# TQ_Strategy 내 세트. " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " 저장. 이름=값");
+				int count = 0;
+				foreach (System.Reflection.PropertyInfo p in SettingProperties(true))
+				{
+					sb.AppendLine(p.Name + "=" + Convert.ToString(p.GetValue(this, null), inv));
+					count++;
+				}
+				System.IO.File.WriteAllText(CustomSettingsPath(), sb.ToString(), new System.Text.UTF8Encoding(false));
+				presetStatus = string.Format("{0:HH:mm:ss} 내 세트로 저장함 ({1}개) → {2}", DateTime.Now, count, CustomSettingsPath());
+			}
+			catch (Exception e)
+			{
+				presetStatus = "내 세트 저장 실패: " + e.Message;
+			}
+		}
+
+		// [버튼] 내 세트 불러오기. 파일에 없는 설정(저장한 뒤 새로 생긴 것)은 지금 값 그대로 둔다
+		private void LoadCustomSettings()
+		{
+			try
+			{
+				string path = CustomSettingsPath();
+				if (!System.IO.File.Exists(path))
+				{
+					presetStatus = "내 세트 불러오기 실패: 저장한 세트가 없음 (" + path + ")";
+					return;
+				}
+
+				System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
+				Dictionary<string, string> saved = new Dictionary<string, string>();
+				foreach (string line in System.IO.File.ReadAllLines(path))
+				{
+					int eq = line.IndexOf('=');
+					if (line.StartsWith("#") || eq <= 0)
+						continue;
+					saved[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+				}
+
+				// 세트 스위치를 먼저 끄고 개별 값을 넣는다. 저장된 세트 스위치 값은 맨 끝에 넣는다 (켜져 있었으면 그 세트의 값이 다시 들어간다)
+				presetOrganicBase = false;
+				int count = 0, skipped = 0;
+				foreach (System.Reflection.PropertyInfo p in SettingProperties(true))
+				{
+					string text;
+					if (p.Name == "PresetOrganicBase" || !saved.TryGetValue(p.Name, out text))
+					{
+						if (p.Name != "PresetOrganicBase")
+							skipped++;
+						continue;
+					}
+					object value;
+					if (p.PropertyType == typeof(bool))			value = bool.Parse(text);
+					else if (p.PropertyType == typeof(int))		value = int.Parse(text, inv);
+					else										value = double.Parse(text, inv);
+					p.SetValue(this, value, null);
+					count++;
+				}
+				string presetText;
+				if (saved.TryGetValue("PresetOrganicBase", out presetText) && bool.Parse(presetText))
+					PresetOrganicBase = true;
+
+				presetStatus = string.Format("{0:HH:mm:ss} 내 세트를 불러옴 ({1}개{2})", DateTime.Now, count,
+					skipped > 0 ? ", 저장 파일에 없어 그대로 둔 설정 " + skipped + "개" : "");
+			}
+			catch (Exception e)
+			{
+				presetStatus = "내 세트 불러오기 실패: " + e.Message;
+			}
+		}
+
+		// 지금 설정에서 쓰이지 않거나 세트가 정해 둔 설정의 이름. 설정창에서 이 항목들은 회색으로 잠긴다 (TQ_StrategyConverter).
+		// 매매 동작에는 영향이 없다. 값이 무시되는 조건을 코드의 실제 분기와 맞춰 둔다
+		internal HashSet<string> LockedSettings()
+		{
+			HashSet<string> locked = new HashSet<string>();
+
+			// 세트가 켜져 있으면 세트가 정한 값은 바꿀 수 없다
+			if (PresetOrganicBase)
+				foreach (string name in PresetSettings)
+					locked.Add(name);
+
+			if (OrganicMode)
+			{
+				// 유기 모드가 쓰지 않는 것: 의심 전용 규칙과 역추세 매수, 08 손절 묶음, 유기 모드가 자체 규칙으로 대신하는 옵션
+				foreach (string name in new[] { "UpSusShortBand", "UpSusLongBand", "UseUpSusShort", "UseUpSusLong",
+					"DnSusLongBand", "DnSusShortBand", "UseDnSusLong", "UseDnSusShort",
+					"UseCounterTrend", "DnLongBand", "DnLongRsi", "CounterQtyPercent",
+					"StopPercent", "UseSwingStop", "SwingBars", "StopWider", "MinStopAtr",
+					"TrailStopAtTp2", "ExitOnTrendChange", "AdoptTrendExits", "SkipEntryPastTarget" })
+					locked.Add(name);
+				if (!OrganicEnterOnConfirm)
+					locked.Add("OrganicEnterAtOpen");
+			}
+			else
+			{
+				// 유기 모드가 꺼져 있으면 그 세부 설정은 쓰이지 않는다
+				foreach (string name in new[] { "OrganicSuspectQtyPercent", "OrganicEnterOnConfirm", "OrganicEnterAtOpen", "OrganicStopAtr",
+					"OrganicBeMinR", "OrganicSideBlockScore", "OrganicHoldWhileTrend" })
+					locked.Add(name);
+				if (!UseCounterTrend)
+					foreach (string name in new[] { "DnLongBand", "DnLongRsi", "CounterQtyPercent" })
+						locked.Add(name);
+				if (!UseSwingStop)
+					foreach (string name in new[] { "SwingBars", "StopWider" })
+						locked.Add(name);
+			}
+
+			// 점수 방식 전용 설정. 점수 자체는 유기 모드의 횡보 진입 필터도 쓰므로, RSI 폭과 사건 봉 수는 유기 모드가 켜져 있으면 열어 둔다
+			if (RegimeMode != 2)
+			{
+				locked.Add("RegimeScoreMin");
+				locked.Add("RegimeScoreExit");
+				if (!OrganicMode)
+				{
+					locked.Add("RegimeScoreRsiBand");
+					locked.Add("RegimeScoreEventBars");
+				}
+			}
+
+			// 의심의 RSI 기준: 고정 기준과 상대 기준 중 쓰는 쪽만 연다
+			if (RegimeRsiRelative)
+			{
+				locked.Add("RegimeRsiHigh");
+				locked.Add("RegimeRsiLow");
+			}
+			else
+			{
+				locked.Add("RegimeRsiCenterBars");
+				locked.Add("RegimeRsiOffset");
+			}
+
+			return locked;
+		}
+		#endregion
+	}
+
+	/// <summary>
+	/// 설정창(속성 표)에서 쓰이지 않는 설정을 잠근다. TQ_Strategy.LockedSettings()가 돌려준 이름의 항목을 읽기 전용으로 바꿔 보여 준다.
+	/// 전략용 변환기는 StrategyBaseConverter를 상속해야 한다 (NT8 공식 문서 "Using a TypeConverter to Customize Property Grid Behavior").
+	/// 설정값을 바꿨을 때 표를 다시 그리려면 그 설정에 [RefreshProperties(RefreshProperties.All)]이 있어야 한다.
+	/// </summary>
+	public class TQ_StrategyConverter : StrategyBaseConverter
+	{
+		public override bool GetPropertiesSupported(ITypeDescriptorContext context) { return true; }
+
+		public override PropertyDescriptorCollection GetProperties(ITypeDescriptorContext context, object component, Attribute[] attrs)
+		{
+			// 내장 지표(@Pivots.cs 등)와 같은 방식으로 기본 목록을 얻는다
+			PropertyDescriptorCollection props = base.GetPropertiesSupported(context)
+				? base.GetProperties(context, component, attrs)
+				: TypeDescriptor.GetProperties(component, attrs);
+
+			TQ_Strategy strategy = component as TQ_Strategy;
+			if (strategy == null || props == null)
+				return props;
+
+			HashSet<string> locked;
+			try
+			{
+				locked = strategy.LockedSettings();
+			}
+			catch (Exception)
+			{
+				return props;	// 잠금 계산에 실패해도 설정창은 원래대로 보여 준다
+			}
+			if (locked.Count == 0)
+				return props;
+
+			PropertyDescriptorCollection adjusted = new PropertyDescriptorCollection(null);
+			foreach (PropertyDescriptor descriptor in props)
+				adjusted.Add(locked.Contains(descriptor.Name) ? new TQ_ReadOnlyDescriptor(descriptor) : descriptor);
+			return adjusted;
+		}
+	}
+
+	/// <summary>
+	/// 원래 속성 설명자를 감싸서 읽기 전용으로만 바꾼다. 값·이름·설명·묶음은 원래 것을 그대로 쓴다.
+	/// </summary>
+	public class TQ_ReadOnlyDescriptor : PropertyDescriptor
+	{
+		private readonly PropertyDescriptor inner;
+
+		public TQ_ReadOnlyDescriptor(PropertyDescriptor descriptor) : base(descriptor.Name, CopyAttributes(descriptor))
+		{
+			inner = descriptor;
+		}
+
+		private static Attribute[] CopyAttributes(PropertyDescriptor descriptor)
+		{
+			Attribute[] attributes = new Attribute[descriptor.Attributes.Count];
+			descriptor.Attributes.CopyTo(attributes, 0);
+			return attributes;
+		}
+
+		public override bool IsReadOnly					{ get { return true; } }
+		public override Type ComponentType				{ get { return inner.ComponentType; } }
+		public override Type PropertyType				{ get { return inner.PropertyType; } }
+		public override bool CanResetValue(object component)			{ return false; }
+		public override object GetValue(object component)				{ return inner.GetValue(component); }
+		public override void ResetValue(object component)				{ }
+		public override void SetValue(object component, object value)	{ inner.SetValue(component, value); }	// 저장된 설정을 불러올 때는 값이 들어가야 한다
+		public override bool ShouldSerializeValue(object component)		{ return inner.ShouldSerializeValue(component); }
 	}
 }
