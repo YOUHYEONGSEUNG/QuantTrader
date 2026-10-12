@@ -20,4 +20,4 @@ public Series<bool> Golden { get { Update(); return golden; } }   // Update()로
 
 - 지표 안에서 AddDataSeries를 쓰지 않는다. 10분봉 지표(TQ_Regime)는 입력 시리즈로 받고, 전략이 `TQ_Regime(BarsArray[1])`로 호출한다. 지표가 AddDataSeries를 쓰면 호스팅하는 전략도 같은 시리즈를 추가해야 하는 제약이 생긴다.
 - 검증용 시각화(배경색, 화살표)는 설정값 `ShowDebugVisuals`로 켜고 끈다.
-- spec 2장 정의를 그대로 구현한다. 특히 T1(밴드 조건 봉의 다음 봉부터 N봉), T2(같은 봉 또는 바로 다음 봉), T3(갭, 여러 밴드 동시 돌파)를 지킨다.
+- spec 2장 정의를 그대로 구현한다. 특히 T1(밴드 조건 봉부터 N봉. `T1SameBar`를 끄면 다음 봉부터), T2(같은 봉 또는 바로 다음 봉), T3(갭, 여러 밴드 동시 돌파)를 지킨다.

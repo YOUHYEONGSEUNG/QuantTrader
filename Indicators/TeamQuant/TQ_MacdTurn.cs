@@ -13,8 +13,9 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 {
 	/// <summary>
 	/// MACD 상승/하락 전환 판정 (spec 2장, docs/interface.md).
-	/// TQ_Signals가 이 지표의 Up/Down을 그대로 쓴다. 차트에 올리면 히스토그램 막대 색으로 판정을 볼 수 있다:
-	/// 초록 = 상승 전환, 빨강 = 하락 전환, 회색 = 둘 다 아님.
+	/// Up/Down은 방향(히스토그램이 연속으로 늘거나 주는 동안 계속 참), TurnUp/TurnDown은 전환(방향이 바뀐 것이 처음 확인된 봉 하나).
+	/// TQ_Signals와 TQ_Regime은 전환(TurnUp/TurnDown)을 쓴다. 차트에 올리면 히스토그램 막대 색으로 방향을 볼 수 있다:
+	/// 초록 = 연속 증가, 빨강 = 연속 감소, 회색 = 둘 다 아님. 회색·빨강에서 초록으로 바뀐 첫 봉이 상승 전환이다.
 	/// </summary>
 	public class TQ_MacdTurn : Indicator
 	{
@@ -22,6 +23,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		private ATR				atr;
 		private Series<bool>	up;
 		private Series<bool>	down;
+		private Series<bool>	turnUp;		// 상승 전환이 처음 확인된 봉
+		private Series<bool>	turnDown;	// 하락 전환이 처음 확인된 봉
 
 		protected override void OnStateChange()
 		{
@@ -52,6 +55,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				atr		= ATR(AtrPeriod);
 				up		= new Series<bool>(this);
 				down	= new Series<bool>(this);
+				turnUp		= new Series<bool>(this);
+				turnDown	= new Series<bool>(this);
 			}
 		}
 
@@ -85,6 +90,11 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 			up[0]	= isUp;
 			down[0]	= isDown;
+
+			// spec 2장 MACD 상승/하락 전환: 방향이 바뀐 것이 처음 확인된 봉 하나에서만 참이다.
+			// 연속 증가(감소)가 이어지는 동안 계속 참인 것은 Up/Down(방향)이고, 전환은 그 구간의 첫 봉이다
+			turnUp[0]	= isUp && !(CurrentBar > 0 && up[1]);
+			turnDown[0]	= isDown && !(CurrentBar > 0 && down[1]);
 
 			PlotBrushes[0][0] = isUp ? Brushes.LimeGreen : isDown ? Brushes.Red : Brushes.Gray;
 		}
@@ -132,6 +142,15 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Browsable(false)]
 		[XmlIgnore]
 		public Series<bool> Down { get { Update(); return down; } }
+
+		// 전환(사건): Up/Down이 거짓에서 참으로 바뀐 봉 하나에서만 참. 진입·청산·추세 판단은 이 값을 쓴다
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<bool> TurnUp { get { Update(); return turnUp; } }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<bool> TurnDown { get { Update(); return turnDown; } }
 		#endregion
 	}
 }
