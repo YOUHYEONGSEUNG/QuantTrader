@@ -42,7 +42,7 @@ py docs/tools/tq_regime_score.py --data "C:\Users\user\Desktop\Ninja_Exports\MNQ
 | `--rev-atr` / `--trend-atr` / `--atr-bar` | 1.5 / 3 / 10 | 정답 기준: 되돌림 배수, 추세 크기 배수, ATR 봉 |
 | `--report 파일.md` | | 결과 표를 마크다운으로 저장 |
 
-**대회 시간 기본값은 21:30~23:30이다** (2026-10-14 사용자 지시). spec 7장의 22:30~00:30과 다르므로, 그 시간으로 보려면 `--start 2230 --entry-end 15 --flatten 27 --end 30`을 준다.
+**대회 시간 기본값은 21:30~23:30이다** (spec 7장, 2026-10-14 확정). 예전 대회 시간(22:30~00:30)으로 보려면 `--start 2230 --entry-end 15 --flatten 27 --end 30`을 준다.
 
 `--cfg`에서 쓸 수 있는 설정 (TQ_Regime 설정값과 같은 뜻, 기본값은 spec 8장)
 

@@ -249,9 +249,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				EntryQuantity		= 30;
 				MaxQuantity			= 40;
 				MinEntries			= 2;		// 종목당 최소 진입 (나스닥 2, 골드 2)
-				ContestStartTime	= 223000;	// 22:30:00 KST
-				EntryEndTime		= 1500;		// 00:15:00 KST
-				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
+				// spec 7장: 2026-10-14 대회 시간을 21:30~23:30 KST로 확정 (그 전에는 22:30~00:30)
+				ContestStartTime	= 213000;	// 21:30:00 KST
+				EntryEndTime		= 231500;	// 23:15:00 KST
+				FlattenTime			= 232700;	// 23:27:00 KST 봉 마감
 
 				// 화면·기록·테스트
 				ShowStatus			= true;
@@ -683,7 +684,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryStatus),
 				TextPosition.TopRight);
 
-			// spec 7장: 종료 청산 — FlattenTime(00:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
+			// spec 7장: 종료 청산 — FlattenTime(23:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
 			if (IsFlattenTime())
 			{
 				if (Position.MarketPosition == MarketPosition.Long)
@@ -707,7 +708,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 미보유: 진입·익절·손절 상태 전체 리셋
 				ResetTradeState();
 
-				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 22:30~00:15)일 때만 신규 진입
+				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 21:30~23:15)일 때만 신규 진입
 				if (InEntryWindow())
 				{
 					if (UseTestEntry)	RouteTestEntry();	// 주문 흐름 검증용 임시 진입
@@ -2170,7 +2171,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		#endregion
 
 		#region 헬퍼 (대회 시간 — spec 7장)
-		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(22:30)~EntryEndTime(00:15). 자정을 넘는다
+		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(21:30)~EntryEndTime(23:15). 자정을 넘는 설정도 처리한다
 		private bool InEntryWindow()
 		{
 			return IsTimeInWindow(ToTime(Time[0]), ContestStartTime, EntryEndTime);
@@ -2184,12 +2185,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return t >= start || t <= end;			// 자정을 넘는 구간
 		}
 
-		// 종료 청산 시각: FlattenTime(00:27)부터 다음 대회 시작(ContestStartTime) 전까지.
+		// 종료 청산 시각: FlattenTime(23:27)부터 다음 대회 시작(ContestStartTime) 전까지.
 		// 이 구간에서 포지션이 있으면 청산하고, 첫 청산 뒤에는 미보유라 추가 주문이 나가지 않는다
 		private bool IsFlattenTime()
 		{
 			int t = ToTime(Time[0]);
-			return t >= FlattenTime && t < ContestStartTime;
+			if (FlattenTime < ContestStartTime)
+				return t >= FlattenTime && t < ContestStartTime;	// 청산 시각이 자정 뒤 (예: 00:27 ~ 다음 날 22:30)
+			return t >= FlattenTime || t < ContestStartTime;		// 청산 시각이 같은 날 (예: 23:27 ~ 자정 ~ 다음 날 21:30)
 		}
 		#endregion
 
@@ -2533,17 +2536,17 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[명세] 진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 223000 = 22:30. 이 시각부터의 신호로 진입", GroupName = "11. 수량·대회 시간", Order = 2)]
+		[Display(Name = "[명세] 진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 213000 = 21:30. 이 시각부터의 신호로 진입", GroupName = "11. 수량·대회 시간", Order = 2)]
 		public int ContestStartTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[명세] 진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 1500 = 00:15. 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "11. 수량·대회 시간", Order = 3)]
+		[Display(Name = "[명세] 진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 231500 = 23:15 (자정 뒤면 1500 = 00:15처럼 씀). 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "11. 수량·대회 시간", Order = 3)]
 		public int EntryEndTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[명세] 전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 2700 = 00:27. 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "11. 수량·대회 시간", Order = 4)]
+		[Display(Name = "[명세] 전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 232700 = 23:27 (자정 뒤면 2700 = 00:27처럼 씀). 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "11. 수량·대회 시간", Order = 4)]
 		public int FlattenTime { get; set; }
 
 		[NinjaScriptProperty]
