@@ -89,8 +89,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool			tp1Done;						// 1차 익절 완료
 		private bool			tp2Done;						// 5.4 2차 익절 완료
 		private bool			strongMomentum;					// 5.1 강한 모멘텀 전환
-		private SideSet			sideSet		= SideSet.None;		// 5.5·5.6 먼저 충족된 세트
-		private enum SideSet { None, A, B }
 
 		// 검증용 임시 진입 (task5, UseTestEntry). 보유 봉 수로 분할 익절·본절·청산을 결정적으로 재현
 		private int				testHoldBars;					// 테스트 진입 후 경과한 보유 봉 수
@@ -705,17 +703,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			bool canLong	= !(BlockReentryAfterStop && blockLong);
 			bool canShort	= !(BlockReentryAfterStop && blockShort);
 
-			if (r == 1)			// 상승추세: 주력 롱(5.1) 우선, 역추세 숏(5.2)
+			// 2026-10-14 변경: 포지션은 상승추세 롱, 하락추세 숏, 횡보 롱·숏 4가지만. 역추세 진입(5.2, 5.3)은 하지 않는다
+			if (r == 1)			// 상승추세: 주력 롱(5.1)만
 			{
 				// 실험 옵션 TrendT2Entry: 밴드 조건 없이 T2(MACD 전환 AND 크로스)만으로도 추세 방향 주력 진입
-				if      (signals.EntryUpLong[0] || (TrendT2Entry && signals.T2Bull[0]))	EnterUpLong();
-				else if (canShort && UseCounterTrend && signals.EntryUpShort[0])	EnterUpShort();
+				if (signals.EntryUpLong[0] || (TrendT2Entry && signals.T2Bull[0]))	EnterUpLong();
 			}
-			else if (r == -1)	// 하락추세: 주력 숏(5.4) 우선, 역추세 롱(5.3)
+			else if (r == -1)	// 하락추세: 주력 숏(5.4)만
 			{
-				if      (DnShortSignal() || (TrendT2Entry && signals.T2Bear[0]))		EnterDnShort();
-				// 실험 옵션 DnLongNeedDiv: 5.2와 대칭으로 조인 조건(저가 터치 + RSI 과매도 + 상승 다이버전스)일 때만 역추세 매수
-				else if (canLong && UseCounterTrend && (DnLongNeedDiv ? signals.EntryDnLongDiv[0] : signals.EntryDnLong[0]))	EnterDnLong();
+				if (DnShortSignal() || (TrendT2Entry && signals.T2Bear[0]))			EnterDnShort();
 			}
 			else				// 횡보(0): 롱(5.5)·숏(5.6)
 			{
@@ -794,21 +790,21 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			LogEntry("하락추세 숏(5.4)", q1, q2, q3);
 		}
 
-		// spec 5.5 횡보 롱: 1/2 + 나머지
+		// spec 5.5 횡보 롱: 1/3 + 나머지 (2026-10-14 변경, 전에는 1/2)
 		private void EnterSideLong()
 		{
 			BeginTrade(true, 0, ActiveStrategy.SideLong);
-			int q1 = Split(1, 2), q2 = tradeQty - q1;
+			int q1 = Split(1, 3), q2 = tradeQty - q1;
 			SubmitChunk("SideL1", q1);
 			SubmitChunk("SideL2", q2);
 			LogEntry("횡보 롱(5.5)", q1, q2, 0);
 		}
 
-		// spec 5.6 횡보 숏: 1/2 + 나머지
+		// spec 5.6 횡보 숏: 1/3 + 나머지 (2026-10-14 변경, 전에는 1/2)
 		private void EnterSideShort()
 		{
 			BeginTrade(false, 0, ActiveStrategy.SideShort);
-			int q1 = Split(1, 2), q2 = tradeQty - q1;
+			int q1 = Split(1, 3), q2 = tradeQty - q1;
 			SubmitChunk("SideS1", q1);
 			SubmitChunk("SideS2", q2);
 			LogEntry("횡보 숏(5.6)", q1, q2, 0);
@@ -860,8 +856,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				case "DnL1":	return channels.Up1[0];	// 5.3 1차 익절: +1배
 				case "DnS1":	return channels.Dn2[0];	// 5.4 1차 익절: −2배
 				case "DnS2":	return channels.Dn3[0];	// 5.4 2차 익절: −3배
-				case "SideL1":	return channels.Up2[0];	// 5.5 세트 A 1차 익절: +2배
-				case "SideS1":	return channels.Dn2[0];	// 5.6 세트 A 1차 익절: −2배
+				case "SideL1":	return channels.Up2[0];	// 5.5 1단계 익절: 가격이 +2배에 닿음
+				case "SideS1":	return channels.Dn2[0];	// 5.6 1단계 익절: 가격이 −2배에 닿음
 				default:		return double.NaN;
 			}
 		}
@@ -908,8 +904,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tp1Done = true;
 			if (sig == "UpL2")
 				strongMomentum = true;	// spec 5.1: +3배 익절 뒤에는 약한 모멘텀 청산을 적용하지 않는다
-			else if (sig == "SideL1" || sig == "SideS1")
-				sideSet = SideSet.A;	// spec 5.5·5.6: 밴드 가격 조건은 세트 A의 1차 익절이다
 
 			// spec 4장 본절: 첫 부분 익절이 체결되면 남은 수량의 손절을 평균 진입가로
 			breakevenPending = true;
@@ -957,7 +951,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return Instrument.MasterInstrument.RoundToTickSize(stop);
 		}
 
-		// 실험 옵션 SideRestBand: 횡보 세트 A의 나머지 청산 밴드 (spec 5.5·5.6은 3배).
+		// 실험 옵션 SideRestBand: 횡보 전량 익절의 종가 밴드 (spec 5.5·5.6은 3배).
 		// SideRestNarrowTime부터 종료 청산 시각까지는 SideRestBand배(0 = 중심선)를 쓰고, 그 전에는 3배를 쓴다
 		private int SideRestLevel()
 		{
@@ -1397,68 +1391,42 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
-		// spec 5.5 횡보 롱: 1차 익절이 먼저 충족된 세트만 끝까지 사용
+		// spec 5.5 횡보 롱 (2026-10-14 변경. 세트 A/B를 없애고 2단계로)
+		// 1단계: 가격이 +2배에 닿으면 1/3 익절, 본절로 손절 이동. IntrabarTakeProfit이면 지정가가 봉 진행 중에 체결한다(OnTargetFill)
+		// 전량 익절: 종가 ≥ +3배 OR MACD 하락 전환 OR 데드크로스. 1단계 전이든 뒤든 남은 수량 전부
 		private void ManageSideLong()
 		{
-			if (sideSet == SideSet.None)
+			bool rest = Close[0] >= BandUp(SideRestLevel()) || signals.MacdDown[0] || signals.Dead[0];
+			if (rest)
 			{
-				bool aTp1  = Close[0] >= channels.Up2[0] || signals.MacdDown[0] || signals.Dead[0];
-				bool bTp1  = signals.K80CrossUp[0];
-				bool aRest = High[0] >= BandUp(SideRestLevel());	// A 나머지 청산: 고가 +3배 터치
-				bool bRest = signals.T2Bear[0];				// B 나머지 청산: MACD 하락 전환 AND 데드크로스
-				bool anyTp1  = aTp1 || bTp1;
-				bool anyRest = aRest || bRest;
-
-				// 공통 규칙: 1차 익절 전/동시에 A·B 어느 세트든 나머지 청산 조건이 나오면 전량 청산
-				if (anyTp1 && anyRest)	{ FlattenRemaining("5.5 1차+나머지 동시 → 전량"); return; }
-				if (anyRest)			{ FlattenRemaining("5.5 나머지 청산(1차 전) → 전량"); return; }
-				if (anyTp1)
-				{
-					sideSet = aTp1 ? SideSet.A : SideSet.B;	// 동시 충족이면 A (기본값)
-					MoveBreakeven();	// 익절 주문보다 먼저 예약한다
-					ExitChunk("SideL1", "5.5 1차 익절 1/2 (세트 " + sideSet + ")");
-					tp1Done = true;
-				}
+				FlattenRemaining("5.5 전량 익절(종가 " + BandText(SideRestLevel(), true) + " / MACD▼ / 데드)");
+				return;
 			}
-			else if (sideSet == SideSet.A)
+			// 지정가가 체결되지 않았는데 종가가 +2배 이상이면 봉 마감에 시장가로 (지정가를 끈 경우와 밴드가 움직인 경우)
+			if (!tp1Done && Close[0] >= channels.Up2[0])
 			{
-				if (High[0] >= BandUp(SideRestLevel()))	FlattenRemaining("5.5 A 나머지 청산(고가 " + BandText(SideRestLevel(), true) + " 터치)");
-			}
-			else	// 세트 B
-			{
-				if (signals.T2Bear[0])			FlattenRemaining("5.5 B 나머지 청산(T2 하락)");
+				MoveBreakeven();	// 익절 주문보다 먼저 예약한다
+				ExitChunk("SideL1", "5.5 1단계 익절 1/3 (+2배)");
+				tp1Done = true;
 			}
 		}
 
-		// spec 5.6 횡보 숏: 1차 익절이 먼저 충족된 세트만 끝까지 사용
+		// spec 5.6 횡보 숏 (2026-10-14 변경, 5.5의 거울상)
+		// 1단계: 가격이 −2배에 닿으면 1/3 익절, 본절로 손절 이동
+		// 전량 익절: 종가 ≤ −3배 OR MACD 상승 전환 OR 골든크로스
 		private void ManageSideShort()
 		{
-			if (sideSet == SideSet.None)
+			bool rest = Close[0] <= BandDn(SideRestLevel()) || signals.MacdUp[0] || signals.Golden[0];
+			if (rest)
 			{
-				bool aTp1  = Close[0] <= channels.Dn2[0] || signals.MacdUp[0] || signals.Golden[0];
-				bool bTp1  = signals.K20CrossDown[0];
-				bool aRest = Low[0] <= BandDn(SideRestLevel());		// A 나머지 청산: 저가 -3배 터치
-				bool bRest = signals.T2Bull[0];				// B 나머지 청산: MACD 상승 전환 AND 골든크로스
-				bool anyTp1  = aTp1 || bTp1;
-				bool anyRest = aRest || bRest;
-
-				if (anyTp1 && anyRest)	{ FlattenRemaining("5.6 1차+나머지 동시 → 전량"); return; }
-				if (anyRest)			{ FlattenRemaining("5.6 나머지 청산(1차 전) → 전량"); return; }
-				if (anyTp1)
-				{
-					sideSet = aTp1 ? SideSet.A : SideSet.B;	// 동시 충족이면 A (기본값)
-					MoveBreakeven();	// 익절 주문보다 먼저 예약한다
-					ExitChunk("SideS1", "5.6 1차 익절 1/2 (세트 " + sideSet + ")");
-					tp1Done = true;
-				}
+				FlattenRemaining("5.6 전량 익절(종가 " + BandText(SideRestLevel(), false) + " / MACD▲ / 골든)");
+				return;
 			}
-			else if (sideSet == SideSet.A)
+			if (!tp1Done && Close[0] <= channels.Dn2[0])
 			{
-				if (Low[0] <= BandDn(SideRestLevel()))	FlattenRemaining("5.6 A 나머지 청산(저가 " + BandText(SideRestLevel(), false) + " 터치)");
-			}
-			else	// 세트 B
-			{
-				if (signals.T2Bull[0])			FlattenRemaining("5.6 B 나머지 청산(T2 상승)");
+				MoveBreakeven();
+				ExitChunk("SideS1", "5.6 1단계 익절 1/3 (−2배)");
+				tp1Done = true;
 			}
 		}
 
@@ -1480,7 +1448,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tp1Done			= false;
 			tp2Done			= false;
 			strongMomentum	= false;
-			sideSet			= SideSet.None;
 			testHoldBars	= 0;
 			stopAtr = double.NaN;
 			breakevenDeferred = false;
@@ -1553,11 +1520,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (rv > 0)
 			{
 				longSetup	= signals.WaitUpLong == 0;
-				shortSetup	= UseCounterTrend && signals.WaitUpShort == 0;
+				shortSetup	= false;	// 역추세 진입 없음 (2026-10-14)
 			}
 			else if (rv < 0)
 			{
-				longSetup	= UseCounterTrend && (DnLongNeedDiv ? signals.WaitDnLongDiv : signals.WaitDnLong) == 0;
+				longSetup	= false;	// 역추세 진입 없음 (2026-10-14)
 				shortSetup	= DnShortWait() == 0;
 			}
 			else
@@ -1607,21 +1574,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				{
 					string longBlock	= BlockReentryAfterStop && blockLong ? "손절 뒤 재진입 금지" : null;
 					string shortBlock	= BlockReentryAfterStop && blockShort ? "손절 뒤 재진입 금지" : null;
-					string counterOff	= UseCounterTrend ? null : "역추세 진입 꺼짐";
-
 					if (rv > 0)
 					{
 						sb.Append(CandidateLine("매수(주력)", signals.WaitUpLong, BandText(UpLongBand, false) + " 이탈" + (TrendT2Entry ? " (또는 MACD▲ + 골든)" : ""), "MACD▲ / 골든", null, signals.T1BarsUp));
-						sb.Append(CandidateLine("매도(역추세)", signals.WaitUpShort, "+" + UpShortBand + "배 터치 + RSI 70 + 다이버전스", "MACD▼ / 데드", counterOff ?? shortBlock, signals.T1BarsUp));
 					}
 					else if (rv < 0)
 					{
 						sb.Append(CandidateLine("매도(주력)", DnShortWait(), BandText(DnShortBand, true) + " 돌파" + (TrendT2Entry ? " (또는 MACD▼ + 데드)" : ""),
 							DnShortNeedBoth ? "MACD▼ + 데드" : "MACD▼ / 데드 / RSI 70 + 다이버전스", null, signals.T1BarsDn));
-						if (DnLongNeedDiv)
-							sb.Append(CandidateLine("매수(역추세)", signals.WaitDnLongDiv, BandText(DnLongBand, false) + " 터치 + RSI 과매도 + 다이버전스", "MACD▲ / 골든", counterOff ?? longBlock, signals.T1BarsDn));
-						else
-							sb.Append(CandidateLine("매수(역추세)", signals.WaitDnLong, BandText(DnLongBand, false) + " 이탈", "RSI 20 아래 / MACD▲ / 골든", counterOff ?? longBlock, signals.T1BarsDn));
 					}
 					else
 					{
@@ -1714,30 +1674,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					sb.Append("○ RSI 20 아래 → 전량 청산\n");
 					break;
 				case ActiveStrategy.SideLong:
-					if (sideSet == SideSet.None)
-					{
-						sb.Append("○ A: +2배 / MACD▼ / 데드 → 1/2 익절\n");
-						sb.Append("○ B: %K 80 돌파 → 1/2 익절\n");
-						sb.AppendFormat("○ 고가 {0} 또는 MACD▼ + 데드 → 전량 청산\n", BandText(SideRestLevel(), true));
-					}
-					else
-					{
-						sb.AppendFormat("● 1/2 익절 (세트 {0})\n", sideSet);
-						sb.Append(sideSet == SideSet.A ? "○ 고가 " + BandText(SideRestLevel(), true) + " 터치 → 전량 청산\n" : "○ MACD▼ + 데드 → 전량 청산\n");
-					}
+					sb.AppendFormat("{0} +2배 닿음 → 1/3 익절 (본절)\n", Mark(tp1Done));
+					sb.AppendFormat("○ 종가 {0} / MACD▼ / 데드 → 전량 익절\n", BandText(SideRestLevel(), true));
 					break;
 				case ActiveStrategy.SideShort:
-					if (sideSet == SideSet.None)
-					{
-						sb.Append("○ A: −2배 / MACD▲ / 골든 → 1/2 익절\n");
-						sb.Append("○ B: %K 20 이탈 → 1/2 익절\n");
-						sb.AppendFormat("○ 저가 {0} 또는 MACD▲ + 골든 → 전량 청산\n", BandText(SideRestLevel(), false));
-					}
-					else
-					{
-						sb.AppendFormat("● 1/2 익절 (세트 {0})\n", sideSet);
-						sb.Append(sideSet == SideSet.A ? "○ 저가 " + BandText(SideRestLevel(), false) + " 터치 → 전량 청산\n" : "○ MACD▲ + 골든 → 전량 청산\n");
-					}
+					sb.AppendFormat("{0} −2배 닿음 → 1/3 익절 (본절)\n", Mark(tp1Done));
+					sb.AppendFormat("○ 종가 {0} / MACD▲ / 골든 → 전량 익절\n", BandText(SideRestLevel(), false));
 					break;
 				default:
 					sb.Append("● 청산 주문 냄, 체결 대기\n");
@@ -1903,7 +1845,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public bool T2CountConfirmBars { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "역추세 진입 사용 (UseCounterTrend)", Description = "상승추세 매도(5.2)와 하락추세 매수(5.3)를 할지. 끄면 추세 방향 진입과 횡보 진입만", GroupName = "4. 진입 — 공통", Order = 1)]
+		[Display(Name = "역추세 진입 사용 (UseCounterTrend)", Description = "2026-10-14부터 쓰지 않음: 역추세 진입(5.2, 5.3)은 켜도 하지 않는다. 설정 기록에만 남음", GroupName = "4. 진입 — 공통", Order = 1)]
 		public bool UseCounterTrend { get; set; }
 
 		[NinjaScriptProperty]
@@ -2049,7 +1991,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 3)]
-		[Display(Name = "횡보: 나머지 수량 청산 밴드 (SideRestBand)", Description = "횡보 세트 A에서 고가(저가)가 몇 배 밴드에 닿으면 나머지를 청산할지. 명세는 3, 0 = 중심선", GroupName = "7. 청산", Order = 0)]
+		[Display(Name = "횡보: 나머지 수량 청산 밴드 (SideRestBand)", Description = "횡보에서 종가가 몇 배 밴드 이상(매도는 이하)이면 남은 수량을 전량 익절할지. 명세는 3, 0 = 중심선", GroupName = "7. 청산", Order = 0)]
 		public int SideRestBand { get; set; }
 
 		[NinjaScriptProperty]
