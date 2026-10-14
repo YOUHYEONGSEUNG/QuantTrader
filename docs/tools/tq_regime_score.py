@@ -189,6 +189,8 @@ DEFAULTS = dict(
     cross_low=20.0, cross_high=80.0, cross_filter=5, suspect_return=True, rsi_lookback=1, mode=1,
     score_min=2, score_rsi_band=5.0, no_sideways=False, score_event_bars=3, rsi_relative=False,
     rsi_center_bars=20, rsi_offset=8.0, score_exit=0, suspect_needs_price=False, pivot=2,
+    # 2026-10-14 TQ_Regime 추가 설정 (기본값이면 그 전과 같은 값)
+    suspect_max_score=5, suspect_min_evidence=1, suspect_evidence_bars=2, trend_confirm_bars=1, trend_exit_bars=1,
 )
 
 # 설정 문자열의 짧은 이름 → DEFAULTS 키
@@ -196,6 +198,8 @@ ALIASES = {
     "rsirel": "rsi_relative", "center": "rsi_center_bars", "offset": "rsi_offset", "scoremin": "score_min",
     "exit": "score_exit", "event": "score_event_bars", "band": "score_rsi_band", "nosideways": "no_sideways",
     "needsprice": "suspect_needs_price", "return": "suspect_return", "rsibars": "rsi_lookback",
+    "maxscore": "suspect_max_score", "evidence": "suspect_min_evidence", "evbars": "suspect_evidence_bars",
+    "confirm": "trend_confirm_bars", "exitbars": "trend_exit_bars",
 }
 
 
@@ -238,11 +242,14 @@ def compute_regime(tb, p):
 
     P = p["pivot"]
     min_bars = max(p["slow"] - 1, p["div_bars"] + P, p["cross_filter"], p["hist_bars"],
-                   p["rsi_lookback"] + p["rsi_center_bars"])
+                   p["rsi_lookback"] + p["rsi_center_bars"], p["suspect_evidence_bars"])
 
     suspect_up = suspect_dn = False
     last_dir = trend_dir = last_event_dir = 0
     last_event_bar = -1
+    up_start = dn_start = up_end = dn_end = 0      # 시작·종료 조건의 연속 봉 수 (TrendConfirmBars / TrendExitBars)
+    bear_evd = [0] * n                             # 의심 근거 비트: 1 다이버전스, 2 MACD 전환, 4 크로스, 8 가격 항목 (SuspectMinEvidence)
+    bull_evd = [0] * n
     out = []
     for i in range(n):
         rec = dict(regime=NAN, macd_line=mline[i], rsi=R[i], aligned=0, score=0)
@@ -300,19 +307,39 @@ def compute_regime(tb, p):
                                    and i - last_event_bar < p["score_event_bars"]) else 0
         score = c_ma + c_macd + c_rsi + c_sto + c_evt
 
+        # 시작·종료 조건 (TQ_Regime과 같음). 두 방식 모두 연속 봉 수를 채워야 바뀐다. 기본 1 / 1이면 그 봉의 조건 그대로
         if p["mode"] == 2:
-            if trend_dir == 1 and score <= p["score_exit"]:
-                trend_dir = 0
-            if trend_dir == -1 and score >= -p["score_exit"]:
-                trend_dir = 0
-            if trend_dir != 1 and c_ma > 0 and score >= p["score_min"]:
-                trend_dir = 1
-            elif trend_dir != -1 and c_ma < 0 and score <= -p["score_min"]:
-                trend_dir = -1
-            up_cond, dn_cond = trend_dir == 1, trend_dir == -1
+            start_up = c_ma > 0 and score >= p["score_min"]
+            start_dn = c_ma < 0 and score <= -p["score_min"]
+            end_up = score <= p["score_exit"]
+            end_dn = score >= -p["score_exit"]
         else:
-            up_cond = aligned > 0 and ml > 0
-            dn_cond = aligned < 0 and ml < 0
+            start_up = aligned > 0 and ml > 0
+            start_dn = aligned < 0 and ml < 0
+            end_up, end_dn = not start_up, not start_dn
+        up_start = up_start + 1 if start_up else 0
+        dn_start = dn_start + 1 if start_dn else 0
+        up_end = up_end + 1 if end_up else 0
+        dn_end = dn_end + 1 if end_dn else 0
+        if trend_dir == 1 and up_end >= p["trend_exit_bars"]:
+            trend_dir = 0
+        if trend_dir == -1 and dn_end >= p["trend_exit_bars"]:
+            trend_dir = 0
+        if trend_dir != 1 and up_start >= p["trend_confirm_bars"]:
+            trend_dir = 1
+        elif trend_dir != -1 and dn_start >= p["trend_confirm_bars"]:
+            trend_dir = -1
+        up_cond, dn_cond = trend_dir == 1, trend_dir == -1
+
+        # 의심의 근거 종류 수 (최근 suspect_evidence_bars봉)와 점수 상한
+        bear_evd[i] = (1 if bear_div else 0) | (2 if hist_dn else 0) | (4 if dead else 0) | (8 if c_ma <= 0 else 0)
+        bull_evd[i] = (1 if bull_div else 0) | (2 if hist_up else 0) | (4 if golden else 0) | (8 if c_ma >= 0 else 0)
+        bear_bits = bull_bits = 0
+        for j in range(min(p["suspect_evidence_bars"], i + 1)):
+            bear_bits |= bear_evd[i - j]
+            bull_bits |= bull_evd[i - j]
+        bear_ok = bin(bear_bits).count("1") >= p["suspect_min_evidence"] and score <= p["suspect_max_score"]
+        bull_ok = bin(bull_bits).count("1") >= p["suspect_min_evidence"] and score >= -p["suspect_max_score"]
 
         rsi_hi = rsi_lo = False
         for j in range(p["rsi_lookback"]):
@@ -326,14 +353,14 @@ def compute_regime(tb, p):
         r = 0
         if up_cond:
             suspect_dn = False
-            if rsi_hi and (bear_div or hist_dn or dead) and not (p["suspect_needs_price"] and c_ma > 0):
+            if rsi_hi and (bear_div or hist_dn or dead) and not (p["suspect_needs_price"] and c_ma > 0) and bear_ok:
                 suspect_up = True
             elif suspect_up and p["suspect_return"] and (hist_up or golden):
                 suspect_up = False
             r = 1 if suspect_up else 2
         elif dn_cond:
             suspect_up = False
-            if rsi_lo and (bull_div or hist_up or golden) and not (p["suspect_needs_price"] and c_ma < 0):
+            if rsi_lo and (bull_div or hist_up or golden) and not (p["suspect_needs_price"] and c_ma < 0) and bull_ok:
                 suspect_dn = True
             elif suspect_dn and p["suspect_return"] and (hist_dn or dead):
                 suspect_dn = False
@@ -551,6 +578,9 @@ HDR_NUM = {
     "score_event_bars": r"점수사건봉수=(\d+)", "rsi_center_bars": r"중심봉수=(\d+)", "rsi_offset": r"폭=([\d.]+) 추세종료",
     "score_exit": r"추세종료점수=(-?\d+)", "rsi_lookback": r"의심RSI봉수=(\d+)", "div_bars": r"다이버전스=(\d+)봉",
     "hist_bars": r"히스토그램=(\d+)봉",
+    "suspect_max_score": r"의심점수상한=(\d+)", "suspect_min_evidence": r"의심근거수=(\d+)",
+    "suspect_evidence_bars": r"의심근거수=\d+\((\d+)봉\)", "trend_confirm_bars": r"추세확정봉=(\d+)",
+    "trend_exit_bars": r"추세종료봉=(\d+)",
 }
 HDR_BOOL = {
     "rsi_relative": r"RSI상대기준=(True|False)", "no_sideways": r"횡보없음=(True|False)",
@@ -643,7 +673,8 @@ PRESETS = [
     ("문서 정의 3분", "mode=1,bar=3"),
     ("점수 10분", "mode=2,bar=10"),
     ("점수 3분", "mode=2,bar=3"),
-    ("유기 기준 세트 (점수 3분 + RSI 상대 26/6)", "mode=2,bar=3,rsirel=1,center=26,offset=6"),
+    ("예전 유기 기준 세트 (점수 3분 + RSI 상대 26/6)", "mode=2,bar=3,rsirel=1,center=26,offset=6"),
+    ("유기 기준 세트 10/14 (RSI 상대 14/6 + 의심 점수 상한 2)", "mode=2,bar=3,rsirel=1,center=14,offset=6,maxscore=2"),
 ]
 
 

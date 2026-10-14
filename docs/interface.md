@@ -24,6 +24,7 @@
 
 ## TQ_Regime (A) — 입력: 추세 봉 (전략에서 `TQ_Regime(BarsArray[regimeBip], ...)`)
 추세 5단계를 낸다 (spec 3장). 입력 시리즈는 전략이 정한다: 전략의 `RegimeBarMinutes`가 10이면 10분봉(기본), 3이면 3분봉, 1이면 진입 봉 자체다.
+전략의 두 단계 진입(`OrganicTwoStage`, spec 5-2)이 켜져 있으면 같은 설정으로 진입 봉(`BarsArray[0]`)에 하나 더 만든다. 그 인스턴스도 추세가 바뀔 때마다 Output 창에 "추세 전환" 줄을 찍는다.
 
 | 설정값 (생성자 인자 순서) | 기본값 | 의미 |
 | --- | --- | --- |
@@ -49,9 +50,14 @@
 | RsiOffset | 8 | RsiRelative: 중심에서 이만큼 벗어나야 조건 충족 |
 | ScoreExit | 0 | 점수 방식: 상승추세는 점수가 이 값 이하로 내려가면 끝난다 (하락추세는 부호 반대) |
 | SuspectNeedsPrice | false | 켜면 가격 항목이 아직 추세 방향일 때는 의심을 켜지 않는다 |
+| SuspectMaxScore | 5 | 하락 전환 의심은 점수 ≤ 이 값, 상승 전환 의심은 점수 ≥ −이 값일 때만 켠다. 5 = 제한 없음 (2026-10-14 추가) |
+| SuspectMinEvidence | 1 | 의심에 필요한 근거 종류 수 (다이버전스, MACD 전환, 크로스, 가격 항목이 추세 방향이 아님). 1 = 하나로 충분 (2026-10-14 추가) |
+| SuspectEvidenceBars | 2 | 근거를 모으는 봉 수(현재 포함) (2026-10-14 추가) |
+| TrendConfirmBars | 1 | 추세 시작 조건이 몇 봉 연속이어야 추세로 인정할지 (2026-10-14 추가) |
+| TrendExitBars | 1 | 추세 종료 조건이 몇 봉 연속이어야 추세를 끝낼지 (2026-10-14 추가) |
 | ShowPlots | false | 차트 표시 전용. 생성자 인자가 아니다 |
 
-전략의 설정값 이름은 앞에 `Regime`이 붙는다(`RegimeMode`, `RegimeScoreMin`, `RegimeRsiRelative` 등). 예외: `RsiLookback` ↔ `RegimeRsiBars`, `HistBars` ↔ `RegimeHistBars`, `SuspectReturn`·MACD·스토캐스틱·크로스·RSI 기간은 같은 이름.
+전략의 설정값 이름은 앞에 `Regime`이 붙는다(`RegimeMode`, `RegimeScoreMin`, `RegimeRsiRelative`, `RegimeSuspectMaxScore` 등). 예외: `RsiLookback` ↔ `RegimeRsiBars`, `HistBars` ↔ `RegimeHistBars`, `TrendConfirmBars` ↔ `RegimeConfirmBars`, `TrendExitBars` ↔ `RegimeExitBars`, `SuspectReturn`·MACD·스토캐스틱·크로스·RSI 기간은 같은 이름.
 
 | 이름 | 타입 | 의미 |
 | --- | --- | --- |
@@ -68,7 +74,9 @@
 판정 (spec 3장, 3-1):
 - Mode 1: 상승추세 조건 = 정배열 AND MACD선 > 0. 하락추세 조건 = 역배열 AND MACD선 < 0.
 - Mode 2: 다섯 항목이 각각 +1 / −1 / 0을 낸다. 가격(종가 vs SMA Fast, 그리고 SMA Fast가 직전 봉보다 높은지), MACD 히스토그램(부호 AND 직전 봉 대비 같은 방향), RSI(50 ± ScoreRsiBand), 스토캐스틱(%K vs %D AND %K가 50의 같은 쪽), 사건(최근 ScoreEventBars봉 안의 가장 최근 사건의 방향. 상승 쪽 = MACD 상승 전환·골든크로스·상승 다이버전스). 가격이 +1이고 합계 ≥ ScoreMin이면 상승추세 시작, 합계 ≤ ScoreExit이면 끝. 하락은 거울상.
+- 두 방식 모두, 시작 조건이 TrendConfirmBars봉 연속이면 추세가 되고, 종료 조건(Mode 2는 점수 ≤ ScoreExit, Mode 1은 시작 조건이 깨짐)이 TrendExitBars봉 연속이면 끝난다. 반대 방향의 시작 조건이 채워지면 바로 바뀐다. 기본(1 / 1)이면 그 봉의 조건 그대로다.
 - 두 방식 모두, 상승·하락 조건이 둘 다 아니면 횡보이고 의심 상태도 끝난다 (NoSideways가 켜져 있으면 마지막 추세의 전환 의심).
+- 의심을 켜는 추가 조건(기본은 모두 통과): 최근 SuspectEvidenceBars봉 안의 근거 종류 수 ≥ SuspectMinEvidence, 그리고 점수 ≤ SuspectMaxScore(상승 전환 의심은 ≥ −SuspectMaxScore).
 - 상승추세 조건 중: RSI 조건(최근 RsiLookback봉 안에 한 번이라도) AND [하락 다이버전스 OR MACD 하락 전환 OR 데드크로스]면 의심을 켠다. RSI 조건은 RsiRelative가 꺼져 있으면 RSI ≥ RsiHigh, 켜져 있으면 RSI ≥ 그 봉의 RSI 평균 + RsiOffset. SuspectNeedsPrice가 켜져 있으면 가격 항목이 +1인 봉에서는 켜지 않는다. 의심은 유지되고, SuspectReturn이 켜져 있으면 MACD 상승 전환 또는 골든크로스에서 푼다. 하락 쪽은 거울상.
 - 다이버전스: DivBars봉 안에서 좌우 PivotStrength봉보다 고가가 높은 봉(고점) 중 가장 높은 것과 지금 봉을 비교. 지금 고가가 더 높은데 RSI는 낮으면 하락 다이버전스. 저점으로 거울상이 상승 다이버전스.
 - MACD 전환은 TQ_MacdTurn(…, HistBars, 14, 0)의 TurnUp/TurnDown을 쓴다 (히스토그램 HistBars봉 연속 증가·감소가 처음 확인된 봉).
@@ -128,7 +136,7 @@ TQ_Signals의 스토캐스틱과 같은 식으로 %K·%D를 계산해 독립 패
 | DnSusLongBand | 1 | 5.6: 저가가 몇 배 밴드에 터치 |
 | DnSusShortBand | 2 | 5.7: 종가가 몇 배 밴드 위 |
 | SideBand | 2 | 5.8·5.9: 저가(고가)가 몇 배 밴드에 터치 |
-| T1WindowUp / T1WindowDn / T1WindowSide | 0 | 5.1~5.3 / 5.4~5.7 / 5.8·5.9의 T1 대기 봉 수. 0이면 T1Window |
+| T1WindowUp / T1WindowDn / T1WindowSide | 0 | 5.1~5.3 / 5.4~5.7 / 5.8·5.9의 T1 대기 봉 수. 0이면 T1Window. 전략은 2026-10-14부터 항상 0을 넘긴다(전략 설정에서 뺐음) |
 | T2CountConfirmBars | true | T2에서 MACD 확인에 걸린 봉 수만큼 앞의 크로스도 인정 |
 | T1SameBar | false | 켜면 밴드 조건이 충족된 봉 자체의 반전 신호도 인정 |
 | ShowPlots | false | 차트 표시 전용. 생성자 인자가 아니다 |
@@ -189,4 +197,4 @@ T1 처리 규칙 (spec 2장 T1)
 - 마지막 조각 조건: `Close[0]`과 `TQ_Signals.Sma[0]` 비교.
 - 전량 청산 조건: MacdDown / Dead / T2Bull / T2Bear, 그리고 추세가 전환 의심으로 바뀌는지.
 - 손절가: 신호 봉의 SwingLow5/SwingHigh5와 ±StopPercent% 중 한쪽(StopWider). 신호 봉 종가로 먼저 걸고 체결되면 실제 체결가로 다시 계산 (spec 4장).
-- 유기 모드(`OrganicMode`, spec 5-2)와 추가 옵션들: 추세가 정하는 진입 방향, 추세 확정 봉 진입, `TQ_Regime.Score`로 횡보 진입 막기, ATR 손절, 추세 청산, 추세가 바뀔 때 대기 이어 가기(`KeepWaitOnTrendChange`). 모두 전략 쪽에 있고 지표는 추세·포지션을 모른 채 값만 낸다.
+- 유기 모드(`OrganicMode`, spec 5-2)와 추가 옵션들: 추세가 정하는 진입 방향, 추세 확정 봉 진입, `TQ_Regime.Score`로 횡보 진입 막기, ATR 손절과 구조 손절(추세 봉의 고가·저가는 전략이 `Highs`/`Lows[regimeBip]`로 직접 읽는다), 추세 청산, 두 단계 진입(진입 봉 `TQ_Regime.Regime`), 의심 뒤 가격 확인 역진입(`SwingHigh5`/`SwingLow5[1]` 돌파), 반전 신호 큐(9개 진입 신호를 추세와 상관없이 기억), 익절 비중, 이익 따라가기 청산, 추세가 바뀔 때 대기 이어 가기(`KeepWaitOnTrendChange`). 모두 전략 쪽에 있고 지표는 추세·포지션을 모른 채 값만 낸다.

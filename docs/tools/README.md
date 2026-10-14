@@ -54,6 +54,10 @@ py docs/tools/tq_regime_score.py --data "C:\Users\user\Desktop\Ninja_Exports\MNQ
 | `scoremin` / `exit` / `band` / `event` | 2 / 0 / 5 / 3 | `rsibars` | 1 |
 | `rsirel` / `center` / `offset` | 0 / 20 / 8 | `return` (SuspectReturn) | 1 |
 | `nosideways` / `needsprice` | 0 / 0 | MACD·스토캐스틱·크로스 | spec 기본값 |
+| `maxscore` (SuspectMaxScore) | 5 | `evidence` / `evbars` (SuspectMinEvidence / SuspectEvidenceBars) | 1 / 2 |
+| `confirm` / `exitbars` (TrendConfirmBars / TrendExitBars) | 1 / 1 | | |
+
+`maxscore`·`evidence`·`evbars`·`confirm`·`exitbars`는 2026-10-14에 TQ_Regime과 같이 넣었다(spec 3-1). 그날은 Python이 없는 PC에서 고쳐서 실행해 보지 못했다. 기본값이면 그 전과 같은 값을 낸다. 설정을 주지 않으면 비교하는 기본 목록에 10/14 유기 기준 세트(점수 3분 + RSI 상대 14/6 + 의심 점수 상한 2)를 더했다.
 
 ## 재현 검증 결과 (2026-10-14)
 

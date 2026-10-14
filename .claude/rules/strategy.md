@@ -16,6 +16,7 @@ paths:
 - 분할 익절을 위해 진입을 시그널명으로 나눠 낸다. 규칙별 분할 계획은 `Plan()`에 있다 (spec 5장 표).
   - 시그널명은 규칙 접두어 + 단계 번호다 (예: 상승추세 매수 30계약 → "UpL1" 6, "UpL2" 12, "UpL3" 12). 마지막 번호가 마지막 조각이다.
   - `EntryHandling = UniqueEntries`, `EntriesPerDirection = 1`로 시그널명마다 한 번씩 진입한다.
+  - 두 단계 진입(`OrganicTwoStage`)의 2단계는 같은 단계에 시그널명 뒤 "b"를 붙여 추가한다 (예: "UpL1b"). 그래서 마지막 조각은 하나가 아닐 수 있다: 마지막 조각은 `chunkBand`가 `NoBand`인 조각으로 찾고(`LastChunks()`), 익절 단계 수(`tpCount`)는 조각이 아니라 체결된 밴드 수로 센다(`filledLevels`).
 - 손절은 진입 시그널별로 `SetStopLoss(signal, CalculationMode.Price, price, false)`. 진입 주문보다 먼저 건다.
 - 단계별 밴드 익절은 `SetProfitTarget(signal, CalculationMode.Price, price)`로 건다 (`IntrabarTakeProfit`). 손절(SetStopLoss)과 같이 쓸 수 있는 지정가는 이것뿐이다. `ExitLongLimit` 같은 지정가·스탑 Exit 주문은 쓰지 않는다.
   - Set 계열의 값은 시그널명에 남는다. 마지막 조각의 시그널명에는 SetProfitTarget을 걸지 않으므로, 한 규칙 안에서 시그널명과 역할(밴드 단계인지 마지막 조각인지)을 바꾸지 않는다.

@@ -51,6 +51,14 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		private int				lastEventBar	= -1;	// 그 사건이 나온 봉 번호
 		private int				score;			// 점수 방식의 합계 (−5 ~ +5)
 		private string			scoreText		= "";	// 화면·로그용: 지표별 방향
+		// 추세 확정·종료의 연속 봉 수 (TrendConfirmBars / TrendExitBars): 각 조건이 몇 봉째 연속으로 맞는지
+		private int				upStartRun;
+		private int				dnStartRun;
+		private int				upEndRun;
+		private int				dnEndRun;
+		// 의심의 근거 기록 (SuspectMinEvidence): 봉마다 나온 근거를 비트로. 1 = 다이버전스, 2 = MACD 전환, 4 = 크로스, 8 = 가격 항목이 추세 방향이 아님
+		private Series<int>		bearEvidence;	// 하락 전환 의심 쪽 근거
+		private Series<int>		bullEvidence;	// 상승 전환 의심 쪽 근거
 
 		protected override void OnStateChange()
 		{
@@ -95,6 +103,12 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				SuspectNeedsPrice			= false;	// 켜면 가격이 아직 추세 방향(종가가 단기선 위 + 단기선 상승)이면 의심을 띄우지 않는다
 				ScoreMin					= 2;		// 점수 방식: 추세로 인정할 최소 점수 (같은 방향 지표 수 − 반대 방향 지표 수)
 				ScoreRsiBand				= 5;		// 점수 방식: RSI가 50에서 이만큼 벗어나야 방향으로 인정 (5면 55 이상 / 45 이하)
+				// 2026-10-14 추가 (spec 3-1). 기본값은 그 전과 같은 동작
+				SuspectMaxScore				= 5;		// 의심은 추세 점수가 이 값 이하(하락추세 쪽은 −값 이상)일 때만. 5 = 제한 없음
+				SuspectMinEvidence			= 1;		// 의심에 필요한 근거 종류 수. 1 = 근거 하나로 충분
+				SuspectEvidenceBars			= 2;		// 근거를 모으는 봉 수 (현재 포함)
+				TrendConfirmBars			= 1;		// 추세 시작 조건이 몇 봉 연속이어야 추세로 인정할지
+				TrendExitBars				= 1;		// 추세 종료 조건이 몇 봉 연속이어야 추세를 끝낼지
 				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다(값은 그대로, 전략 동작 무관)
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
@@ -139,9 +153,15 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				lastDir			= 0;
 				score			= 0;
 				scoreText		= "";
+				upStartRun		= 0;
+				dnStartRun		= 0;
+				upEndRun		= 0;
+				dnEndRun		= 0;
+				bearEvidence	= new Series<int>(this);
+				bullEvidence	= new Series<int>(this);
 
 				// 참조하는 가장 먼 인덱스: 이동평균 Slow, 다이버전스 DivBars + PivotStrength봉 전, 크로스 필터
-				minBars		= Math.Max(Slow - 1, Math.Max(DivBars + PivotStrength, Math.Max(CrossFilterBars, Math.Max(HistBars, RsiLookback + RsiCenterBars))));
+				minBars		= Math.Max(Slow - 1, Math.Max(DivBars + PivotStrength, Math.Max(CrossFilterBars, Math.Max(HistBars, Math.Max(RsiLookback + RsiCenterBars, SuspectEvidenceBars)))));
 
 				// 검증용 배경색. 직접 만든 브러시는 한 번만 만들고 Freeze한다
 				upBrush				= new SolidColorBrush(Color.FromArgb(45, 0, 200, 0));
@@ -252,25 +272,51 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			scoreText	= "가격" + Arrow(cMa) + " MACD" + Arrow(cMacd) + " RSI" + Arrow(cRsi) + " 스토" + Arrow(cSto)
 							+ (ScoreEventBars > 0 ? " 사건" + Arrow(cEvt) : "");
 
-			bool upCond, dnCond;
+			// 추세의 시작 조건과 종료 조건
+			//  · Mode 2 (점수 방식): 시작 = 가격 조건(①)이 맞고 점수가 ScoreMin 이상. 종료 = 점수가 ScoreExit 이하.
+			//    벗어나는 기준을 들어가는 기준보다 느슨하게 둔다. 같은 기준을 쓰면 지표 하나가 흔들릴 때마다 추세가 켜졌다 꺼졌다 한다
+			//  · Mode 1 (spec 3장 회의 문서 정의): 시작 = 정배열 AND MACD선 > 0 (하락은 반대). 종료 = 그 조건이 깨짐
+			bool startUp, startDn, endUp, endDn;
 			if (Mode == 2)
 			{
-				// 추세를 벗어나는 기준은 들어가는 기준보다 느슨하게 둔다 (점수가 1 아래로 내려가야 상승추세가 끝남).
-				// 같은 기준을 쓰면 지표 하나가 흔들릴 때마다 추세가 켜졌다 꺼졌다 한다
-				if (trendDir == 1 && score <= ScoreExit)		trendDir = 0;
-				if (trendDir == -1 && score >= -ScoreExit)	trendDir = 0;
-				// 추세로 들어가는 기준: 가격 조건(①)이 맞고 점수가 ScoreMin 이상
-				if (trendDir != 1 && cMa > 0 && score >= ScoreMin)			trendDir = 1;
-				else if (trendDir != -1 && cMa < 0 && score <= -ScoreMin)	trendDir = -1;
-				upCond = trendDir == 1;
-				dnCond = trendDir == -1;
+				startUp	= cMa > 0 && score >= ScoreMin;
+				startDn	= cMa < 0 && score <= -ScoreMin;
+				endUp	= score <= ScoreExit;
+				endDn	= score >= -ScoreExit;
 			}
 			else
 			{
-				// spec 3장 회의 문서 정의 (Mode 1): 상승추세 = 정배열 AND MACD선 > 0, 하락추세 = 역배열 AND MACD선 < 0
-				upCond = aligned > 0 && ml > 0;
-				dnCond = aligned < 0 && ml < 0;
+				startUp	= aligned > 0 && ml > 0;
+				startDn	= aligned < 0 && ml < 0;
+				endUp	= !startUp;
+				endDn	= !startDn;
 			}
+
+			// spec 3-1 추세 확정·종료의 연속 봉 수 (TrendConfirmBars / TrendExitBars, 기본 1 = 그 봉에서 바로):
+			// 시작 조건이 TrendConfirmBars봉 연속이어야 추세로 인정하고, 종료 조건이 TrendExitBars봉 연속이어야 끝낸다.
+			// 2026-10-14 로그: 대회 시간 3분봉 40봉 동안 추세 값이 11~16번 바뀌었다(약 3봉에 한 번). 한 봉짜리 흔들림을 거르기 위함
+			upStartRun	= startUp ? upStartRun + 1 : 0;
+			dnStartRun	= startDn ? dnStartRun + 1 : 0;
+			upEndRun	= endUp ? upEndRun + 1 : 0;
+			dnEndRun	= endDn ? dnEndRun + 1 : 0;
+			if (trendDir == 1 && upEndRun >= TrendExitBars)		trendDir = 0;
+			if (trendDir == -1 && dnEndRun >= TrendExitBars)	trendDir = 0;
+			if (trendDir != 1 && upStartRun >= TrendConfirmBars)		trendDir = 1;
+			else if (trendDir != -1 && dnStartRun >= TrendConfirmBars)	trendDir = -1;
+			bool upCond = trendDir == 1;
+			bool dnCond = trendDir == -1;
+
+			// spec 3-1 의심의 근거 (SuspectMinEvidence): 이 봉의 근거를 기록하고, 최근 SuspectEvidenceBars봉 동안 나온 근거의 종류 수를 센다.
+			// 근거 = 다이버전스, MACD 전환, 크로스, 가격 항목(①)이 더는 추세 방향이 아님(하락 전환 의심 쪽은 cMa ≤ 0)
+			bearEvidence[0]	= (bearDiv ? 1 : 0) | (histDown ? 2 : 0) | (dead ? 4 : 0) | (cMa <= 0 ? 8 : 0);
+			bullEvidence[0]	= (bullDiv ? 1 : 0) | (histUp ? 2 : 0) | (golden ? 4 : 0) | (cMa >= 0 ? 8 : 0);
+			int bearKinds = EvidenceKinds(bearEvidence);
+			int bullKinds = EvidenceKinds(bullEvidence);
+			// spec 3-1 의심은 추세의 힘이 빠진 뒤에만 (SuspectMaxScore, 기본 5 = 제한 없음): 하락 전환 의심은 점수 ≤ SuspectMaxScore일 때만,
+			// 상승 전환 의심은 점수 ≥ −SuspectMaxScore일 때만 띄운다.
+			// 2026-10-14 로그(의심 17건): 점수 ±1 이하에서 뜬 의심은 7건 모두 30분 안에 의심 방향으로 더 크게 움직였고, ±2 이상에서 뜬 것은 10건 중 3건
+			bool bearRoom = score <= SuspectMaxScore;
+			bool bullRoom = score >= -SuspectMaxScore;
 
 			// spec 3장 의심의 RSI 조건: 최근 RsiLookback봉(현재 포함) 안에 기준을 넘은 적이 있으면 충족.
 			// MACD 전환·크로스는 가격이 꺾인 뒤 1~2봉 늦게 확인되는데 그때는 RSI가 이미 기준 안쪽으로 돌아와 있어서,
@@ -294,7 +340,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			{
 				suspectInDown = false;
 				// 하락 전환 의심: RSI ≥ RsiHigh (최근 RsiLookback봉) AND [RSI 다이버전스 OR MACD 하락 전환 OR 데드크로스]
-				if (rsiWasHigh && (bearDiv || histDown || dead) && !(SuspectNeedsPrice && cMa > 0))
+				if (rsiWasHigh && (bearDiv || histDown || dead) && !(SuspectNeedsPrice && cMa > 0)
+					&& bearKinds >= SuspectMinEvidence && bearRoom)
 				{
 					suspectInUp		= true;
 					suspectReason	= Reason(bearDiv, histDown, dead, false);
@@ -309,7 +356,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			{
 				suspectInUp = false;
 				// 상승 전환 의심: RSI ≤ RsiLow (최근 RsiLookback봉) AND [RSI 다이버전스 OR MACD 상승 전환 OR 골든크로스]
-				if (rsiWasLow && (bullDiv || histUp || golden) && !(SuspectNeedsPrice && cMa < 0))
+				if (rsiWasLow && (bullDiv || histUp || golden) && !(SuspectNeedsPrice && cMa < 0)
+					&& bullKinds >= SuspectMinEvidence && bullRoom)
 				{
 					suspectInDown	= true;
 					suspectReason	= Reason(bullDiv, histUp, golden, true);
@@ -353,6 +401,18 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 			if (ShowDebugVisuals)
 				BackBrushAll = r == 2 ? upBrush : r == 1 ? upSuspectBrush : r == -1 ? downSuspectBrush : r == -2 ? downBrush : null;
+		}
+
+		// 최근 SuspectEvidenceBars봉(현재 포함)에 나온 근거의 종류 수 (비트 OR 후 켜진 비트 수)
+		private int EvidenceKinds(Series<int> evidence)
+		{
+			int bits = 0;
+			for (int i = 0; i < SuspectEvidenceBars && i <= CurrentBar; i++)
+				bits |= evidence[i];
+			int kinds = 0;
+			for (; bits != 0; bits >>= 1)
+				kinds += bits & 1;
+			return kinds;
 		}
 
 		private string Arrow(int v)
@@ -534,8 +594,33 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Display(Name = "SuspectNeedsPrice", Description = "켜면 종가가 아직 단기선 위에 있고 단기선이 오르는 중일 때는 하락 전환 의심을 띄우지 않는다 (상승 전환 의심은 반대)", GroupName = "Parameters", Order = 30)]
 		public bool SuspectNeedsPrice { get; set; }
 
+		[NinjaScriptProperty]
+		[Range(0, 5)]
+		[Display(Name = "SuspectMaxScore", Description = "하락 전환 의심은 추세 점수가 이 값 이하일 때만, 상승 전환 의심은 −이 값 이상일 때만 띄운다(추세의 힘이 빠진 뒤에만). 5 = 제한 없음(기본). 1이면 점수 +2 이상인 강한 상승 중에는 하락 전환 의심을 띄우지 않음", GroupName = "Parameters", Order = 31)]
+		public int SuspectMaxScore { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 4)]
+		[Display(Name = "SuspectMinEvidence", Description = "의심에 필요한 근거 종류 수. 근거 = 다이버전스, MACD 전환, 크로스, 가격 항목이 더는 추세 방향이 아님. 최근 SuspectEvidenceBars봉 안에서 센다. 1 = 근거 하나로 충분(기본). 그 봉에 다이버전스·MACD 전환·크로스 중 하나는 있어야 하는 것은 같음", GroupName = "Parameters", Order = 32)]
+		public int SuspectMinEvidence { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "SuspectEvidenceBars", Description = "SuspectMinEvidence: 근거를 모으는 봉 수(현재 포함). 기본 2", GroupName = "Parameters", Order = 33)]
+		public int SuspectEvidenceBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "TrendConfirmBars", Description = "추세 시작 조건(Mode 2: 가격 조건 + 최소 점수, Mode 1: 정배열 + MACD선 부호)이 몇 봉 연속이어야 추세로 인정할지. 1 = 그 봉에서 바로(기본)", GroupName = "Parameters", Order = 34)]
+		public int TrendConfirmBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "TrendExitBars", Description = "추세 종료 조건(Mode 2: 점수가 ScoreExit 이하, Mode 1: 시작 조건이 깨짐)이 몇 봉 연속이어야 추세를 끝낼지. 1 = 그 봉에서 바로(기본). 반대 방향 추세의 시작 조건이 TrendConfirmBars를 채우면 그때는 바로 바뀜", GroupName = "Parameters", Order = 35)]
+		public int TrendExitBars { get; set; }
+
 		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다(전략 호출부·생성 코드 그대로)
-		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 31)]
+		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 36)]
 		public bool ShowPlots { get; set; }
 
 		[Browsable(false)]
@@ -564,7 +649,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[XmlIgnore]
 		public string SuspectReason { get { Update(); return suspectReason; } }
 
-		// 화면 표시용: 점수 방식의 합계(−4 ~ +4)와 지표별 방향. Mode 1에서도 계산은 한다
+		// 화면 표시용: 점수 방식의 합계(−5 ~ +5, 사건 항목을 끄면 −4 ~ +4)와 지표별 방향. Mode 1에서도 계산은 한다
 		[Browsable(false)]
 		[XmlIgnore]
 		public int Score { get { Update(); return score; } }
@@ -588,18 +673,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_Regime[] cacheTQ_Regime;
-		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
-			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice);
+			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
 		}
 
-		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
 			if (cacheTQ_Regime != null)
 				for (int idx = 0; idx < cacheTQ_Regime.Length; idx++)
-					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].HistBars == histBars && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].RsiHigh == rsiHigh && cacheTQ_Regime[idx].RsiLow == rsiLow && cacheTQ_Regime[idx].DivBars == divBars && cacheTQ_Regime[idx].PivotStrength == pivotStrength && cacheTQ_Regime[idx].StochPeriodK == stochPeriodK && cacheTQ_Regime[idx].StochSmooth == stochSmooth && cacheTQ_Regime[idx].StochPeriodD == stochPeriodD && cacheTQ_Regime[idx].CrossLow == crossLow && cacheTQ_Regime[idx].CrossHigh == crossHigh && cacheTQ_Regime[idx].CrossFilterBars == crossFilterBars && cacheTQ_Regime[idx].SuspectReturn == suspectReturn && cacheTQ_Regime[idx].RsiLookback == rsiLookback && cacheTQ_Regime[idx].Mode == mode && cacheTQ_Regime[idx].ScoreMin == scoreMin && cacheTQ_Regime[idx].ScoreRsiBand == scoreRsiBand && cacheTQ_Regime[idx].NoSideways == noSideways && cacheTQ_Regime[idx].ScoreEventBars == scoreEventBars && cacheTQ_Regime[idx].RsiRelative == rsiRelative && cacheTQ_Regime[idx].RsiCenterBars == rsiCenterBars && cacheTQ_Regime[idx].RsiOffset == rsiOffset && cacheTQ_Regime[idx].ScoreExit == scoreExit && cacheTQ_Regime[idx].SuspectNeedsPrice == suspectNeedsPrice && cacheTQ_Regime[idx].EqualsInput(input))
+					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].HistBars == histBars && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].RsiHigh == rsiHigh && cacheTQ_Regime[idx].RsiLow == rsiLow && cacheTQ_Regime[idx].DivBars == divBars && cacheTQ_Regime[idx].PivotStrength == pivotStrength && cacheTQ_Regime[idx].StochPeriodK == stochPeriodK && cacheTQ_Regime[idx].StochSmooth == stochSmooth && cacheTQ_Regime[idx].StochPeriodD == stochPeriodD && cacheTQ_Regime[idx].CrossLow == crossLow && cacheTQ_Regime[idx].CrossHigh == crossHigh && cacheTQ_Regime[idx].CrossFilterBars == crossFilterBars && cacheTQ_Regime[idx].SuspectReturn == suspectReturn && cacheTQ_Regime[idx].RsiLookback == rsiLookback && cacheTQ_Regime[idx].Mode == mode && cacheTQ_Regime[idx].ScoreMin == scoreMin && cacheTQ_Regime[idx].ScoreRsiBand == scoreRsiBand && cacheTQ_Regime[idx].NoSideways == noSideways && cacheTQ_Regime[idx].ScoreEventBars == scoreEventBars && cacheTQ_Regime[idx].RsiRelative == rsiRelative && cacheTQ_Regime[idx].RsiCenterBars == rsiCenterBars && cacheTQ_Regime[idx].RsiOffset == rsiOffset && cacheTQ_Regime[idx].ScoreExit == scoreExit && cacheTQ_Regime[idx].SuspectNeedsPrice == suspectNeedsPrice && cacheTQ_Regime[idx].SuspectMaxScore == suspectMaxScore && cacheTQ_Regime[idx].SuspectMinEvidence == suspectMinEvidence && cacheTQ_Regime[idx].SuspectEvidenceBars == suspectEvidenceBars && cacheTQ_Regime[idx].TrendConfirmBars == trendConfirmBars && cacheTQ_Regime[idx].TrendExitBars == trendExitBars && cacheTQ_Regime[idx].EqualsInput(input))
 						return cacheTQ_Regime[idx];
-			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, HistBars = histBars, RsiPeriod = rsiPeriod, RsiHigh = rsiHigh, RsiLow = rsiLow, DivBars = divBars, PivotStrength = pivotStrength, StochPeriodK = stochPeriodK, StochSmooth = stochSmooth, StochPeriodD = stochPeriodD, CrossLow = crossLow, CrossHigh = crossHigh, CrossFilterBars = crossFilterBars, SuspectReturn = suspectReturn, RsiLookback = rsiLookback, Mode = mode, ScoreMin = scoreMin, ScoreRsiBand = scoreRsiBand, NoSideways = noSideways, ScoreEventBars = scoreEventBars, RsiRelative = rsiRelative, RsiCenterBars = rsiCenterBars, RsiOffset = rsiOffset, ScoreExit = scoreExit, SuspectNeedsPrice = suspectNeedsPrice }, input, ref cacheTQ_Regime);
+			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, HistBars = histBars, RsiPeriod = rsiPeriod, RsiHigh = rsiHigh, RsiLow = rsiLow, DivBars = divBars, PivotStrength = pivotStrength, StochPeriodK = stochPeriodK, StochSmooth = stochSmooth, StochPeriodD = stochPeriodD, CrossLow = crossLow, CrossHigh = crossHigh, CrossFilterBars = crossFilterBars, SuspectReturn = suspectReturn, RsiLookback = rsiLookback, Mode = mode, ScoreMin = scoreMin, ScoreRsiBand = scoreRsiBand, NoSideways = noSideways, ScoreEventBars = scoreEventBars, RsiRelative = rsiRelative, RsiCenterBars = rsiCenterBars, RsiOffset = rsiOffset, ScoreExit = scoreExit, SuspectNeedsPrice = suspectNeedsPrice, SuspectMaxScore = suspectMaxScore, SuspectMinEvidence = suspectMinEvidence, SuspectEvidenceBars = suspectEvidenceBars, TrendConfirmBars = trendConfirmBars, TrendExitBars = trendExitBars }, input, ref cacheTQ_Regime);
 		}
 	}
 }
@@ -608,14 +693,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
 		}
 	}
 }
@@ -624,14 +709,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
 		}
 	}
 }

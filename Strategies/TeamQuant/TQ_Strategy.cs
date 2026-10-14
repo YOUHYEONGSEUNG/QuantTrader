@@ -28,6 +28,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private TQ_ATRChannels	channels;	// 진입 봉 밴드 (spec 2장)
 		private TQ_Regime		regime;		// 10분봉 추세 5단계 (spec 3장)
 		private TQ_Signals		signals;	// 진입 봉 신호 (spec 2장·5장)
+		private TQ_Regime		regimeFast;	// 두 단계 진입용: 진입 봉(1분봉)으로 같은 방식의 추세를 판단 (OrganicTwoStage, spec 5-2). 안 쓰면 null
 
 		// spec 7장: 종목별 진입 횟수 (분할 진입 여러 건은 신호 1회). 미보유→보유 전환 때 1 증가
 		private int				entryCount	= 0;
@@ -60,13 +61,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private double			lastStopTarget	= double.NaN;	// 마지막으로 옮기려 한 손절가 (주문 거부 때 재시도용)
 		private string			lastStopLabel	= "";
 		private string			logPath;						// LogToFile용 로그 파일 경로
-		private string			tradePath;						// TradeLogToFile용 거래 요약 파일 경로
-		private bool			trOpen;							// 거래 요약: 기록 중인 거래가 있음
-		private bool			trHeaderWritten;				// 거래 요약: 이번 실행의 설정 줄을 썼음
-		private DateTime		trEntryTime;
+		// 거래 1건의 기록 (학습 데이터 파일의 결과 칸에 쓴다)
+		private bool			trOpen;							// 기록 중인 거래가 있음
 		private DateTime		trExitTime;
-		private string			trName			= "";
-		private int				trRegime;
 		private double			trStop0			= double.NaN;	// 체결 직후 손절가
 		private double			trPnlPts;						// 실현 손익 합 (포인트 × 수량)
 		private double			trMfe;							// 최대 유리폭 (포인트)
@@ -74,7 +71,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				trBars;
 		private string			trExits			= "";
 		private int				tradeQty;						// 이번 진입의 총 수량 (역추세는 CounterQtyPercent 적용)
-		private bool			viaT2;							// 이번 진입이 밴드 조건 없이 T2만으로 들어간 추세 방향 진입인지
+		private bool			tradeMain;						// 이번 거래가 주력 진입인지 (재진입 제한·이익 보호 본절 예외). IsMainAt으로 정한다
 		private string			mlPath;							// MlLogToFile용 학습 데이터 파일 경로
 		private string			mlRunId			= "";			// 학습 데이터: 이번 실행 ID (같은 백테스트를 여러 번 돌린 중복 제거용)
 		private string			mlSettingsId	= "";			// 학습 데이터: 설정 요약의 해시 (설정별로 나눠 보기용)
@@ -100,8 +97,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private readonly Dictionary<string, int>	chunkBand		= new Dictionary<string, int>();	// 조각별 익절 밴드 (+N = 위 N배, −N = 아래 N배, 0 = 중심선, NoBand = 없음)
 		private readonly HashSet<string>			filledBand		= new HashSet<string>();			// 밴드 익절이 체결된 조각
 		private readonly HashSet<string>			pendingBandExit	= new HashSet<string>();			// 봉 마감 시장가로 낸 밴드 익절 주문 이름 (체결 대기)
-		private string			lastSig			= "";			// 마지막 조각의 시그널명
-		private int				tpCount;						// 체결된 밴드 익절 단계 수
+		private readonly HashSet<int>				filledLevels	= new HashSet<int>();				// 익절이 체결된 밴드 단계 (같은 밴드의 조각이 여러 개여도 한 단계)
+		private int				tpCount;						// 체결된 밴드 익절 단계 수 (= filledLevels.Count)
 		private double			firstTpPrice	= double.NaN;	// 1차 익절 체결가 (2차 익절 때 손절을 여기로)
 		private bool			adopted;						// 의심 진입이 추세 규칙의 청산으로 갈아탔음 (AdoptTrendExits)
 
@@ -120,8 +117,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				stateChangedFrom	= int.MinValue;	// 이 봉에서 추세가 바뀌었으면 바뀌기 전 상태, 아니면 int.MinValue
 		private int				entryQtyPercent		= 100;			// 이번 진입의 수량 비율 (전환 의심 때의 역진입은 줄인다)
 		private bool			viaConfirm;							// 이번 진입이 추세가 확정된 봉에서 바로 들어간 것인지
+		private bool			viaStage1;							// 이번 진입이 두 단계 진입의 1단계인지 (로그용)
+		private bool			viaTrigger;							// 이번 진입이 의심 뒤 가격 확인 역진입인지 (로그용)
+		private bool			suspectTriggerUsed;					// 지금의 전환 의심 구간에서 가격 확인 역진입을 이미 했음 (OrganicSuspectTrigger)
+
+		// 반전 신호 큐 (OrganicSignalQueue, spec 5-2): 추세와 상관없이 진입 봉의 반전 신호를 방향별로 모아 두고,
+		// 전환 의심이 뜨면 이미 나와 있던 신호로 바로 역진입한다
+		private class QueuedSignal
+		{
+			public int		Bar;		// 신호가 나온 진입 봉 번호 (CurrentBars[0])
+			public double	Price;		// 신호 봉 종가
+			public double	Extreme;	// 신호 봉 기준 전고점(매도 신호)·전저점(매수 신호). 손절 기준이자 무효 기준
+			public string	Name;		// 어느 규칙의 신호인지 (로그용)
+		}
+		private readonly List<QueuedSignal>	shortQueue	= new List<QueuedSignal>();	// 매도 쪽 반전 신호
+		private readonly List<QueuedSignal>	longQueue	= new List<QueuedSignal>();	// 매수 쪽 반전 신호
+		private bool			viaQueue;							// 이번 진입이 큐 신호로 들어간 것인지
+		private QueuedSignal	queueUsed;							// 그 진입에 쓴 신호
+		private bool			tradeQueueStop;						// 이번 거래의 손절을 큐 신호의 고점·저점 기준으로 잡음
+		private bool			queueEntryUsed;						// 지금의 전환 의심 구간에서 큐 역진입을 이미 했음
 		private bool			windowJustOpened;					// 이 봉이 진입 시간대의 첫 봉인지
 		private bool			wasWindowBefore;					// 직전 봉이 진입 시간대였는지 (windowJustOpened 계산용)
+		private int				stage;								// 두 단계 진입: 0 = 해당 없음, 1 = 1단계만 들어가 추세 봉 확정 대기, 2 = 확정됨(추가 진입했거나 건너뜀)
+		private double			trailExtreme		= double.NaN;	// 이익 따라가기 청산: 진입 뒤 최고가(매수)·최저가(매도)
 
 		// 검증용 임시 진입 (UseTestEntry). 보유 봉 수로 분할 익절·본절·청산을 결정적으로 재현
 		private int				testHoldBars;					// 테스트 진입 후 경과한 보유 봉 수
@@ -171,13 +189,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				DnSusShortBand		= 2;		// 5.7 상승 전환 의심 매도: 종가 +2배 위
 				SideBand			= 2;		// 5.8·5.9 횡보: ±2배 터치
 				T1Window			= 5;
-				T1WindowUp			= 0;		// 0 = T1Window 사용
-				T1WindowDn			= 0;
-				T1WindowSide		= 0;
 
 				// 진입 — 공통
 				T1SameBar			= false;		// 밴드 조건 봉 자체의 반전 신호도 인정
-				TrendT2Entry		= false;	// 밴드 조건 없이 T2만으로 추세 방향 진입 (명세에는 횡보에만 있음)
 				T2CountConfirmBars	= true;
 				UseCounterTrend		= true;		// 5.5 하락추세 매수
 				// 규칙별 사용 여부. 명세는 모두 켬. 끄면 그 규칙의 진입만 하지 않는다 (5.5는 위의 UseCounterTrend)
@@ -206,6 +220,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				RegimeRsiOffset		= 8;		// 중심에서 이만큼 벗어나야 의심의 RSI 조건 충족
 				RegimeScoreExit		= 0;		// 점수 방식: 상승추세는 점수가 이 값 이하로 내려가면 끝남 (하락추세는 부호 반대)
 				RegimeSuspectNeedsPrice	= false;	// 켜면 가격이 아직 추세 방향이면 전환 의심을 띄우지 않음
+				RegimeSuspectMaxScore	= 5;		// 의심은 추세 점수가 이 값 이하(하락 쪽은 −값 이상)일 때만. 5 = 제한 없음
+				RegimeSuspectMinEvidence	= 1;	// 의심에 필요한 근거 종류 수. 1 = 하나로 충분
+				RegimeSuspectEvidenceBars	= 2;	// 근거를 모으는 추세 봉 수
+				RegimeConfirmBars		= 1;		// 추세 시작 조건이 몇 봉 연속이어야 추세로 인정할지
+				RegimeExitBars			= 1;		// 추세 종료 조건이 몇 봉 연속이어야 추세를 끝낼지
 				RegimeFast			= 6;
 				RegimeMid			= 18;
 				RegimeSlow			= 36;
@@ -244,6 +263,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				OrganicSideBlockScore	= 2;		// 횡보에서 추세 봉 점수가 이만큼 반대쪽이면 그 방향 횡보 진입을 막음
 				OrganicEnterAtOpen		= false;	// 진입 시간이 시작되는 봉에 이미 추세면 그 봉에서 진입
 				OrganicHoldWhileTrend	= false;	// 추세가 포지션 방향 그대로면 진입 봉(1분봉)의 전량 청산 조건을 무시
+				OrganicTwoStage			= false;	// 두 단계 진입: 1분봉 추세가 먼저 바뀌면 일부, 추세 봉이 확정하면 나머지
+				OrganicStage1Percent	= 50;		// 두 단계 진입의 1단계 수량 %
+				OrganicStopSwing		= false;	// 손절을 직전 저점·고점(구조) 기준으로, 거리는 아래 ATR 범위로 제한
+				OrganicStopSwingBars	= 5;		// 구조 손절: 추세 봉 몇 개 안의 최저가·최고가
+				OrganicStopMinAtr		= 1.5;		// 구조 손절: 최소 거리, 진입 봉 ATR 배수
+				OrganicStopMaxAtr		= 3;		// 구조 손절: 최대 거리, 진입 봉 ATR 배수
+				OrganicTp1Percent		= 0;		// 추세 규칙(5.1·5.4)의 1차 익절 수량 %. 0과 0이면 규칙 표 비율
+				OrganicTp2Percent		= 0;		// 추세 규칙의 2차 익절 수량 %
+				OrganicTrailAtr			= 0;		// 이익 따라가기 청산: 1차 익절 뒤 최고가(최저가)에서 ATR × 이 값. 0 = 사용 안 함
+				OrganicSuspectTrigger	= false;	// 역진입: 의심이 뜨면 대기하고, 1분봉이 직전 저점(고점)을 깨면 진입
+				OrganicSignalQueue		= false;	// 역진입: 의심 전에 나온 반전 신호를 큐에 모아 두고 의심이 뜨면 바로 진입
+				OrganicQueueBars		= 10;		// 큐 신호의 유효 봉 수 (진입 봉)
+				OrganicQueueMaxAtr		= 1.5;		// 신호 가격에서 진입 방향으로 ATR × 이 값 넘게 가 버렸으면 무효
 
 				// 수량·대회 시간 (spec 6·7장)
 				EntryQuantity		= 30;
@@ -257,7 +289,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 화면·기록·테스트
 				ShowStatus			= true;
 				LogToFile			= true;
-				TradeLogToFile		= true;
 				MlLogToFile			= true;
 				UseTestEntry		= false;
 				PresetOrganicBase	= false;	// 설정 세트: 유기 기준 세트 (ApplyPreset)
@@ -293,7 +324,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								StochPeriodK, StochSmooth, StochPeriodD, CrossLow, CrossHigh, CrossFilterBars, SuspectReturn, RegimeRsiBars,
 								RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeNoSideways, RegimeScoreEventBars,
 								RegimeRsiRelative, RegimeRsiCenterBars, RegimeRsiOffset,
-				RegimeScoreExit, RegimeSuspectNeedsPrice);
+				RegimeScoreExit, RegimeSuspectNeedsPrice,
+				RegimeSuspectMaxScore, RegimeSuspectMinEvidence, RegimeSuspectEvidenceBars, RegimeConfirmBars, RegimeExitBars);
+				// 두 단계 진입(spec 5-2): 같은 설정의 추세 판단을 진입 봉에도 돌린다. 추세 봉이 이미 진입 봉이면(RegimeBarMinutes 1) 쓰지 않는다
+				regimeFast	= null;
+				if (TwoStageOn())
+					regimeFast	= TQ_Regime(BarsArray[0], RegimeFast, RegimeMid, RegimeSlow, false,
+									MacdFast, MacdSlow, MacdSmooth, RegimeHistBars,
+									RsiPeriod, RegimeRsiHigh, RegimeRsiLow, RegimeDivBars, RegimePivotStrength,
+									StochPeriodK, StochSmooth, StochPeriodD, CrossLow, CrossHigh, CrossFilterBars, SuspectReturn, RegimeRsiBars,
+									RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeNoSideways, RegimeScoreEventBars,
+									RegimeRsiRelative, RegimeRsiCenterBars, RegimeRsiOffset,
+									RegimeScoreExit, RegimeSuspectNeedsPrice,
+								RegimeSuspectMaxScore, RegimeSuspectMinEvidence, RegimeSuspectEvidenceBars, RegimeConfirmBars, RegimeExitBars);
+				// 추세별 대기 봉 수(T1WindowUp/Dn/Side)는 2026-10-14에 전략 설정에서 뺐다. 0 = 모두 T1Window
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, SwingBars,
 								BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3,
 								MacdFast, MacdSlow, MacdSmooth,
@@ -301,7 +345,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								ExitSmaPeriod, MacdConfirmBars, MacdMinChangeAtr, false,
 								UpLongBand, UpSusLongBand, UpSusShortBand, DnShortBand, DnLongBand, DnLongRsi,
 								DnSusLongBand, DnSusShortBand, SideBand,
-								T1WindowUp, T1WindowDn, T1WindowSide, T2CountConfirmBars, T1SameBar);
+								0, 0, 0, T2CountConfirmBars, T1SameBar);
 
 				// 진입 봉 지표(밴드 EMA, MACD, 이동평균)가 자리 잡을 만큼의 봉 수
 				minBars0	= Math.Max(Math.Max(BandMidPeriod, MacdSlow + MacdSmooth), ExitSmaPeriod) + 5;
@@ -309,8 +353,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 로그 파일: 내 문서\NinjaTrader 8\TQ_log_종목.txt (LogToFile)
 				logPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
 								"NinjaTrader 8", "TQ_log_" + Instrument.MasterInstrument.Name + ".txt");
-				tradePath	= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-								"NinjaTrader 8", "TQ_trades_" + Instrument.MasterInstrument.Name + ".csv");
 				mlPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
 								"NinjaTrader 8", "TQ_ml_" + Instrument.MasterInstrument.Name + ".csv");
 				mlRunId		= DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
@@ -355,13 +397,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			get { return "TQ_Strategy"; }
 		}
 
-		// 어떤 설정으로 돌린 기록인지 한 줄로. 로그 파일과 거래 요약 파일에 쓴다
+		// 어떤 설정으로 돌린 기록인지 한 줄로. 로그 파일과 학습 데이터 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승매수={2} 하락의심 매수/매도={3}/{4} 하락매도={5} 하락매수={6}(RSI<{7}) 상승의심 매수/매도={8}/{9} 횡보={10} | 대기 공통/상승/하락/횡보={11}/{12}/{13}/{14} 같은봉={15} 추세T2진입={16} T2앞봉인정={17} | 역추세={18} 역추세수량%={19} 재진입금지={20} | 추세봉={21}분 MA={22}/{23}/{24} RSI={25}/{26} 다이버전스={27}봉(고점폭{28}) 히스토그램={29}봉 의심복귀={30} | 손절%={31} 전저점={32} 넓은쪽={33} 최소ATR={34} 본절R={35} 2차익절손절이동={36} | 봉중익절={37} 청산MA={38} 마지막조각처음부터={39} 추세청산갈아타기={40} MACD확인={41} | 의심RSI봉수={42} 익절밴드넘은진입차단={43} 추세바뀌면청산={44} | 추세방식={45}(1문서/2점수) 최소점수={46} RSI폭={47} 횡보없음={48} 추세바뀌어도대기유지={49} | 규칙사용(상승매수/하락의심매수/하락의심매도/하락매도/하락매수/상승의심매수/상승의심매도/횡보매수/횡보매도)={50} | 유기모드={51} 역진입%={52} 확정봉진입={53} 손절ATR={54} 본절최소폭={55} 횡보차단점수={56} | 점수사건봉수={57} RSI상대기준={58} 중심봉수={59} 폭={60} 추세종료점수={61} 의심가격확인={62} 시작봉진입={63} 추세유지중청산무시={64} 유기기준세트={65}",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승매수={2} 하락의심 매수/매도={3}/{4} 하락매도={5} 하락매수={6}(RSI<{7}) 상승의심 매수/매도={8}/{9} 횡보={10} | 대기={11} 같은봉={12} T2앞봉인정={13} | 역추세={14} 역추세수량%={15} 재진입금지={16} | 추세봉={17}분 MA={18}/{19}/{20} RSI={21}/{22} 다이버전스={23}봉(고점폭{24}) 히스토그램={25}봉 의심복귀={26} | 손절%={27} 전저점={28} 넓은쪽={29} 최소ATR={30} 본절R={31} 2차익절손절이동={32} | 봉중익절={33} 청산MA={34} 마지막조각처음부터={35} 추세청산갈아타기={36} MACD확인={37} | 의심RSI봉수={38} 익절밴드넘은진입차단={39} 추세바뀌면청산={40} | 추세방식={41}(1문서/2점수) 최소점수={42} RSI폭={43} 횡보없음={44} 추세바뀌어도대기유지={45} | 규칙사용(상승매수/하락의심매수/하락의심매도/하락매도/하락매수/상승의심매수/상승의심매도/횡보매수/횡보매도)={46} | 유기모드={47} 역진입%={48} 확정봉진입={49} 손절ATR={50} 본절최소폭={51} 횡보차단점수={52} | 점수사건봉수={53} RSI상대기준={54} 중심봉수={55} 폭={56} 추세종료점수={57} 의심가격확인={58} 시작봉진입={59} 추세유지중청산무시={60} 유기기준세트={61} | 두단계={62} 1단계%={63} 구조손절={64} 구조봉수={65} 구조ATR={66}~{67} 익절%={68}/{69} 따라가기ATR={70} | 의심점수상한={71} 의심근거수={72}({73}봉) 추세확정봉={74} 추세종료봉={75} 의심가격확인진입={76} | 큐={77} 큐봉수={78} 큐멀어짐ATR={79}",
 				Instrument.FullName, BarsPeriod.Value,
 				UpLongBand, UpSusLongBand, UpSusShortBand, DnShortBand, DnLongBand, DnLongRsi, DnSusLongBand, DnSusShortBand, SideBand,
-				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, T1SameBar, TrendT2Entry, T2CountConfirmBars,
+				T1Window, T1SameBar, T2CountConfirmBars,
 				UseCounterTrend, CounterQtyPercent, BlockReentryAfterStop,
 				TrendMinutes(), RegimeFast, RegimeMid, RegimeSlow, RegimeRsiHigh, RegimeRsiLow,
 				RegimeDivBars, RegimePivotStrength, RegimeHistBars, SuspectReturn,
@@ -375,18 +417,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ (UseSideLong ? "1" : "0") + (UseSideShort ? "1" : "0"),
 				OrganicMode, OrganicSuspectQtyPercent, OrganicEnterOnConfirm, OrganicStopAtr, OrganicBeMinR, OrganicSideBlockScore, RegimeScoreEventBars,
 				RegimeRsiRelative, RegimeRsiCenterBars, RegimeRsiOffset,
-				RegimeScoreExit, RegimeSuspectNeedsPrice, OrganicEnterAtOpen, OrganicHoldWhileTrend, PresetOrganicBase);
+				RegimeScoreExit, RegimeSuspectNeedsPrice, OrganicEnterAtOpen, OrganicHoldWhileTrend, PresetOrganicBase,
+				OrganicTwoStage, OrganicStage1Percent, OrganicStopSwing, OrganicStopSwingBars, OrganicStopMinAtr, OrganicStopMaxAtr,
+				OrganicTp1Percent, OrganicTp2Percent, OrganicTrailAtr,
+				RegimeSuspectMaxScore, RegimeSuspectMinEvidence, RegimeSuspectEvidenceBars, RegimeConfirmBars, RegimeExitBars, OrganicSuspectTrigger,
+				OrganicSignalQueue, OrganicQueueBars, OrganicQueueMaxAtr);
 		}
 
-		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
-		// 거래 1건이 끝날 때마다 한 줄을 내 문서\NinjaTrader 8\TQ_trades_종목.csv에 쓴다.
-		// 백테스트(Strategy Analyzer)에서도 쓰므로, 여러 날을 한 번에 돌린 결과를 거래 단위로 볼 수 있다
-		private void TradeBegin(Rule act)
+		#region 거래 기록 — 매매 판단에는 영향 없음
+		// 거래 1건의 손익·최대 유리폭·불리폭·청산 순서를 모아 학습 데이터 파일(MlLogToFile)의 결과 칸에 쓴다.
+		// 거래 요약 파일(TQ_trades_종목.csv, TradeLogToFile)은 같은 내용이 학습 데이터 파일에 있어서 2026-10-14에 뺐다
+		private void TradeBegin()
 		{
 			trOpen		= true;
-			trEntryTime	= Time[0];
-			trName		= act.ToString();
-			trRegime	= entryRegime;
 			trStop0		= double.NaN;
 			trPnlPts	= 0;
 			trMfe		= 0;
@@ -418,52 +461,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				trExits += (trExits.Length > 0 ? " > " : "") + name;
 		}
 
+		// 보유 → 미보유가 되면 학습 데이터 파일에 그 거래를 한 줄 쓴다
 		private void TradeEnd()
 		{
 			if (!trOpen)
 				return;
 			trOpen = false;
 			MlEnd();
-			if (!TradeLogToFile || tradePath == null || entryFillQty <= 0)
-				return;
-
-			System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
-			double avg = entryFillSum / entryFillQty;
-			System.Text.StringBuilder sb = new System.Text.StringBuilder();
-			try
-			{
-				if (!System.IO.File.Exists(tradePath))
-					sb.AppendLine("모드,진입시각,청산시각,종류,추세,방향,수량,평단,처음손절,손절거리pt,손익pt(계약당 평균),손익$,최대유리pt,최대불리pt,보유봉수,청산순서");
-				if (!trHeaderWritten)
-				{
-					sb.AppendLine("# " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + SettingsSummary().Replace(",", ";"));
-					trHeaderWritten = true;
-				}
-				sb.AppendLine(string.Join(",", new string[]
-				{
-					State == State.Realtime ? "실시간" : "과거",
-					trEntryTime.ToString("yyyy-MM-dd HH:mm:ss"),
-					trExitTime.ToString("yyyy-MM-dd HH:mm:ss"),
-					trName,
-					trRegime.ToString(inv),
-					isLongPos ? "매수" : "매도",
-					entryFillQty.ToString(inv),
-					avg.ToString("0.##", inv),
-					double.IsNaN(trStop0) ? "" : trStop0.ToString("0.##", inv),
-					double.IsNaN(trStop0) ? "" : Math.Abs(avg - trStop0).ToString("0.##", inv),
-					(trPnlPts / entryFillQty).ToString("0.##", inv),
-					(trPnlPts * Instrument.MasterInstrument.PointValue).ToString("0", inv),
-					trMfe.ToString("0.##", inv),
-					trMae.ToString("0.##", inv),
-					trBars.ToString(inv),
-					trExits
-				}));
-				System.IO.File.AppendAllText(tradePath, sb.ToString(), new System.Text.UTF8Encoding(true));
-			}
-			catch (Exception)
-			{
-				// 파일을 못 써도 매매에는 영향이 없게 한다
-			}
 		}
 		#endregion
 
@@ -521,7 +525,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				act.ToString(),
 				r.ToString(),
 				isLongPos ? "1" : "-1",
-				viaT2 ? "1" : "0",
+				"0",	// via_t2: TrendT2Entry를 2026-10-14에 뺐다. 열 순서를 지키려고 칸만 남긴다
 				Ml(c),
 				Ml(a),
 				Ml(c > 0 ? a / c * 100 : double.NaN),
@@ -665,6 +669,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			PaintBar();
 			TradeTrack();
 			TrackWaitCarry();	// 추세가 바뀔 때 반전 신호 대기를 이어 간다 (KeepWaitOnTrendChange)
+			UpdateSignalQueue();	// 반전 신호 큐: 이 봉의 신호를 넣고 오래되거나 무효가 된 신호를 뺀다 (OrganicSignalQueue)
 
 			// spec 7장: 진입 횟수는 대회 구간마다 0부터 센다. 진입 시간대에 들어서는 첫 봉에서 리셋한다
 			bool inEntryWindow = InEntryWindow();
@@ -743,11 +748,18 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					// spec 4장 이익 보호 본절: 1차 익절 전이라도 유리폭이 기준에 닿으면 본절로 옮긴다
 					CheckBreakevenAtR();
 
+					// spec 5-2 이익 따라가기 청산: 1차 익절 뒤 추세 포지션의 손절을 최고가(최저가)를 따라 올린다 (OrganicTrailAtr)
+					UpdateTrailStop();
+
 					// 밴드 익절 지정가를 방금 마감된 봉의 밴드 값으로 옮긴다 (IntrabarTakeProfit)
 					UpdateTargets();
 
 					// spec 5장: 진입한 규칙의 청산
 					ManageExits();
+
+					// spec 5-2 두 단계 진입: 1단계 포지션의 추세 봉 확정(→ 추가 진입) 또는 1분봉 추세 소멸(→ 청산)
+					if (active != Rule.None)
+						ManageTwoStage();
 				}
 			}
 
@@ -825,6 +837,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				case Rule.SideShort:	prefix = "SdS"; bands = new[] { -1, -2, -3 };	nums = new[] { 1, 1, 2 };		den = 5; break;	// 5.9
 				default:				prefix = "X";   bands = new int[0];				nums = new int[0];				den = 1; break;
 			}
+
+			// spec 5-2 유기 모드의 익절 비중 (OrganicTp1Percent / OrganicTp2Percent): 추세 규칙(5.1, 5.4)의 두 밴드 단계 수량을 %로 정한다.
+			// 밴드는 규칙 표 그대로이고, 남는 %가 마지막 조각이다. 둘 다 0이거나 합이 100을 넘으면 규칙 표의 비율을 쓴다
+			if (OrganicMode && (r == Rule.UpLong || r == Rule.DnShort) && TpPercentOn())
+			{
+				nums	= new[] { OrganicTp1Percent, OrganicTp2Percent };
+				den		= 100;
+			}
+		}
+
+		// 유기 모드의 익절 비중 설정이 쓰이는지
+		private bool TpPercentOn()
+		{
+			return (OrganicTp1Percent > 0 || OrganicTp2Percent > 0) && OrganicTp1Percent + OrganicTp2Percent <= 100;
 		}
 
 		private bool IsLongRule(Rule r)
@@ -854,6 +880,18 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool IsMain(Rule r)
 		{
 			return r == Rule.UpLong || r == Rule.DnShort;
+		}
+
+		// 그 추세 상태에서 이 규칙으로 들어가는 것이 주력 진입인지. 재진입 제한과 이익 보호 본절의 예외를 정한다 (spec 4장).
+		// 유기 모드는 전환 의심의 역진입과 두 단계 진입의 1단계에도 5.1·5.4 규칙을 빌려 쓰므로, 규칙 이름이 아니라
+		// 실제로 그 방향 추세(상승추세 매수, 하락추세 매도)일 때만 주력으로 본다 (2026-10-14 수정. 그 전에는 역진입도 제한을 받지 않았음)
+		private bool IsMainAt(Rule r, int st)
+		{
+			if (!IsMain(r))
+				return false;
+			if (!OrganicMode)
+				return true;
+			return r == Rule.UpLong ? st == 2 : st == -2;
 		}
 
 		private string RuleName(Rule r)
@@ -1004,15 +1042,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Rule longRule, shortRule;
 			Candidates(st, out longRule, out shortRule);
 
-			bool longOk		= RuleEnabled(longRule) && (IsMain(longRule) || canLong) && !SideBlocked(st, true);
-			bool shortOk	= RuleEnabled(shortRule) && (IsMain(shortRule) || canShort) && !SideBlocked(st, false);
+			bool longOk		= RuleEnabled(longRule) && (IsMainAt(longRule, st) || canLong) && !SideBlocked(st, true);
+			bool shortOk	= RuleEnabled(shortRule) && (IsMainAt(shortRule, st) || canShort) && !SideBlocked(st, false);
 
 			// 진입 신호: 그 규칙의 신호, 또는 추세가 바뀌기 전 같은 방향 규칙에서 이어받은 대기의 반전 신호 (KeepWaitOnTrendChange)
 			bool longSig	= longOk && (EntryOf(longRule) || carryLongFire);
 			bool shortSig	= shortOk && (EntryOf(shortRule) || carryShortFire);
-			// 옵션 TrendT2Entry: 밴드 조건 없이 T2(MACD 전환 AND 크로스)만으로도 추세 방향 진입
-			bool longT2		= TrendT2Entry && longRule == Rule.UpLong && signals.T2Bull[0];
-			bool shortT2	= TrendT2Entry && shortRule == Rule.DnShort && signals.T2Bear[0];
+
+			// spec 5-2 의심 뒤 가격 확인 역진입 (OrganicSuspectTrigger): 전환 의심 동안 밴드 조건 신호 대신,
+			// 진입 봉 종가가 직전 SwingBars봉의 저점을 깨면(하락 전환 의심) 매도, 고점을 넘으면(상승 전환 의심) 매수. 의심 구간 하나에 한 번
+			bool suspectTrig = SuspectTriggerOn(st);
+			if (suspectTrig)
+			{
+				longSig		= longOk && st == -1 && !suspectTriggerUsed && Close[0] > signals.SwingHigh5[1];
+				shortSig	= shortOk && st == 1 && !suspectTriggerUsed && Close[0] < signals.SwingLow5[1];
+			}
+
+			// spec 5-2 반전 신호 큐 (OrganicSignalQueue): 전환 의심 동안, 큐에 유효한 반대쪽 신호가 있으면 새 신호를 기다리지 않고 역진입. 의심 구간 하나에 한 번
+			QueuedSignal qLong = null, qShort = null;
+			if (QueueEntryOn(st) && !queueEntryUsed)
+			{
+				if (st == -1 && longOk)	qLong	= LatestQueued(true);
+				if (st == 1 && shortOk)	qShort	= LatestQueued(false);
+			}
 
 			// 같은 봉에 둘 다 나오면: 하락 전환 의심과 하락추세는 매도 우선, 나머지는 매수 우선
 			// 유기 모드: 전환 의심 상태의 진입은 역진입이라 수량을 줄인다. 추세가 확정된 것을 처음 본 봉에서는
@@ -1034,23 +1086,211 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			bool longConfirm	= confirmed && st == 2 && longOk;
 			bool shortConfirm	= confirmed && st == -2 && shortOk;
 
-			viaT2		= false;
 			viaConfirm	= false;
+			viaTrigger	= suspectTrig;
 			bool shortFirst = st == 1 || st == -2;
 			if (shortFirst)
 			{
 				if      (shortSig)		Enter(shortRule, st);
-				else if (shortT2)		{ viaT2 = true; Enter(shortRule, st); }
+				else if (qShort != null)	{ viaQueue = true; queueUsed = qShort; Enter(shortRule, st); }
 				else if (shortConfirm)	{ viaConfirm = true; Enter(shortRule, st); }
 				else if (longSig)		Enter(longRule, st);
 			}
 			else
 			{
 				if      (longSig)		Enter(longRule, st);
-				else if (longT2)		{ viaT2 = true; Enter(longRule, st); }
+				else if (qLong != null)	{ viaQueue = true; queueUsed = qLong; Enter(longRule, st); }
 				else if (longConfirm)	{ viaConfirm = true; Enter(longRule, st); }
 				else if (shortSig)		Enter(shortRule, st);
 			}
+			if (suspectTrig && active != Rule.None)
+				suspectTriggerUsed = true;
+			if (viaQueue && active != Rule.None)
+				queueEntryUsed = true;
+			viaTrigger	= false;
+			viaQueue	= false;
+			queueUsed	= null;
+
+			// 위에서 들어가지 않았으면 두 단계 진입의 1단계를 본다
+			if (active == Rule.None)
+				TryStage1(st, canLong, canShort);
+		}
+
+		// ── 두 단계 진입 (OrganicTwoStage, spec 5-2) ──
+		// 추세 봉(3분봉)의 판정은 큰 움직임이 시작되고 평균 12~13분 뒤에 나온다. 같은 방식의 추세를 진입 봉(1분봉)에서도 계산해서,
+		// 1분봉이 먼저 상승추세(하락추세)가 되면 일부만 들어가고(1단계), 추세 봉이 같은 방향으로 확정되면 나머지를 채운다(2단계).
+		// 확정 전에 1분봉 추세가 꺼지면 1단계 수량을 청산한다.
+		private bool TwoStageOn()
+		{
+			return OrganicMode && OrganicTwoStage && RegimeBarMinutes != 1;
+		}
+
+		// 진입 봉의 추세 값. 쓸 수 없으면 0 (횡보)
+		private int FastState(int barsAgo)
+		{
+			if (regimeFast == null || CurrentBars[0] < barsAgo + 1)
+				return 0;
+			double v = regimeFast.Regime[barsAgo];
+			return double.IsNaN(v) ? 0 : (int)v;
+		}
+
+		// 1단계: 진입 봉의 추세가 이 봉에서 상승추세(하락추세)로 바뀌었고, 추세 봉은 아직 확정 전이며 반대 방향 추세도 그 의심도 아닐 때.
+		//  · 매수: 추세 봉이 횡보(0) 또는 상승 전환 의심(−1). 하락 전환 의심(+1)이면 들어가자마자 추세 청산 조건이 되므로 제외
+		//  · 매도: 추세 봉이 횡보(0) 또는 하락 전환 의심(+1)
+		// 규칙은 5.1(매수)·5.4(매도)의 익절·청산을 그대로 쓰고, 수량은 OrganicStage1Percent. 주력 진입이 아니므로 재진입 제한을 받는다
+		private void TryStage1(int st, bool canLong, bool canShort)
+		{
+			if (!TwoStageOn() || regimeFast == null)
+				return;
+			int f0 = FastState(0), f1 = FastState(1);
+			bool longGo		= f0 == 2 && f1 != 2 && (st == 0 || st == -1) && RuleEnabled(Rule.UpLong) && canLong && !SideBlocked(st, true);
+			bool shortGo	= f0 == -2 && f1 != -2 && (st == 0 || st == 1) && RuleEnabled(Rule.DnShort) && canShort && !SideBlocked(st, false);
+			if (!longGo && !shortGo)
+				return;
+
+			entryQtyPercent = Math.Max(1, Math.Min(100, OrganicStage1Percent));
+			viaStage1		= true;
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 두 단계 진입 1단계: 1분봉 추세 {2} → {3}, 추세 봉은 {4}",
+				Time[0], Instrument.FullName, f1, f0, StateText(st)));
+			Enter(longGo ? Rule.UpLong : Rule.DnShort, st);
+			if (active != Rule.None)
+				stage = 1;	// Enter 안의 상태 리셋 뒤에 정한다
+			viaStage1		= false;
+			entryQtyPercent = 100;
+		}
+
+		// 보유 중 봉마다: 1단계만 들어간 포지션을 관리한다.
+		//  · 추세 봉이 같은 방향 추세로 확정(매수 +2, 매도 −2): 진입 시간 안이고 아직 밴드 익절이 하나도 체결되지 않았고
+		//    종가가 1차 익절 밴드를 넘지 않았으면 나머지 수량을 추가 진입한다. 어느 경우든 이 거래는 그때부터 주력 진입으로 본다
+		//  · 확정 전에 진입 봉의 추세가 그 방향을 벗어나면(매수는 +2·+1이 아니게, 매도는 −2·−1이 아니게) 전량 청산
+		private void ManageTwoStage()
+		{
+			if (stage != 1)
+				return;
+			int st = RegimeState();
+			if (isLongPos ? st == 2 : st == -2)
+			{
+				stage		= 2;
+				tradeMain	= true;
+				AddStage2();
+				return;
+			}
+			int f0 = FastState(0);
+			if (isLongPos ? f0 <= 0 : f0 >= 0)
+				FlattenRemaining(RuleName(active) + " 두 단계 진입 1단계 청산(추세 봉 확정 전에 1분봉 추세가 꺼짐: " + f0 + ")");
+		}
+
+		// 2단계 추가 진입. 조각은 1단계와 같은 익절 단계로 나누고 시그널명 뒤에 "b"를 붙인다 (예: UpL1b, UpL2b, UpL3b)
+		private void AddStage2()
+		{
+			int addQty = EntryQuantity - tradeQty;
+			string skip = null;
+			if (addQty <= 0)					skip = "추가할 수량 없음";
+			else if (!InEntryWindow())			skip = "진입 시간이 아님";
+			else if (tpCount > 0)				skip = "이미 밴드 익절이 체결됨";
+			else if (liveSignals.Count == 0)	skip = "남은 조각 없음";
+
+			string prefix;
+			int[] bands, nums;
+			int den;
+			Plan(active, out prefix, out bands, out nums, out den);
+			if (skip == null && bands.Length > 0)
+			{
+				double first = BandPrice(bands[0]);
+				if (isLongPos ? Close[0] >= first : Close[0] <= first)
+					skip = string.Format("종가 {0}가 이미 1차 익절 밴드({1} {2:F2})를 넘음", Close[0], BandText(bands[0]), first);
+			}
+			if (skip != null)
+			{
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 두 단계 진입 2단계: 추세 봉 확정, 추가 진입 안 함 ({2})",
+					Time[0], Instrument.FullName, skip));
+				return;
+			}
+
+			// 손절 기준을 이 봉으로 다시 잡는다. 체결되면 OnEntryFill이 새 평균 진입가로 손절을 다시 계산한다 (지금 손절보다 불리하게는 옮기지 않음)
+			stopAtr		= atr[0];
+			stopSwing	= SwingForStop(isLongPos);
+
+			int used = 0;
+			string split = "";
+			for (int i = 0; i < bands.Length; i++)
+			{
+				int q = (addQty * nums[i]) / den;
+				SubmitChunk(prefix + (i + 1) + "b", q, bands[i]);
+				used	+= q;
+				split	+= q + "/";
+			}
+			SubmitChunk(prefix + (bands.Length + 1) + "b", addQty - used, NoBand);
+			tradeQty += addQty;
+
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 두 단계 진입 2단계: 추세 봉 확정 → 추가 진입 {2} 수량={3}{4} 손절={5}",
+				Time[0], Instrument.FullName, RuleName(active), split, addQty - used, stopPrice));
+		}
+
+		// ── 반전 신호 큐 (OrganicSignalQueue, spec 5-2) ──
+		// 추세 봉의 전환 의심은 3분봉 지표라 늦고, 그 전에 진입 봉에서 반대쪽 진입 신호가 이미 나와 있는 경우가 많다
+		// (10/5~10/9 로그: 의심 27건 중 21건이 10분 안에 반대 신호가 먼저 있었음, 보통 1~8분 전).
+		// 그런데 유기 모드의 상승추세에는 매도 규칙이 없어서 그 신호는 버려진다. 그래서 신호를 추세와 상관없이 모아 둔다.
+		// 큐에 넣는 신호: TQ_Signals의 진입 신호 중 그 방향의 것 전부(밴드 조건 → MACD 전환·크로스, 횡보의 T2 포함).
+		// 매 봉 빼는 신호 (무효 처리):
+		//  · 유효 봉 수(OrganicQueueBars)가 지남
+		//  · 신호의 고점(매도 신호)을 넘는 고가가 나옴 / 저점(매수 신호)을 깨는 저가가 나옴 — 꼭지가 깨졌으므로. 큐 진입의 손절도 이 고점·저점 바깥이라 같은 기준이다
+		//  · 종가가 신호 가격에서 진입 방향으로 ATR × OrganicQueueMaxAtr 넘게 가 버림 — 지금 들어가면 늦어서 손절은 멀고 익절은 가깝다
+		private void UpdateSignalQueue()
+		{
+			if (!OrganicMode || !OrganicSignalQueue)
+			{
+				shortQueue.Clear();
+				longQueue.Clear();
+				return;
+			}
+			double a = atr[0];
+			PruneQueue(shortQueue, false, a);
+			PruneQueue(longQueue, true, a);
+
+			// 이 봉의 신호를 넣는다. 같은 봉에 여러 규칙의 신호가 나와도 하나만 넣는다 (같은 가격·같은 고점이라)
+			string s = signals.EntryDnShort[0] ? "하락추세 매도" : signals.EntryUpSusShort[0] ? "하락 전환 의심 매도"
+				: signals.EntryDnSusShort[0] ? "상승 전환 의심 매도" : signals.EntrySideShort[0] ? "횡보 매도" : null;
+			if (s != null)
+				shortQueue.Add(new QueuedSignal { Bar = CurrentBars[0], Price = Close[0], Extreme = signals.SwingHigh5[0], Name = s });
+			string l = signals.EntryUpLong[0] ? "상승추세 매수" : signals.EntryDnSusLong[0] ? "상승 전환 의심 매수"
+				: signals.EntryUpSusLong[0] ? "하락 전환 의심 매수" : signals.EntryDnLong[0] ? "하락추세 매수" : signals.EntrySideLong[0] ? "횡보 매수" : null;
+			if (l != null)
+				longQueue.Add(new QueuedSignal { Bar = CurrentBars[0], Price = Close[0], Extreme = signals.SwingLow5[0], Name = l });
+		}
+
+		// 오래되었거나 무효가 된 신호를 뺀다. isLong = 매수 쪽 큐인지. 이 봉에 새로 넣기 전에 부르므로 신호 봉 자신은 보지 않는다
+		private void PruneQueue(List<QueuedSignal> queue, bool isLong, double a)
+		{
+			for (int i = queue.Count - 1; i >= 0; i--)
+			{
+				QueuedSignal q = queue[i];
+				bool expired	= CurrentBars[0] - q.Bar > OrganicQueueBars;
+				bool broken		= isLong ? Low[0] < q.Extreme : High[0] > q.Extreme;
+				bool ranAway	= OrganicQueueMaxAtr > 0 && !double.IsNaN(a) && a > 0
+									&& (isLong ? Close[0] - q.Price : q.Price - Close[0]) > OrganicQueueMaxAtr * a;
+				if (expired || broken || ranAway)
+					queue.RemoveAt(i);
+			}
+		}
+
+		// 큐에서 지금 쓸 수 있는 가장 최근 신호. 없으면 null
+		private QueuedSignal LatestQueued(bool isLong)
+		{
+			List<QueuedSignal> queue = isLong ? longQueue : shortQueue;
+			return queue.Count > 0 ? queue[queue.Count - 1] : null;
+		}
+
+		// 큐 역진입을 쓰는 상태인지 (유기 모드 + OrganicSignalQueue + 전환 의심)
+		private bool QueueEntryOn(int st)
+		{
+			return OrganicMode && OrganicSignalQueue && (st == 1 || st == -1);
+		}
+
+		// 의심 뒤 가격 확인 역진입을 쓰는 상태인지 (유기 모드 + OrganicSuspectTrigger + 전환 의심)
+		private bool SuspectTriggerOn(int st)
+		{
+			return OrganicMode && OrganicSuspectTrigger && (st == 1 || st == -1);
 		}
 
 		// 유기 모드: 횡보로 판정된 구간이라도 추세 봉의 지표 점수(가격·MACD·RSI·스토캐스틱, −4 ~ +4)가 한쪽으로 쏠려 있으면
@@ -1097,6 +1337,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			// 이 봉에서 추세가 바뀌었으면 바뀌기 전 상태, 아니면 int.MinValue (유기 모드의 추세 확정 진입용)
 			stateChangedFrom = prevState != int.MinValue && st != prevState ? prevState : int.MinValue;
+			// 가격 확인 역진입(OrganicSuspectTrigger)은 전환 의심 구간 하나에 한 번. 추세 값이 바뀌면 새 구간으로 본다 (보유 중에도 센다)
+			if (stateChangedFrom != int.MinValue)
+			{
+				suspectTriggerUsed	= false;
+				queueEntryUsed		= false;
+			}
 
 			if (KeepWaitOnTrendChange)
 			{
@@ -1177,33 +1423,36 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				used	+= q;
 				split	+= q + "/";
 			}
-			lastSig = prefix + (bands.Length + 1);
-			SubmitChunk(lastSig, tradeQty - used, NoBand);
+			SubmitChunk(prefix + (bands.Length + 1), tradeQty - used, NoBand);	// 마지막 조각
 
+			string how = viaStage1 ? " (두 단계 진입 1단계 " + entryQtyPercent + "%)"
+				: (viaConfirm ? " (추세 확정 봉)" : "") + (viaTrigger && !viaQueue ? " (의심 뒤 가격 확인)" : "")
+					+ (viaQueue && queueUsed != null ? string.Format(" (큐: {0}분 전 {1} 신호, 가격 {2}, 기준 {3} {4})",
+						CurrentBars[0] - queueUsed.Bar, queueUsed.Name, queueUsed.Price, IsLongRule(r) ? "저점" : "고점", queueUsed.Extreme) : "")
+					+ (entryQtyPercent != 100 ? " (역진입 " + entryQtyPercent + "%)" : "");
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2}{3} 수량={4}{5} (추세={6}) 손절={7}",
-				Time[0], Instrument.FullName, RuleName(r),
-				(viaT2 ? " (밴드 조건 없이 T2)" : "") + (viaConfirm ? " (추세 확정 봉)" : "") + (entryQtyPercent != 100 ? " (역진입 " + entryQtyPercent + "%)" : ""),
-				split, tradeQty - used, state, stopPrice));
+				Time[0], Instrument.FullName, RuleName(r), how, split, tradeQty - used, state, stopPrice));
 		}
 
 		// 진입 공통: 상태 리셋 + 방향·추세·규칙 기록 + 신호 봉 종가 기준 손절가 계산 (spec 4장)
 		private void BeginTrade(bool isLong, int regimeAtEntry, Rule act)
 		{
-			bool t2 = viaT2;
 			ResetTradeState();
-			viaT2		= t2;
 			isLongPos	= isLong;
 			entryRegime	= regimeAtEntry;
 			active		= act;
+			tradeMain	= IsMainAt(act, regimeAtEntry);
 			// CounterQtyPercent: 역추세 진입(5.5 하락추세 매수)은 수량을 줄여서 들어갈 수 있다. 100이면 그대로
 			tradeQty	= act == Rule.DnLong ? Math.Max(1, EntryQuantity * CounterQtyPercent / 100) : EntryQuantity;
 			// 유기 모드의 전환 의심 진입(역진입)은 수량을 줄인다. 그 밖에는 100
 			if (entryQtyPercent != 100)
 				tradeQty = Math.Max(1, tradeQty * entryQtyPercent / 100);
-			TradeBegin(act);
+			TradeBegin();
 			stopAtr		= atr[0];
-			// 전고점·전저점은 신호 봉 기준 (spec 4장). 신호 봉 = 현재 마감된 봉([0])
-			stopSwing	= isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
+			// 전고점·전저점은 신호 봉 기준 (spec 4장). 신호 봉 = 현재 마감된 봉([0]). 유기 모드의 구조 손절은 추세 봉까지 본다.
+			// 큐 역진입은 그 신호의 전고점(매도)·전저점(매수)을 기준으로 한다 (CalcStop의 구조 손절 거리 제한을 받음)
+			tradeQueueStop	= viaQueue && queueUsed != null;
+			stopSwing		= tradeQueueStop ? queueUsed.Extreme : SwingForStop(isLong);
 			initialStop	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 계산 (spec 4장)
 			stopPrice	= initialStop;
 			MlBegin(act);	// 학습 데이터: 신호 봉의 특징값 (매매 판단과 무관)
@@ -1276,7 +1525,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private void OnBandFill(string sig, double price, DateTime time)
 		{
 			filledBand.Add(sig);
-			tpCount++;
+			// 단계는 밴드 기준으로 센다. 같은 밴드에 조각이 여럿이면(두 단계 진입의 1·2단계 조각) 처음 체결된 조각에서만 단계가 넘어간다
+			int level;
+			if (chunkBand.TryGetValue(sig, out level) && !filledLevels.Add(level))
+				return;
+			tpCount = filledLevels.Count;
 
 			if (tpCount == 1)
 			{
@@ -1293,7 +1546,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
-		// spec 6장: 진입 수량 × (num/den)을 내림. 양수 정수 나눗셈이 곧 내림이다
+		// spec 6장: 진입 수량 × (num/den)을 내림. 양수 정수 나눗셈이 곧 내림이다 (두 단계 진입의 2단계는 AddStage2에서 따로 나눈다)
 		private int Split(int num, int den)
 		{
 			return (tradeQty * num) / den;
@@ -1310,6 +1563,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (OrganicMode && !double.IsNaN(stopAtr) && stopAtr > 0)
 			{
 				double dist = OrganicStopAtr * stopAtr;
+				// 구조 손절 (OrganicStopSwing, spec 5-2): 직전 저점(매수)·고점(매도) 한 틱 바깥. 거리는 ATR × 최소~최대 배수 안으로 자른다
+				// 큐 역진입(tradeQueueStop)은 구조 손절을 꺼 두어도 큐 신호의 고점·저점으로 같은 계산을 한다
+				if ((OrganicStopSwing || tradeQueueStop) && !double.IsNaN(stopSwing))
+				{
+					double swingDist	= (isLongPos ? entryPrice - stopSwing : stopSwing - entryPrice) + TickSize;
+					double lo			= OrganicStopMinAtr * stopAtr;
+					double hi			= Math.Max(lo, OrganicStopMaxAtr * stopAtr);
+					dist				= Math.Max(lo, Math.Min(hi, swingDist));
+				}
 				return Instrument.MasterInstrument.RoundToTickSize(isLongPos ? entryPrice - dist : entryPrice + dist);
 			}
 
@@ -1326,6 +1588,23 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// 롱: 먼 쪽 = 낮은 값. 숏: 먼 쪽 = 높은 값
 			double stop		= isLongPos ? (StopWider ? lower : higher) : (StopWider ? higher : lower);
 			return FloorStop(entryPrice, stop);
+		}
+
+		// 손절의 기준이 되는 직전 저점(매수)·고점(매도). 기본은 신호 봉 포함 최근 SwingBars봉(진입 봉)의 전저점·전고점 (spec 4장).
+		// 유기 모드의 구조 손절(OrganicStopSwing)은 거기에 추세 봉 최근 OrganicStopSwingBars개의 최저가·최고가까지 넣어 더 바깥쪽을 쓴다
+		private double SwingForStop(bool isLong)
+		{
+			double s = isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
+			if (!OrganicMode || !OrganicStopSwing)
+				return s;
+			int n = Math.Min(OrganicStopSwingBars, CurrentBars[regimeBip] + 1);
+			for (int i = 0; i < n; i++)
+			{
+				double v = isLong ? Lows[regimeBip][i] : Highs[regimeBip][i];
+				if (double.IsNaN(s) || (isLong ? v < s : v > s))
+					s = v;
+			}
+			return s;
 		}
 
 		// MinStopAtr: 손절 거리가 신호 봉 ATR × MinStopAtr보다 짧으면 그 거리까지 벌린다. 0이면 그대로 둔다.
@@ -1457,8 +1736,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (!loss)
 				return;
 
-			// 주력 진입(5.1, 5.4)의 손절은 재진입 제한을 걸지 않는다. 추세 방향 진입은 여러 번 시도하는 것이 전략의 취지다
-			if (IsMain(active))
+			// 주력 진입(5.1, 5.4)의 손절은 재진입 제한을 걸지 않는다. 추세 방향 진입은 여러 번 시도하는 것이 전략의 취지다.
+			// 유기 모드의 역진입·두 단계 진입 1단계는 5.1·5.4 규칙을 빌려 쓰지만 주력이 아니다 (IsMainAt)
+			if (tradeMain)
 				return;
 
 			bool already = isLongPos ? blockLong : blockShort;
@@ -1475,7 +1755,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private void CheckBreakevenAtR()
 		{
 			// 주력 진입(5.1, 5.4)에는 적용하지 않는다. 추세를 길게 끌고 가는 거래라 진입가를 되짚는 움직임을 버텨야 한다
-			if (IsMain(active))
+			if (tradeMain)
 				return;
 
 			if (BreakevenAtR <= 0 || breakevenDone || liveSignals.Count == 0 || entryFillQty <= 0
@@ -1508,11 +1788,35 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			}
 
+			double avg	= entryFillSum / entryFillQty;
+
+			// 두 단계 진입의 2단계 체결: 평균 진입가가 바뀌었으므로 손절을 다시 계산하되, 지금 손절보다 불리하게는 옮기지 않는다
+			if (stage == 2)
+			{
+				double s2 = CalcStop(avg);
+				if (!double.IsNaN(stopPrice) && (isLongPos ? s2 < stopPrice : s2 > stopPrice))
+					s2 = stopPrice;
+				if (isLongPos ? GetCurrentBid(0) <= s2 : GetCurrentAsk(0) >= s2)
+				{
+					gapFlattened = true;
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 2단계 체결 직후 현재가가 손절가를 넘어섬 → 즉시 전량 청산 손절={2}",
+						time, Instrument.FullName, s2));
+					FlattenRemaining("spec 4장 손절가 초과");
+					return;
+				}
+				stopPrice		= s2;
+				initialRisk		= Math.Abs(avg - s2);
+				breakevenDone	= AtOrBeyondAverage(s2);
+				SetStopForLive(s2);
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 손절 재계산(2단계 체결) 평균 체결가={2} 손절={3}",
+					time, Instrument.FullName, avg, s2));
+				return;
+			}
+
 			// 손절이 이미 본절 이상으로 옮겨졌으면 체결가 기준으로 되돌리지 않는다
 			if (breakevenDone)
 				return;
 
-			double avg	= entryFillSum / entryFillQty;
 			double s	= CalcStop(avg);
 
 			// 다시 계산한 손절가에 현재가가 이미 닿았으면 스탑을 그쪽으로 옮길 수 없다(주문 거부).
@@ -1692,22 +1996,56 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			// 마지막 조각: 종가와 이동평균 비교 (spec 5장). 기본은 앞 단계 밴드 익절이 모두 체결된 뒤부터 본다 (LastChunkEarly로 처음부터)
 			int side = LastChunkSide(active);
-			if (side != 0 && liveSignals.Contains(lastSig) && (LastChunkEarly || BandStagesDone()))
+			List<string> lastChunks = LastChunks();
+			if (side != 0 && lastChunks.Count > 0 && (LastChunkEarly || BandStagesDone()))
 			{
 				double ma = signals.Sma[0];
 				if (side > 0 ? Close[0] > ma : Close[0] < ma)
-					ExitChunk(lastSig, string.Format("마지막 조각(종가 {0} {1}선)", side > 0 ? ">" : "<", ExitSmaPeriod), false);
+					foreach (string sig in lastChunks)
+						ExitChunk(sig, string.Format("마지막 조각(종가 {0} {1}선)", side > 0 ? ">" : "<", ExitSmaPeriod), false);
 			}
 		}
 
-		// 유기 모드의 OrganicHoldWhileTrend: 추세 판정이 포지션 방향 그대로인지 (매수 보유 중 상승추세, 매도 보유 중 하락추세).
-		// 참이면 진입 봉(1분봉)의 전량 청산 조건을 무시한다. 추세 봉의 판정이 살아 있는데 1분봉의 작은 눌림에 통째로 청산되는 것을 막는다.
-		// 2026-10-12 Playback: 상승추세 매수의 청산 37번 중 30번이 이 1분봉 조건이었고(추세가 바뀌어 청산된 것은 7번), 평균 5분 만에 나갔다
+		// 아직 보유 중인 마지막 조각(밴드 익절이 없는 조각). 보통 1개, 두 단계 진입으로 추가 진입했으면 2개
+		private List<string> LastChunks()
+		{
+			List<string> list = new List<string>();
+			foreach (string sig in liveSignals)
+				if (chunkBand.ContainsKey(sig) && chunkBand[sig] == NoBand)
+					list.Add(sig);
+			return list;
+		}
+
+		// 유기 모드의 OrganicHoldWhileTrend: 추세 판정이 포지션 방향 쪽인지. 참이면 진입 봉(1분봉)의 전량 청산 조건을 무시한다.
+		// 추세 봉의 판정이 살아 있는데 1분봉의 작은 눌림에 통째로 청산되는 것을 막는다.
+		// 2026-10-12 Playback: 상승추세 매수의 청산 37번 중 30번이 이 1분봉 조건이었고(추세가 바뀌어 청산된 것은 7번), 평균 5분 만에 나갔다.
+		//  · 매수: 상승추세(+2), 또는 상승 전환 의심(−1, 역진입 매수가 기다리는 상태). 매도: 하락추세(−2), 또는 하락 전환 의심(+1)
+		//  · 2026-10-14: 전환 의심의 역진입도 넣었다. 그 전에는 역진입 매수만 5.1의 1분봉 전량 청산 조건을 받고 역진입 매도(5.4 규칙)는 그런 조건이 없어
+		//    매수·매도가 다르게 청산됐다. 추세 청산(매수 보유 중 +1·−2, 매도 보유 중 −1·+2)은 그대로 먼저 본다
 		private bool HeldByTrend(int st)
 		{
 			if (!OrganicMode || !OrganicHoldWhileTrend || active == Rule.None)
 				return false;
-			return isLongPos ? st == 2 : st == -2;
+			return isLongPos ? st == 2 || st == -1 : st == -2 || st == 1;
+		}
+
+		// 이익 따라가기 청산 (OrganicTrailAtr, spec 5-2): 유기 모드의 추세 규칙(5.1, 5.4) 포지션은 1차 익절이 체결된 뒤
+		// 손절을 "진입 뒤 최고가(매수) − 진입 봉 ATR × OrganicTrailAtr"로 따라 올린다(매도는 최저가 + ATR × 배수). 손절은 유리한 쪽으로만 움직인다.
+		// 추세 봉 판정은 큰 움직임이 끝나고도 몇 분 늦게 바뀌어서, 추세 청산만 기다리면 그동안 이익을 돌려준다
+		private void UpdateTrailStop()
+		{
+			if (active == Rule.None || entryFillQty <= 0)
+				return;
+			trailExtreme = double.IsNaN(trailExtreme) ? (isLongPos ? High[0] : Low[0])
+				: isLongPos ? Math.Max(trailExtreme, High[0]) : Math.Min(trailExtreme, Low[0]);
+
+			if (!OrganicMode || OrganicTrailAtr <= 0 || tpCount < 1 || !IsMain(active))
+				return;
+			double a = atr[0];
+			if (double.IsNaN(a) || a <= 0)
+				return;
+			double target = isLongPos ? trailExtreme - OrganicTrailAtr * a : trailExtreme + OrganicTrailAtr * a;
+			MoveStopTo(target, "따라가기", Time[0]);
 		}
 
 		// 밴드 익절 단계가 모두 체결됐는지 (남은 조각 중 밴드 익절이 걸린 것이 없음)
@@ -1745,8 +2083,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 추세 확정 → {2}의 청산을 {3} 규칙으로 갈아탐. 익절점 {4}",
 				Time[0], Instrument.FullName, RuleName(active), RuleName(to), moved.Length > 0 ? moved : "변경 없음"));
 
-			active	= to;
-			adopted	= true;
+			active		= to;
+			adopted		= true;
+			tradeMain	= true;	// 갈아탄 뒤에는 추세 규칙의 거래로 본다 (재진입 제한·이익 보호 본절 예외)
 			UpdateTargets();
 		}
 
@@ -1799,8 +2138,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tpCount			= 0;
 			firstTpPrice	= double.NaN;
 			adopted			= false;
-			viaT2			= false;
-			lastSig			= "";
+			tradeMain		= false;
+			tradeQueueStop	= false;
+			stage			= 0;
+			trailExtreme	= double.NaN;
 			testHoldBars	= 0;
 			stopAtr			= double.NaN;
 			initialRisk		= double.NaN;
@@ -1810,6 +2151,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			chunkQty.Clear();
 			chunkBand.Clear();
 			filledBand.Clear();
+			filledLevels.Clear();
 			pendingBandExit.Clear();
 		}
 		#endregion
@@ -1821,8 +2163,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 테스트 진입: 5.1 상승추세 매수의 분할(1/5·2/5·나머지)로 들어간다. 밴드 익절 지정가는 걸지 않는다
 		private void RouteTestEntry()
 		{
-			viaT2			= false;
 			viaConfirm		= false;
+			viaStage1		= false;
 			entryQtyPercent	= 100;
 			Enter(Rule.UpLong, RegimeState());
 		}
@@ -1911,10 +2253,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			switch (r)
 			{
-				case Rule.UpLong:		return "저가 " + BandText(-UpLongBand) + " 터치" + (TrendT2Entry ? " (또는 MACD▲ + 골든)" : "");
+				case Rule.UpLong:		return "저가 " + BandText(-UpLongBand) + " 터치";
 				case Rule.UpSusLong:	return "종가 " + BandText(-UpSusLongBand) + " 아래";
 				case Rule.UpSusShort:	return "고가 " + BandText(UpSusShortBand) + " 터치";
-				case Rule.DnShort:		return "고가 " + BandText(DnShortBand) + " 터치" + (TrendT2Entry ? " (또는 MACD▼ + 데드)" : "");
+				case Rule.DnShort:		return "고가 " + BandText(DnShortBand) + " 터치";
 				case Rule.DnLong:		return "RSI " + DnLongRsi + " 아래 + 저가 " + BandText(-DnLongBand) + " 터치";
 				case Rule.DnSusLong:	return "저가 " + BandText(-DnSusLongBand) + " 터치";
 				case Rule.DnSusShort:	return "종가 " + BandText(DnSusShortBand) + " 위";
@@ -2002,8 +2344,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 					string longBlock	= null;
 					string shortBlock	= null;
-					if (BlockReentryAfterStop && blockLong && !IsMain(longRule))	longBlock = "손절 뒤 재진입 금지";
-					if (BlockReentryAfterStop && blockShort && !IsMain(shortRule))	shortBlock = "손절 뒤 재진입 금지";
+					if (BlockReentryAfterStop && blockLong && !IsMainAt(longRule, st))		longBlock = "손절 뒤 재진입 금지";
+					if (BlockReentryAfterStop && blockShort && !IsMainAt(shortRule, st))	shortBlock = "손절 뒤 재진입 금지";
 					if (longRule != Rule.None && !RuleEnabled(longRule))			longBlock = "이 규칙 꺼짐";
 					if (shortRule != Rule.None && !RuleEnabled(shortRule))			shortBlock = "이 규칙 꺼짐";
 					if (OrganicMode && (st == 1 || st == -1) && OrganicSuspectQtyPercent <= 0)
@@ -2028,12 +2370,38 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					string sizeNote		= OrganicMode && (st == 1 || st == -1) ? " (역진입 " + OrganicSuspectQtyPercent + "%)" : "";
 					if (OrganicMode)
 						sb.Append(OrganicEnterOnConfirm && (st == 0 || st == 1 || st == -1) ? "유기 모드: 추세가 확정되는 봉에 바로 진입\n" : "유기 모드\n");
+					if (TwoStageOn() && regimeFast != null)
+						sb.AppendFormat("두 단계 진입: 1분봉 {0} → 1분봉이 {1}가 되면 {2}% 먼저\n", StateText(FastState(0)),
+							st == 0 ? "상승추세·하락추세" : st == -1 ? "상승추세" : st == 1 ? "하락추세" : "(추세 봉 확정 중이라 해당 없음)", OrganicStage1Percent);
 
 					string longLine		= longRule == Rule.None ? (OrganicMode ? "× 매수: 이 추세에서는 하지 않음\n" : "× 매수: 없음\n")
 						: CandidateLine("매수" + sizeNote, longWait, BandConditionText(longRule), longRev, longBlock, longBars);
 					string shortLine	= shortRule == Rule.None ? "× 매도: 이 추세에서는 하지 않음\n"
 						: CandidateLine("매도" + sizeNote, shortWait, BandConditionText(shortRule), shortRev, shortBlock, shortBars);
+					// 의심 뒤 가격 확인 역진입: 밴드 조건 대신 직전 저점·고점 돌파를 기다린다
+					if (SuspectTriggerOn(st))
+					{
+						string trig = st == 1
+							? string.Format("종가 < 직전 {0}봉 저점 {1:N2}", SwingBars, signals.SwingLow5[0])
+							: string.Format("종가 > 직전 {0}봉 고점 {1:N2}", SwingBars, signals.SwingHigh5[0]);
+						string block = st == 1 ? shortBlock : longBlock;
+						if (block == null && suspectTriggerUsed)
+							block = "이번 의심 구간에서 이미 진입함";
+						string line = block != null ? string.Format("× {0}{1}: {2}\n", st == 1 ? "매도" : "매수", sizeNote, block)
+							: string.Format("○ {0}{1}: 의심 뒤 가격 확인 — {2}\n", st == 1 ? "매도" : "매수", sizeNote, trig);
+						if (st == 1)	shortLine = line;
+						else			longLine = line;
+					}
 					sb.Append(shortFirst ? shortLine + longLine : longLine + shortLine);
+
+					// 반전 신호 큐: 지금 쓸 수 있는 신호 (전환 의심이 아니면 모아 두기만 한다)
+					if (OrganicMode && OrganicSignalQueue)
+					{
+						QueuedSignal qs = LatestQueued(false), ql = LatestQueued(true);
+						sb.AppendFormat("큐{0}: 매도 {1} / 매수 {2}\n", QueueEntryOn(st) ? (queueEntryUsed ? " (이번 의심 구간에서 사용함)" : " → 의심 중이라 바로 진입") : "",
+							qs == null ? "없음" : string.Format("{0}분 전 고점 {1:N2}", CurrentBars[0] - qs.Bar, qs.Extreme),
+							ql == null ? "없음" : string.Format("{0}분 전 저점 {1:N2}", CurrentBars[0] - ql.Bar, ql.Extreme));
+					}
 				}
 			}
 			else
@@ -2105,16 +2473,27 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					sb.AppendFormat("○ {0} {1:N2} → {2}계약 익절\n", BandText(band), BandPrice(band), chunkQty[sig]);
 			}
 
-			// 마지막 조각
-			if (liveSignals.Contains(lastSig))
+			// 마지막 조각 (두 단계 진입으로 추가했으면 두 조각을 합쳐 보여 준다)
+			int lastQty = 0;
+			foreach (string sig in LastChunks())
+				lastQty += chunkQty[sig];
+			if (lastQty > 0)
 			{
 				int side = LastChunkSide(active);
 				if (side == 0)
-					sb.AppendFormat("○ 마지막 {0}계약: 아래 전량 청산 조건으로\n", chunkQty[lastSig]);
+					sb.AppendFormat("○ 마지막 {0}계약: 아래 청산 조건으로\n", lastQty);
 				else
-					sb.AppendFormat("○ 마지막 {0}계약: 종가 {1} {2}선 {3:N2}{4}\n", chunkQty[lastSig], side > 0 ? ">" : "<",
+					sb.AppendFormat("○ 마지막 {0}계약: 종가 {1} {2}선 {3:N2}{4}\n", lastQty, side > 0 ? ">" : "<",
 						ExitSmaPeriod, signals.Sma[0], LastChunkEarly || BandStagesDone() ? "" : " (앞 단계가 끝난 뒤부터)");
 			}
+			if (OrganicMode && OrganicTrailAtr > 0 && IsMain(active))
+			{
+				string from = string.Format("{0} {1:N2} {2} ATR×{3}", isLongPos ? "최고가" : "최저가", trailExtreme, isLongPos ? "−" : "+", OrganicTrailAtr);
+				sb.Append(tpCount >= 1 ? "○ 따라가기: 손절을 " + from + "로\n" : "  따라가기: 1차 익절 뒤부터 (" + from + ")\n");
+			}
+			if (stage == 1)
+				sb.AppendFormat("○ 두 단계 진입 1단계: 추세 봉이 {0}가 되면 나머지 추가, 그 전에 1분봉 추세가 꺼지면 청산 (지금 1분봉 {1})\n",
+					isLongPos ? "상승추세" : "하락추세", StateText(FastState(0)));
 
 			string full = FullExitText(active);
 			if (full != null && HeldByTrend(RegimeState()))
@@ -2152,7 +2531,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			else if (name == "Stop loss")
 			{
 				// 손절이 본절이나 1차 익절가로 옮겨진 뒤의 체결은 손실 손절과 구분한다
-				kind	= !breakevenDone ? "손절" : stopNote == "1차 익절가" ? "익절 스탑" : "본절";
+				kind	= !breakevenDone ? "손절" : stopNote == "1차 익절가" || stopNote == "따라가기" ? "익절 스탑" : "본절";
 				brush	= Brushes.Magenta;
 			}
 			else
@@ -2242,6 +2621,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(1, 10)]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다 (1이면 두 단계 진입을 잠금)
 		[Display(Name = "[추가] 추세 봉: 10분, 3분, 1(진입 봉) (RegimeBarMinutes)", Description = "추세를 판단하는 봉. 명세 10(10분봉). 3이면 3분봉. 1이면 따로 추세 봉을 두지 않고 진입 봉(차트의 봉, 보통 1분봉)으로 추세까지 판단함. 짧을수록 추세 인정이 빠르지만 자주 바뀜. 1, 3, 10만 쓸 수 있고 다른 값은 10으로 봄. 이 묶음의 봉 수(이동평균 기간 등)는 모두 이 봉 기준이라, 1분봉이면 이동평균 6/18/36이 6/18/36분이 됨", GroupName = "01. 추세 판단", Order = 10)]
 		public int RegimeBarMinutes { get; set; }
 
@@ -2273,6 +2653,31 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "[추가] 가격이 아직 추세 방향이면 전환 의심을 띄우지 않음 (RegimeSuspectNeedsPrice)", Description = "명세 끔. 켜면 추세 봉의 종가가 아직 단기선 위에 있고 단기선이 오르는 중일 때는 다른 조건(RSI + 다이버전스·MACD 전환·데드크로스)이 맞아도 하락 전환 의심을 띄우지 않음. 상승 전환 의심은 반대(종가가 단기선 아래 + 단기선 하락 중이면 띄우지 않음). 급등·급락 도중 잠깐 쉬는 지점에서 의심이 뜨는 것을 줄임. 두 추세 판단 방식 모두에 적용", GroupName = "01. 추세 판단", Order = 23)]
 		public bool RegimeSuspectNeedsPrice { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 5)]
+		[Display(Name = "[추가] 의심은 추세의 힘이 빠진 뒤에만: 점수 상한 (RegimeSuspectMaxScore)", Description = "기본 5(제한 없음). 하락 전환 의심은 추세 봉 점수가 이 값 이하일 때만, 상승 전환 의심은 −이 값 이상일 때만 띄움. 1이면 점수 +2 이상(지표 대부분이 아직 상승)인 동안에는 하락 전환 의심을 띄우지 않음. 10/14 로그 의심 17건: 점수 ±1 이하에서 뜬 7건은 모두 맞았고 ±2 이상에서 뜬 10건은 3건만 맞음(표본 작음). 두 추세 판단 방식 모두에 적용", GroupName = "01. 추세 판단", Order = 24)]
+		public int RegimeSuspectMaxScore { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 4)]
+		[Display(Name = "[추가] 의심에 필요한 근거 종류 수 (RegimeSuspectMinEvidence)", Description = "기본 1(명세: 근거 하나면 충분). 근거 = 다이버전스, MACD 전환, 크로스, 가격 항목이 더는 추세 방향이 아님(종가가 단기선 아래거나 단기선이 안 오름). 아래 봉 수 안에 이 수 이상의 종류가 나와야 의심을 띄움. 2면 스토캐스틱 데드크로스 하나만으로는 뜨지 않음. 그 봉에 다이버전스·MACD 전환·크로스 중 하나가 있어야 하는 것과 RSI 조건은 그대로", GroupName = "01. 추세 판단", Order = 25)]
+		public int RegimeSuspectMinEvidence { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "[추가] 의심 근거를 모으는 봉 수 (RegimeSuspectEvidenceBars)", Description = "기본 2. 위의 근거를 최근 몇 개의 추세 봉(현재 포함) 안에서 셀지. 근거 종류 수가 1이면 쓰이지 않음", GroupName = "01. 추세 판단", Order = 26)]
+		public int RegimeSuspectEvidenceBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "[추가] 추세 확정에 필요한 연속 봉 수 (RegimeConfirmBars)", Description = "기본 1(그 봉에서 바로). 추세 시작 조건(점수 방식: 가격 조건 + 최소 점수, 명세: 정배열 + MACD선 부호)이 이 봉 수만큼 연속이어야 추세로 인정. 2면 한 봉짜리 흔들림을 거르는 대신 추세 봉 한 개만큼 늦어짐(3분봉이면 3분)", GroupName = "01. 추세 판단", Order = 27)]
+		public int RegimeConfirmBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "[추가] 추세 종료에 필요한 연속 봉 수 (RegimeExitBars)", Description = "기본 1. 추세 종료 조건(점수 방식: 점수가 종료 점수 이하, 명세: 시작 조건이 깨짐)이 이 봉 수만큼 연속이어야 추세를 끝냄. 2면 추세 중 한 봉 쉬어 가는 것으로는 횡보가 되지 않음. 반대 방향 추세가 확정되면 그때는 바로 바뀜", GroupName = "01. 추세 판단", Order = 28)]
+		public int RegimeExitBars { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "[추가] 의심 중 반대 신호가 나오면 원래 추세로 복귀 (SuspectReturn)", Description = "회의 문서에서 미정인 부분. 켜면(기본) 하락 전환 의심 중 MACD 상승 전환이나 골든크로스가 나오면 상승추세로 돌아감(상승 전환 의심은 반대). 끄면 이동평균 배열이나 MACD선 부호가 깨질 때까지 의심 상태로 남음", GroupName = "01. 추세 판단", Order = 12)]
@@ -2412,21 +2817,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int MacdConfirmBars { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(0, int.MaxValue)]
-		[Display(Name = "[추가] 대기 봉 수 따로: 상승추세·하락 전환 의심 (T1WindowUp)", Description = "상승추세 매수, 하락 전환 의심 매수·매도의 대기 봉 수. 0(기본)이면 위의 공통값 사용", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 10)]
-		public int T1WindowUp { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, int.MaxValue)]
-		[Display(Name = "[추가] 대기 봉 수 따로: 하락추세·상승 전환 의심 (T1WindowDn)", Description = "하락추세 매도·역추세 매수, 상승 전환 의심 매수·매도의 대기 봉 수. 0(기본)이면 공통값 사용", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 11)]
-		public int T1WindowDn { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, int.MaxValue)]
-		[Display(Name = "[추가] 대기 봉 수 따로: 횡보 (T1WindowSide)", Description = "횡보 매수·매도의 대기 봉 수. 0(기본)이면 공통값 사용", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 12)]
-		public int T1WindowSide { get; set; }
-
-		[NinjaScriptProperty]
 		[Display(Name = "[추가] 밴드에 닿은 그 봉의 반전 신호도 인정 (T1SameBar)", Description = "명세 끔(다음 봉부터의 반전 신호만 셈). 켜면 밴드에 닿은 봉에서 반전 신호가 같이 나올 때 바로 진입", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 13)]
 		public bool T1SameBar { get; set; }
 
@@ -2437,10 +2827,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "[추가] 종가가 이미 1차 익절 밴드를 넘었으면 진입 안 함 (SkipEntryPastTarget)", Description = "명세 끔. 반전 신호가 늦게 확인돼 신호 봉 종가가 첫 익절 밴드를 이미 넘은 경우 진입하지 않음. 끄면 그대로 진입하고 첫 조각이 진입가 근처에서 바로 익절돼 나감", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 15)]
 		public bool SkipEntryPastTarget { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "[추가] 추세 방향 진입: 밴드 조건 없이 MACD 전환 + 크로스로도 (TrendT2Entry)", Description = "명세 끔(이 조건은 횡보에만 있음). 켜면 상승추세 매수와 하락추세 매도도 밴드까지 되돌리지 않고 MACD 전환 + 크로스가 같이 나올 때 진입", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 16)]
-		public bool TrendT2Entry { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "[추가] MACD + 크로스 동시 조건: MACD가 꺾인 봉의 크로스도 인정 (T2CountConfirmBars)", Description = "회의 전(10/9)부터 켜 둔 것. MACD 전환은 2봉 연속이어야 확인되므로 실제로 꺾인 봉은 확인 봉보다 앞임. 켜면 그 앞 봉들에서 나온 크로스도 같이 나온 것으로 인정. 진입과 청산 모두에 적용", GroupName = "07. 진입 — 공통 (반전 신호와 대기)", Order = 17)]
@@ -2640,11 +3026,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public bool LogToFile { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[표시] 거래 요약을 파일로 저장 (TradeLogToFile)", Description = "거래 1건이 끝날 때마다 한 줄을 TQ_trades_종목.csv에 저장. 백테스트에서도 저장. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "13. 화면·기록·테스트", Order = 2)]
-		public bool TradeLogToFile { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "[표시] 학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 진입 신호 봉의 지표 상태와 그 거래의 결과를 TQ_ml_종목.csv에 저장. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "13. 화면·기록·테스트", Order = 3)]
+		[Display(Name = "[표시] 학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 진입 신호 봉의 지표 상태와 그 거래의 결과(손익, 최대 유리폭·불리폭, 보유 봉 수, 청산 순서)를 TQ_ml_종목.csv에 저장. 백테스트에서도 저장. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "13. 화면·기록·테스트", Order = 3)]
 		public bool MlLogToFile { get; set; }
 
 		[NinjaScriptProperty]
@@ -2678,8 +3060,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public double OrganicBeMinR { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[추가] 유기 모드: 횡보 진입을 막는 반대 방향 점수 (OrganicSideBlockScore)", Description = "횡보로 판정된 구간이라도 추세 봉의 지표 점수(가격·MACD·RSI·스토캐스틱을 각각 +1/−1로 센 합, −4~+4)가 이 값 이상 상승 쪽이면 횡보 매도를, 이 값 이상 하락 쪽이면 횡보 매수를 하지 않음. 기본 2. 0이면 막지 않음. 점수는 화면 둘째 줄과 로그의 추세 봉 마감 줄에 나옴", GroupName = "14. 유기 모드 (실험)", Order = 5)]
+		[Range(0, 5)]
+		[Display(Name = "[추가] 유기 모드: 횡보 진입을 막는 반대 방향 점수 (OrganicSideBlockScore)", Description = "횡보로 판정된 구간이라도 추세 봉의 지표 점수(가격·MACD·RSI·스토캐스틱·사건을 각각 +1/−1로 센 합, −5~+5. 사건 봉 수가 0이면 −4~+4)가 이 값 이상 상승 쪽이면 횡보 매도를, 이 값 이상 하락 쪽이면 횡보 매수를 하지 않음. 기본 2. 0이면 막지 않음. 점수는 화면 둘째 줄과 로그의 추세 봉 마감 줄에 나옴", GroupName = "14. 유기 모드 (실험)", Order = 5)]
 		public int OrganicSideBlockScore { get; set; }
 
 		[NinjaScriptProperty]
@@ -2687,14 +3069,78 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public bool OrganicEnterAtOpen { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[추가] 유기 모드: 추세가 유지되는 동안은 1분봉 전량 청산 조건을 무시 (OrganicHoldWhileTrend)", Description = "기본 끔. 상승추세 매수에는 명세의 전량 청산 조건(진입 봉에서 MACD 하락 전환 + 데드크로스)이 있어서, 추세 봉의 판정이 여전히 상승추세인데도 1분봉의 작은 눌림에 포지션이 통째로 청산됨. 하락추세 매도에는 이런 조건이 없어 매도만 길게 감. 켜면 매수 보유 중 판정이 상승추세인 동안(매도는 하락추세인 동안)은 이 조건을 무시하고, 추세가 바뀌면 그때 청산. 손절과 단계별 익절, 마지막 조각 조건은 그대로", GroupName = "14. 유기 모드 (실험)", Order = 7)]
+		[Display(Name = "[추가] 유기 모드: 추세가 유지되는 동안은 1분봉 전량 청산 조건을 무시 (OrganicHoldWhileTrend)", Description = "기본 끔. 상승추세 매수에는 명세의 전량 청산 조건(진입 봉에서 MACD 하락 전환 + 데드크로스)이 있어서, 추세 봉의 판정이 여전히 상승추세인데도 1분봉의 작은 눌림에 포지션이 통째로 청산됨. 하락추세 매도에는 이런 조건이 없어 매도만 길게 감. 켜면 매수 보유 중 판정이 상승추세이거나 상승 전환 의심인 동안(매도는 하락추세이거나 하락 전환 의심인 동안)은 이 조건을 무시하고, 추세가 바뀌면 그때 청산. 전환 의심 때의 역진입도 같이 다룸(10/14부터). 손절과 단계별 익절, 마지막 조각 조건은 그대로", GroupName = "14. 유기 모드 (실험)", Order = 7)]
 		public bool OrganicHoldWhileTrend { get; set; }
+
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
+		[Display(Name = "[추가] 유기 모드: 두 단계 진입 (OrganicTwoStage)", Description = "기본 끔. 추세 봉과 같은 방식의 추세를 진입 봉(1분봉)에서도 계산해서, 1분봉이 먼저 상승추세가 되면(추세 봉은 횡보나 상승 전환 의심) 아래 %만 매수하고, 추세 봉이 상승추세로 확정되면 나머지를 추가 매수(매도는 거울상). 추가는 진입 시간 안이고 밴드 익절이 아직 하나도 체결되지 않았고 종가가 1차 익절 밴드를 넘지 않았을 때만. 확정 전에 1분봉 추세가 꺼지면(매수는 1분봉이 상승추세·하락 전환 의심이 아니게 되면) 1단계 수량을 청산. 익절·청산은 상승추세 매수(5.1)·하락추세 매도(5.4) 규칙. 1단계는 주력 진입이 아니라서 손실 손절 뒤 재진입 제한을 받음. 추세 봉이 1(진입 봉)이면 쓰지 않음", GroupName = "14. 유기 모드 (실험)", Order = 8)]
+		public bool OrganicTwoStage { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 100)]
+		[Display(Name = "[추가] 유기 모드: 두 단계 진입의 1단계 수량 % (OrganicStage1Percent)", Description = "1단계에서 진입 계약 수의 이 %만 들어감. 기본 50. 나머지는 추세 봉이 확정될 때 추가. 1단계 조각도 익절 단계 비율대로 나누므로 작으면 단계가 0계약이 될 수 있음", GroupName = "14. 유기 모드 (실험)", Order = 9)]
+		public int OrganicStage1Percent { get; set; }
+
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[추가] 유기 모드: 손절을 직전 저점·고점 기준으로 (OrganicStopSwing)", Description = "기본 끔(진입가에서 ATR × 손절 배수). 켜면 손절가 = 직전 저점 한 틱 아래(매도는 고점 한 틱 위). 직전 저점은 진입 봉 최근 SwingBars봉(08 묶음, 기본 5)과 추세 봉 최근 아래 봉 수를 합쳐 가장 낮은 값. 거리는 진입 봉 ATR × 최소~최대 배수 안으로 자름. 켜면 위의 '손절 거리, ATR 배수'는 쓰지 않음", GroupName = "14. 유기 모드 (실험)", Order = 10)]
+		public bool OrganicStopSwing { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 구조 손절 — 추세 봉 몇 개 안의 저점·고점 (OrganicStopSwingBars)", Description = "기본 5(3분봉이면 15분). 늘리면 더 바깥 저점을 쓰므로 손절이 멀어짐(최대 배수에서 잘림)", GroupName = "14. 유기 모드 (실험)", Order = 11)]
+		public int OrganicStopSwingBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 구조 손절 — 최소 거리, ATR 배수 (OrganicStopMinAtr)", Description = "기본 1.5. 직전 저점이 진입가에 너무 가까우면 이 거리까지 벌림", GroupName = "14. 유기 모드 (실험)", Order = 12)]
+		public double OrganicStopMinAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, double.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 구조 손절 — 최대 거리, ATR 배수 (OrganicStopMaxAtr)", Description = "기본 3. 직전 저점이 진입가에서 너무 멀면 이 거리까지만. 한 번의 손실을 제한함", GroupName = "14. 유기 모드 (실험)", Order = 13)]
+		public double OrganicStopMaxAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 100)]
+		[Display(Name = "[추가] 유기 모드: 추세 규칙 1차 익절 수량 % (OrganicTp1Percent)", Description = "기본 0. 상승추세 매수(+2배)·하락추세 매도(−2배)의 1차 익절 수량을 진입 계약 수의 %로. 0과 0이면 규칙 표 비율(매수 20/40/나머지 40, 매도 33/33/33). 2차 익절에 비중을 두려면 예: 1차 20, 2차 50 → 마지막 조각 30. 합이 100을 넘으면 규칙 표 비율. 횡보 규칙에는 적용하지 않음", GroupName = "14. 유기 모드 (실험)", Order = 14)]
+		public int OrganicTp1Percent { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 100)]
+		[Display(Name = "[추가] 유기 모드: 추세 규칙 2차 익절 수량 % (OrganicTp2Percent)", Description = "기본 0. 상승추세 매수(+3배)·하락추세 매도(−3배)의 2차 익절 수량 %. 1차와 2차를 빼고 남은 %가 마지막 조각", GroupName = "14. 유기 모드 (실험)", Order = 15)]
+		public int OrganicTp2Percent { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 이익 따라가기 청산, ATR 배수 (OrganicTrailAtr)", Description = "기본 0(사용 안 함). 상승추세 매수·하락추세 매도 규칙의 포지션(역진입·두 단계 진입 포함)은 1차 익절이 체결된 뒤 손절을 '진입 뒤 최고가 − 진입 봉 ATR × 이 값'으로 따라 올림(매도는 최저가 + ATR × 값). 손절은 유리한 쪽으로만 움직임. 추세 봉 판정이 늦게 바뀌는 동안 이익을 돌려주는 것을 줄임. 3 안팎부터 시험", GroupName = "14. 유기 모드 (실험)", Order = 16)]
+		public double OrganicTrailAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[추가] 유기 모드: 역진입은 의심 뒤 가격 확인으로 (OrganicSuspectTrigger)", Description = "기본 끔(의심 상태에서 밴드 조건 + 반전 신호로 역진입). 켜면 전환 의심이 뜬 동안에만 기다렸다가, 진입 봉 종가가 직전 SwingBars봉(기본 5)의 저점 아래로 내려가면 매도(하락 전환 의심), 고점 위로 올라가면 매수(상승 전환 의심). 의심 한 번에 한 번만. 밴드 조건 역진입은 하지 않음. 수량은 역진입 수량 %. 맞는 의심도 먼저 반대로 20~40포인트 갔다가 맞는 경우가 많아서(10/8 22:27), 가격이 꺾인 것을 보고 들어가기 위함", GroupName = "14. 유기 모드 (실험)", Order = 17)]
+		public bool OrganicSuspectTrigger { get; set; }
+
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창의 잠금 상태를 다시 그린다
+		[Display(Name = "[추가] 유기 모드: 반전 신호 큐 (OrganicSignalQueue)", Description = "기본 끔. 켜면 추세와 상관없이 진입 봉의 반전 신호(어느 규칙이든 매도 쪽·매수 쪽 진입 신호)를 큐에 모아 두고, 전환 의심이 뜨면 큐에 유효한 반대쪽 신호가 있을 때 새 신호를 기다리지 않고 바로 역진입(하락 전환 의심 → 매도, 상승 전환 의심 → 매수). 의심 구간 하나에 한 번. 손절은 그 신호의 전고점(매도)·전저점(매수) 한 틱 바깥, 거리는 구조 손절의 최소~최대 ATR 배수 안. 큐 신호는 아래 유효 봉 수가 지나거나, 그 고점을 넘는 고가(매수 신호는 저점을 깨는 저가)가 나오거나, 아래 멀어짐 한도를 넘으면 무효. 상승추세 중 꼭지에서 나온 매도 신호가 3분봉 의심보다 1~8분 먼저 나오는 경우가 많아서(10/5~10/9 의심 27건 중 21건)", GroupName = "14. 유기 모드 (실험)", Order = 18)]
+		public bool OrganicSignalQueue { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 큐 신호의 유효 봉 수 (OrganicQueueBars)", Description = "기본 10(1분봉이면 10분). 신호가 나온 뒤 이 봉 수가 지나면 큐에서 뺌", GroupName = "14. 유기 모드 (실험)", Order = 19)]
+		public int OrganicQueueBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "[추가] 유기 모드: 큐 신호의 멀어짐 한도, ATR 배수 (OrganicQueueMaxAtr)", Description = "기본 1.5. 종가가 신호 가격에서 진입 방향으로(매도 신호면 아래로) 진입 봉 ATR × 이 값보다 멀리 가 버리면 그 신호는 무효. 이미 움직인 뒤에 들어가 손절은 멀고 익절은 가까운 진입을 막음. 0이면 이 조건을 쓰지 않음", GroupName = "14. 유기 모드 (실험)", Order = 20)]
+		public double OrganicQueueMaxAtr { get; set; }
 
 		// ── 00. 설정 세트 ──
 		// 켜면 그 세트의 값들을 한 번에 넣고 설정창에서 잠근다. 전략을 다시 올릴 때마다 여러 값을 손으로 넣다가 빠뜨리는 것을 막는다
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]	// 바꾸면 설정창을 다시 그려 잠금 상태와 값을 갱신한다
-		[Display(Name = "[세트] 유기 기준 세트 적용 (PresetOrganicBase)", Description = "기본 끔(회의 문서 규칙 그대로). 켜면 지금까지 Playback 결과가 가장 좋았던 값들을 한 번에 넣고 잠금: 추세 봉 3분, 추세 판단 방식 2(점수), 의심의 RSI 기준을 RSI 중심 대비로 켬(중심 26봉, 폭 6), 유기 모드 켬, 추세가 유지되는 동안 1분봉 전량 청산 조건 무시 켬. 나머지 설정은 건드리지 않음. 끄면 값은 그대로 남고 잠금만 풀림. 결과와 한계는 docs/status-1012.md", GroupName = "00. 설정 세트", Order = 0)]
+		[Display(Name = "[세트] 유기 기준 세트 적용 (PresetOrganicBase)", Description = "기본 끔(회의 문서 규칙 그대로). 켜면 10/14 마지막 Playback 설정을 한 번에 넣고 잠금: 추세 봉 3분, 추세 판단 방식 2(점수), 의심의 RSI 기준을 RSI 중심 대비로 켬(중심 14봉, 폭 6), 의심 점수 상한 2, 유기 모드 켬, 추세가 유지되는 동안 1분봉 전량 청산 조건 무시 켬, 두 단계 진입 켬, 구조 손절 켬, 추세 규칙 익절 30% / 40%, 이익 따라가기 ATR 2, 의심 뒤 가격 확인 역진입 켬, 반전 신호 큐 켬. 나머지 설정(1단계 50%, 구조 손절 5봉·1.5~3 ATR, 큐 10봉·1.5 ATR 등)은 기본값 그대로이고 건드리지 않음. 끄면 값은 그대로 남고 잠금만 풀림", GroupName = "00. 설정 세트", Order = 0)]
 		public bool PresetOrganicBase
 		{
 			get { return presetOrganicBase; }
@@ -2707,7 +3153,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		}
 		private bool presetOrganicBase;
 
-		// 아래 셋은 "버튼"이다. 설정창에는 버튼이 없어서 체크 상자로 만든다: 체크하면 그 동작을 한 번 하고 스스로 체크가 풀린다.
+		// 아래는 "버튼"이다. 설정창에는 버튼이 없어서 체크 상자로 만든다: 체크하면 그 동작을 한 번 하고 스스로 체크가 풀린다.
 		// 값을 저장하지 않으므로 [NinjaScriptProperty]를 붙이지 않고 XML에도 쓰지 않는다 (전략을 복제·저장할 때 동작이 다시 실행되지 않게)
 		[XmlIgnore]
 		[RefreshProperties(RefreshProperties.All)]
@@ -2718,26 +3164,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			set { ButtonWrite("spec", value); }
 		}
 
+		// 지금 설정을 한 벌 저장·불러오는 버튼은 2026-10-14에 뺐다. 설정창 아래의 template 저장·불러오기(NinjaTrader 기능)를 쓴다
 		[XmlIgnore]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[버튼] 지금 설정을 내 세트로 저장 — 체크하면 실행", Description = "체크하면 지금 설정창에 있는 매매 규칙 설정을 내 문서\\NinjaTrader 8\\TQ_settings_custom.txt에 저장. 실행한 뒤 체크는 스스로 풀림. 저장은 한 벌만 되고 다시 저장하면 덮어씀. 수량·대회 시간과 화면·기록·테스트 묶음은 저장하지 않음(종목마다 다를 수 있어서). 다른 PC로 옮기려면 그 파일을 복사", GroupName = "00. 설정 세트", Order = 2)]
-		public bool PresetSaveCustom
-		{
-			get { return ButtonRead("save"); }
-			set { ButtonWrite("save", value); }
-		}
-
-		[XmlIgnore]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[버튼] 내 세트 불러오기 — 체크하면 실행", Description = "체크하면 위 버튼으로 저장해 둔 설정을 불러와 설정창에 넣음. 실행한 뒤 체크는 스스로 풀림. 전략을 차트에 다시 올린 뒤 이 버튼 하나로 지난번 설정을 되살릴 수 있음. 저장한 뒤에 새로 생긴 설정은 지금 값 그대로 둠", GroupName = "00. 설정 세트", Order = 3)]
-		public bool PresetLoadCustom
-		{
-			get { return ButtonRead("load"); }
-			set { ButtonWrite("load", value); }
-		}
-
-		[XmlIgnore]
-		[Display(Name = "[표시] 마지막 동작", Description = "위 버튼들이 마지막으로 한 일과 그 결과. 직접 바꿀 수 없음", GroupName = "00. 설정 세트", Order = 4)]
+		[Display(Name = "[표시] 마지막 동작", Description = "위 버튼이 마지막으로 한 일과 그 결과. 직접 바꿀 수 없음", GroupName = "00. 설정 세트", Order = 4)]
 		public string PresetStatus
 		{
 			get { return presetStatus; }
@@ -2766,9 +3195,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					buttonPressed = "";
 				return;
 			}
-			if (name == "spec")			ApplySpecDefaults();
-			else if (name == "save")	SaveCustomSettings();
-			else						LoadCustomSettings();
+			if (name == "spec")
+				ApplySpecDefaults();
 			buttonPressed	= name;
 			buttonPressedAt	= DateTime.Now;
 			LogPresetAction(name);
@@ -2791,20 +3219,31 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		#region 설정 세트와 설정창 잠금
 		// 유기 기준 세트의 값 (docs/status-1012.md의 "시험 중인 설정 세트"). 세트에 들어가는 설정은 PresetSettings와 같이 고친다
+		// 2026-10-14 저녁 마지막 Playback 설정으로 바꿨다 (그 전: 추세 봉 3, 점수 방식, RSI 상대 기준 26/6, 유기 모드, 추세 유지 중 청산 무시)
 		private void ApplyPreset()
 		{
 			RegimeBarMinutes		= 3;
 			RegimeMode				= 2;
 			RegimeRsiRelative		= true;
-			RegimeRsiCenterBars		= 26;
+			RegimeRsiCenterBars		= 14;
 			RegimeRsiOffset			= 6;
+			RegimeSuspectMaxScore	= 2;
 			OrganicMode				= true;
 			OrganicHoldWhileTrend	= true;
+			OrganicTwoStage			= true;
+			OrganicStopSwing		= true;
+			OrganicTp1Percent		= 30;
+			OrganicTp2Percent		= 40;
+			OrganicTrailAtr			= 2;
+			OrganicSuspectTrigger	= true;
+			OrganicSignalQueue		= true;
 		}
 
 		private static readonly string[] PresetSettings =
 		{
-			"RegimeBarMinutes", "RegimeMode", "RegimeRsiRelative", "RegimeRsiCenterBars", "RegimeRsiOffset", "OrganicMode", "OrganicHoldWhileTrend"
+			"RegimeBarMinutes", "RegimeMode", "RegimeRsiRelative", "RegimeRsiCenterBars", "RegimeRsiOffset", "RegimeSuspectMaxScore",
+			"OrganicMode", "OrganicHoldWhileTrend", "OrganicTwoStage", "OrganicStopSwing", "OrganicTp1Percent", "OrganicTp2Percent",
+			"OrganicTrailAtr", "OrganicSuspectTrigger", "OrganicSignalQueue"
 		};
 
 		// SetDefaults가 끝난 직후의 설정값 = 회의 문서 규칙의 기본값. "기본값으로 되돌리기" 버튼이 쓴다 (모든 인스턴스가 같으므로 한 번만 담는다)
@@ -2875,88 +3314,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
-		private static string CustomSettingsPath()
-		{
-			return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8", "TQ_settings_custom.txt");
-		}
-
-		// [버튼] 지금 설정을 내 세트로 저장. 한 줄에 "이름=값". 숫자의 소수점은 항상 '.'
-		private void SaveCustomSettings()
-		{
-			try
-			{
-				System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
-				System.Text.StringBuilder sb = new System.Text.StringBuilder();
-				sb.AppendLine("# TQ_Strategy 내 세트. " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " 저장. 이름=값");
-				int count = 0;
-				foreach (System.Reflection.PropertyInfo p in SettingProperties(true))
-				{
-					sb.AppendLine(p.Name + "=" + Convert.ToString(p.GetValue(this, null), inv));
-					count++;
-				}
-				System.IO.File.WriteAllText(CustomSettingsPath(), sb.ToString(), new System.Text.UTF8Encoding(false));
-				presetStatus = string.Format("{0:HH:mm:ss} 내 세트로 저장함 ({1}개) → {2}", DateTime.Now, count, CustomSettingsPath());
-			}
-			catch (Exception e)
-			{
-				presetStatus = "내 세트 저장 실패: " + e.Message;
-			}
-		}
-
-		// [버튼] 내 세트 불러오기. 파일에 없는 설정(저장한 뒤 새로 생긴 것)은 지금 값 그대로 둔다
-		private void LoadCustomSettings()
-		{
-			try
-			{
-				string path = CustomSettingsPath();
-				if (!System.IO.File.Exists(path))
-				{
-					presetStatus = "내 세트 불러오기 실패: 저장한 세트가 없음 (" + path + ")";
-					return;
-				}
-
-				System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
-				Dictionary<string, string> saved = new Dictionary<string, string>();
-				foreach (string line in System.IO.File.ReadAllLines(path))
-				{
-					int eq = line.IndexOf('=');
-					if (line.StartsWith("#") || eq <= 0)
-						continue;
-					saved[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
-				}
-
-				// 세트 스위치를 먼저 끄고 개별 값을 넣는다. 저장된 세트 스위치 값은 맨 끝에 넣는다 (켜져 있었으면 그 세트의 값이 다시 들어간다)
-				presetOrganicBase = false;
-				int count = 0, skipped = 0;
-				foreach (System.Reflection.PropertyInfo p in SettingProperties(true))
-				{
-					string text;
-					if (p.Name == "PresetOrganicBase" || !saved.TryGetValue(p.Name, out text))
-					{
-						if (p.Name != "PresetOrganicBase")
-							skipped++;
-						continue;
-					}
-					object value;
-					if (p.PropertyType == typeof(bool))			value = bool.Parse(text);
-					else if (p.PropertyType == typeof(int))		value = int.Parse(text, inv);
-					else										value = double.Parse(text, inv);
-					p.SetValue(this, value, null);
-					count++;
-				}
-				string presetText;
-				if (saved.TryGetValue("PresetOrganicBase", out presetText) && bool.Parse(presetText))
-					PresetOrganicBase = true;
-
-				presetStatus = string.Format("{0:HH:mm:ss} 내 세트를 불러옴 ({1}개{2})", DateTime.Now, count,
-					skipped > 0 ? ", 저장 파일에 없어 그대로 둔 설정 " + skipped + "개" : "");
-			}
-			catch (Exception e)
-			{
-				presetStatus = "내 세트 불러오기 실패: " + e.Message;
-			}
-		}
-
 		// 지금 설정에서 쓰이지 않거나 세트가 정해 둔 설정의 이름. 설정창에서 이 항목들은 회색으로 잠긴다 (TQ_StrategyConverter).
 		// 매매 동작에는 영향이 없다. 값이 무시되는 조건을 코드의 실제 분기와 맞춰 둔다
 		internal HashSet<string> LockedSettings()
@@ -2979,12 +3336,41 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					locked.Add(name);
 				if (!OrganicEnterOnConfirm)
 					locked.Add("OrganicEnterAtOpen");
+				// 두 단계 진입: 추세 봉이 진입 봉이면(RegimeBarMinutes 1) 쓰지 않는다
+				if (RegimeBarMinutes == 1)
+					locked.Add("OrganicTwoStage");
+				if (!TwoStageOn())
+					locked.Add("OrganicStage1Percent");
+				// 구조 손절: 켜면 ATR 배수 손절 대신 쓰고, 진입 봉 전저점 봉 수(SwingBars)를 같이 쓴다
+				if (OrganicStopSwing)
+				{
+					locked.Add("OrganicStopAtr");
+					locked.Remove("SwingBars");
+				}
+				else
+				{
+					locked.Add("OrganicStopSwingBars");
+					// 최소·최대 거리는 큐 역진입의 손절에도 쓴다
+					if (!OrganicSignalQueue)
+					{
+						locked.Add("OrganicStopMinAtr");
+						locked.Add("OrganicStopMaxAtr");
+					}
+				}
+				if (!OrganicSignalQueue)
+				{
+					locked.Add("OrganicQueueBars");
+					locked.Add("OrganicQueueMaxAtr");
+				}
 			}
 			else
 			{
 				// 유기 모드가 꺼져 있으면 그 세부 설정은 쓰이지 않는다
 				foreach (string name in new[] { "OrganicSuspectQtyPercent", "OrganicEnterOnConfirm", "OrganicEnterAtOpen", "OrganicStopAtr",
-					"OrganicBeMinR", "OrganicSideBlockScore", "OrganicHoldWhileTrend" })
+					"OrganicBeMinR", "OrganicSideBlockScore", "OrganicHoldWhileTrend", "OrganicTwoStage", "OrganicStage1Percent",
+					"OrganicStopSwing", "OrganicStopSwingBars", "OrganicStopMinAtr", "OrganicStopMaxAtr",
+					"OrganicTp1Percent", "OrganicTp2Percent", "OrganicTrailAtr", "OrganicSuspectTrigger",
+					"OrganicSignalQueue", "OrganicQueueBars", "OrganicQueueMaxAtr" })
 					locked.Add(name);
 				if (!UseCounterTrend)
 					foreach (string name in new[] { "DnLongBand", "DnLongRsi", "CounterQtyPercent" })
