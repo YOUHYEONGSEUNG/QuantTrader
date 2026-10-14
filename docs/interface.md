@@ -27,7 +27,7 @@
 
 | 설정값 (생성자 인자 순서) | 기본값 | 의미 |
 | --- | --- | --- |
-| Fast / Mid / Slow | 6 / 18 / 36 | 정배열·역배열을 보는 SMA. 점수 방식은 Fast만 쓴다 |
+| Fast / Mid / Slow | 6 / 18 / 36 | 정배열·역배열을 보는 SMA. 점수 방식은 가격 항목에서 종가를 세 선과 비교하고 Fast의 기울기를 본다 |
 | ShowDebugVisuals | false | 검증용 배경색 |
 | MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 | MACD선 부호와 히스토그램 |
 | HistBars | 2 | MACD 히스토그램이 몇 봉 연속 줄어야(늘어야) 전환으로 볼지 |
@@ -67,7 +67,7 @@
 
 판정 (spec 3장, 3-1):
 - Mode 1: 상승추세 조건 = 정배열 AND MACD선 > 0. 하락추세 조건 = 역배열 AND MACD선 < 0.
-- Mode 2: 다섯 항목이 각각 +1 / −1 / 0을 낸다. 가격(종가 vs SMA Fast, 그리고 SMA Fast가 직전 봉보다 높은지), MACD 히스토그램(부호 AND 직전 봉 대비 같은 방향), RSI(50 ± ScoreRsiBand), 스토캐스틱(%K vs %D AND %K가 50의 같은 쪽), 사건(최근 ScoreEventBars봉 안의 가장 최근 사건의 방향. 상승 쪽 = MACD 상승 전환·골든크로스·상승 다이버전스). 가격이 +1이고 합계 ≥ ScoreMin이면 상승추세 시작, 합계 ≤ ScoreExit이면 끝. 하락은 거울상.
+- Mode 2: 다섯 항목이 각각 +1 / −1 / 0을 낸다. 가격(종가가 SMA Fast·Mid·Slow 모두 위/아래, 그리고 SMA Fast가 직전 봉보다 높은지/낮은지), MACD선(부호 AND 직전 봉 대비 같은 방향. TQ_MacdTurn.MacdLine), RSI(50 ± ScoreRsiBand), 스토캐스틱(%K vs %D AND %K가 50의 같은 쪽), 사건(최근 ScoreEventBars봉 안의 가장 최근 사건의 방향. 상승 쪽 = MACD 상승 전환·골든크로스·상승 다이버전스). 가격이 +1이고 합계 ≥ ScoreMin이면 상승추세 시작, 합계 ≤ ScoreExit이면 끝. 하락은 거울상.
 - 두 방식 모두, 상승·하락 조건이 둘 다 아니면 횡보이고 의심 상태도 끝난다 (NoSideways가 켜져 있으면 마지막 추세의 전환 의심).
 - 상승추세 조건 중: RSI 조건(최근 RsiLookback봉 안에 한 번이라도) AND [하락 다이버전스 OR MACD 하락 전환 OR 데드크로스]면 의심을 켠다. RSI 조건은 RsiRelative가 꺼져 있으면 RSI ≥ RsiHigh, 켜져 있으면 RSI ≥ 그 봉의 RSI 평균 + RsiOffset. SuspectNeedsPrice가 켜져 있으면 가격 항목이 +1인 봉에서는 켜지 않는다. 의심은 유지되고, SuspectReturn이 켜져 있으면 MACD 상승 전환 또는 골든크로스에서 푼다. 하락 쪽은 거울상.
 - 다이버전스: DivBars봉 안에서 좌우 PivotStrength봉보다 고가가 높은 봉(고점) 중 가장 높은 것과 지금 봉을 비교. 지금 고가가 더 높은데 RSI는 낮으면 하락 다이버전스. 저점으로 거울상이 상승 다이버전스.

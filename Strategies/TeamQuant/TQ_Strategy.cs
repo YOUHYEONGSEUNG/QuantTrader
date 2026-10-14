@@ -164,6 +164,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				FastTrendBars		= 2;		// 명세에 없음 (0과 같음)
 				FastTrendSlope		= false;
 				RegimeBarMinutes	= 10;		// 명세 3장: 10분봉. 3이면 3분봉으로 추세 판단
+				// 2026-10-14 테스트: 추세 판단만 점수 방식으로 (spec 3-1). 1이면 위의 이동평균·고저점 규칙
+				RegimeMode			= 2;
+				RegimeScoreMin		= 2;
+				RegimeScoreRsiBand	= 5;
+				RegimeScoreEventBars	= 3;
+				RegimeScoreExit		= 0;
+				RegimeHistBars		= 2;
+				RegimeDivBars		= 15;
+				RegimePivotStrength	= 2;
 
 				// 손절·본절
 				StopPercent			= 0.2;
@@ -176,7 +185,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// 청산
 				SideRestBand		= 3;
-				SideRestNarrowTime	= 223000;
+				SideRestNarrowTime	= 213000;	// 대회 시작 시각과 같게 (2026-10-14 대회 시간 21:30~23:30)
 				MomentumSmaPeriod	= 20;
 				IntrabarTakeProfit	= true;		// 명세 1장에 2026-10-09 추가 (끄면 봉 마감 후 시장가)
 
@@ -184,9 +193,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				EntryQuantity		= 30;
 				MaxQuantity			= 40;
 				MinEntries			= 2;		// 종목당 최소 진입 (나스닥 2, 골드 2)
-				ContestStartTime	= 223000;	// 22:30:00 KST
-				EntryEndTime		= 1500;		// 00:15:00 KST
-				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
+				// 2026-10-14 대회 시간을 21:30~23:30 KST로 확정 (그 전에는 22:30~00:30)
+				ContestStartTime	= 213000;	// 21:30:00 KST
+				EntryEndTime		= 231500;	// 23:15:00 KST
+				FlattenTime			= 232700;	// 23:27:00 KST 봉 마감
 
 				// 화면·기록·테스트
 				ShowStatus			= true;
@@ -214,7 +224,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
 				regimeBip	= RegimeBarMinutes == 3 ? 2 : 1;	// 추세를 판단하는 시리즈: 10분봉(1) 또는 3분봉(2)
 				regime		= TQ_Regime(BarsArray[regimeBip], RegimeFast, RegimeMid, RegimeSlow, UseRule12, false,
-								Rule12Bars, Rule12PriceFilter, FastTrendBars, FastTrendSlope);
+								Rule12Bars, Rule12PriceFilter, FastTrendBars, FastTrendSlope,
+								RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit,
+								MacdFast, MacdSlow, MacdSmooth, RegimeHistBars, RsiPeriod,
+								StochPeriodK, StochSmooth, StochPeriodD, CrossLow, CrossHigh, CrossFilterBars,
+								RegimeDivBars, RegimePivotStrength);
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, RsiHigh, RsiLow,
 								DivFrom, DivTo, SwingBars,
 								BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3,
@@ -265,12 +279,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로 (기본값에서 자주 바꾸는 것만). 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38}",
 				Instrument.FullName, BarsPeriod.Value, UpLongBand, UpShortBand, DnShortBand, DnLongBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, UseCounterTrend, BlockReentryAfterStop, DnShortNeedBoth,
 				RegimeFast, RegimeMid, RegimeSlow, UseRule12, Rule12Bars, Rule12PriceFilter, FastTrendBars,
 				StopPercent, UseSwingStop, MinStopAtr, BreakevenAtR, SideRestBand, MacdConfirmBars, TrendT2Entry,
-				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10);
+				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10,
+				RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -536,6 +551,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// 데이터 부족 가드: 10분봉 SMA120이 채워지기 전에는 아무것도 하지 않는다
 			if (CurrentBars[0] < DivTo || CurrentBars[regimeBip] < RegimeSlow)
 				return;
+			// 점수 방식은 다이버전스 구간까지 채워져야 추세를 낸다. 그 전(NaN)에는 아무것도 하지 않는다
+			if (double.IsNaN(regime.Regime[0]))
+				return;
 
 			if (BarsInProgress == regimeBip)
 			{
@@ -586,7 +604,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryStatus),
 				TextPosition.TopRight);
 
-			// spec 7장: 종료 청산 — FlattenTime(00:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
+			// spec 7장: 종료 청산 — FlattenTime(23:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
 			if (IsFlattenTime())
 			{
 				if (Position.MarketPosition == MarketPosition.Long)
@@ -610,7 +628,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 미보유: 진입·익절·손절 상태 전체 리셋 (spec 1장 3, strategy.md)
 				ResetTradeState();
 
-				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 22:30~00:15)일 때만 신규 진입
+				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 21:30~23:15)일 때만 신규 진입
 				if (InEntryWindow())
 				{
 					if (UseTestEntry)	RouteTestEntry();	// task5: 주문 흐름 검증용 임시 진입
@@ -1769,7 +1787,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		#endregion
 
 		#region 헬퍼 (대회 시간 — spec 7장)
-		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(22:30)~EntryEndTime(00:15). 자정을 넘는다
+		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(21:30)~EntryEndTime(23:15). 자정을 넘는 설정도 처리한다
 		private bool InEntryWindow()
 		{
 			return IsTimeInWindow(ToTime(Time[0]), ContestStartTime, EntryEndTime);
@@ -1783,12 +1801,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return t >= start || t <= end;			// 자정을 넘는 구간
 		}
 
-		// 종료 청산 시각: FlattenTime(00:27)부터 다음 대회 시작(ContestStartTime) 전까지.
+		// 종료 청산 시각: FlattenTime(23:27)부터 다음 대회 시작(ContestStartTime) 전까지.
 		// 이 구간에서 포지션이 있으면 청산하고, 첫 청산 뒤에는 미보유라 추가 주문이 나가지 않는다
 		private bool IsFlattenTime()
 		{
 			int t = ToTime(Time[0]);
-			return t >= FlattenTime && t < ContestStartTime;
+			if (FlattenTime < ContestStartTime)
+				return t >= FlattenTime && t < ContestStartTime;	// 청산 시각이 자정 뒤 (예: 00:27 ~ 다음 날 22:30)
+			return t >= FlattenTime || t < ContestStartTime;		// 청산 시각이 같은 날 (예: 23:27 ~ 자정 ~ 다음 날 21:30)
 		}
 		#endregion
 
@@ -1948,6 +1968,46 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Display(Name = "추세를 판단하는 봉: 10분 또는 3분 (RegimeBarMinutes)", Description = "10이면 명세대로 10분봉, 3이면 3분봉으로 추세를 판단. 3과 10만 쓸 수 있고 다른 값은 10으로 본다. 이동평균 기간·연속 봉 수·비교 구간은 모두 이 봉 기준으로 세므로, 3분봉으로 바꾸면 같은 숫자가 3.3배 짧은 시간이 된다(예: 20/60/120 = 1/3/6시간). 상승추세 매도의 '10분봉 저가가 20선 도달' 익절도 이 봉 기준이 된다", GroupName = "5. 추세 판단 (10분봉)", Order = -1)]
 		public int RegimeBarMinutes { get; set; }
 
+		[NinjaScriptProperty]
+		[Range(1, 2)]
+		[Display(Name = "추세 판단 방식 (RegimeMode)", Description = "1 = 이동평균 정배열·고저점·빠른 전환 규칙(위 설정), 2 = 점수 방식(spec 3-1: 가격·MACD·RSI·스토캐스틱·사건 점수). 2면 이동평균 중기·장기와 고저점·빠른 전환 설정은 쓰지 않음", GroupName = "5. 추세 판단 (10분봉)", Order = 8)]
+		public int RegimeMode { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 5)]
+		[Display(Name = "점수 방식: 최소 점수 (RegimeScoreMin)", Description = "가격 항목이 같은 방향이고 합계가 이 값 이상(하락은 이하)이면 추세 시작", GroupName = "5. 추세 판단 (10분봉)", Order = 9)]
+		public int RegimeScoreMin { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 50)]
+		[Display(Name = "점수 방식: RSI 폭 (RegimeScoreRsiBand)", Description = "RSI가 50에서 이만큼 벗어나야 방향으로 인정 (5면 55 이상 / 45 이하)", GroupName = "5. 추세 판단 (10분봉)", Order = 10)]
+		public double RegimeScoreRsiBand { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, int.MaxValue)]
+		[Display(Name = "점수 방식: 사건 봉 수 (RegimeScoreEventBars)", Description = "최근 몇 봉 안의 사건(MACD 전환, 골든·데드크로스, 다이버전스)을 점수에 넣을지. 0 = 안 넣음", GroupName = "5. 추세 판단 (10분봉)", Order = 11)]
+		public int RegimeScoreEventBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(-5, 5)]
+		[Display(Name = "점수 방식: 종료 점수 (RegimeScoreExit)", Description = "상승추세는 합계가 이 값 이하로 내려가면 끝남 (하락추세는 부호 반대). -1이면 지표들이 반대쪽을 가리킬 때 끝남", GroupName = "5. 추세 판단 (10분봉)", Order = 12)]
+		public int RegimeScoreExit { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: MACD 히스토그램 연속 봉 수 (RegimeHistBars)", Description = "사건 항목의 MACD 전환: 히스토그램이 이 봉 수만큼 연속으로 늘어난(줄어든) 것이 처음 확인된 봉", GroupName = "5. 추세 판단 (10분봉)", Order = 13)]
+		public int RegimeHistBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: 다이버전스 비교 봉 수 (RegimeDivBars)", Description = "사건 항목의 다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지", GroupName = "5. 추세 판단 (10분봉)", Order = 14)]
+		public int RegimeDivBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: 다이버전스 고점 좌우 봉 수 (RegimePivotStrength)", Description = "좌우 이 봉 수보다 높은(낮은) 봉을 고점(저점)으로 인정", GroupName = "5. 추세 판단 (10분봉)", Order = 15)]
+		public int RegimePivotStrength { get; set; }
+
 		// ── 6. 손절·본절 ──
 		[NinjaScriptProperty]
 		[Range(0, 100)]
@@ -2015,17 +2075,17 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 223000 = 22:30. 이 시각부터의 신호로 진입", GroupName = "8. 수량·대회 시간", Order = 2)]
+		[Display(Name = "진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 213000 = 21:30. 이 시각부터의 신호로 진입", GroupName = "8. 수량·대회 시간", Order = 2)]
 		public int ContestStartTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 1500 = 00:15. 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "8. 수량·대회 시간", Order = 3)]
+		[Display(Name = "진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 231500 = 23:15 (자정 뒤면 1500 = 00:15처럼 씀). 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "8. 수량·대회 시간", Order = 3)]
 		public int EntryEndTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 2700 = 00:27. 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "8. 수량·대회 시간", Order = 4)]
+		[Display(Name = "전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 232700 = 23:27 (자정 뒤면 2700 = 00:27처럼 씀). 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "8. 수량·대회 시간", Order = 4)]
 		public int FlattenTime { get; set; }
 
 		[NinjaScriptProperty]
