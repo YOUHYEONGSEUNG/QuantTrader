@@ -309,6 +309,7 @@ Oct 12, 2026 · @김성민 · 트레이더가 정리한 "대면회의 이후 수
 | 12 | 크로스 필터 (`CrossLow` / `CrossHigh` / `CrossFilterBars`) | 20 / 80 / 5 | 명세 |
 | 12 | RSI 기간 (`RsiPeriod`) | 14 | 명세 |
 | 13 화면·기록·테스트 | `ShowStatus`, `LogToFile`, `MlLogToFile` | 모두 켬 | 표시 |
+| 13 | 상태 상자 크기 % (`StatusPanelScale`) | 130 | 표시 |
 | 13 | 주문 테스트용 가짜 진입 (`UseTestEntry`) | 끔 | 테스트 |
 | 14 유기 모드 | 유기 모드 사용 (`OrganicMode`) | 끔 | 추가 |
 | 14 | 역진입 수량 % (`OrganicSuspectQtyPercent`) | 50 | 추가 |

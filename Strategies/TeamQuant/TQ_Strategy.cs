@@ -8,6 +8,7 @@ using System.Xml.Serialization;				// XmlIgnore (설정창의 버튼·표시 전
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.Gui;						// DashStyleHelper
+using NinjaTrader.Gui.Chart;				// ChartControl, ChartScale (OnRender)
 using NinjaTrader.Gui.Tools;				// SimpleFont
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.DrawingTools;	// Draw.TextFixed, TextPosition
@@ -288,6 +289,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// 화면·기록·테스트
 				ShowStatus			= true;
+				StatusPanelScale	= 130;		// 상태 상자 크기 %
 				LogToFile			= true;
 				MlLogToFile			= true;
 				UseTestEntry		= false;
@@ -2288,21 +2290,80 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				Draw.Diamond(this, "TQ_SetupS_" + CurrentBars[0], false, 0, High[0] + gap, Brushes.Orange);
 		}
 
-		// 왼쪽 위 상자와 손절선·평단선. 실시간·Playback에서만 갱신한다.
-		// 같은 태그를 다시 써서 그리기 개체는 글 1개와 가로선 2개로 고정된다
+		// ── 왼쪽 위 상태 상자 (구역별 표시, 2026-10-14) ──
+		// 내용은 OnBarUpdate·체결 때 UpdateStatusPanel이 만들고(계산은 여기서 끝냄), 그리기는 OnRender가 한다.
+		// 구역: 현재 상태 / 진입 조건(미보유) 또는 포지션·익절·손절·청산(보유 중). 구역마다 색 제목줄과 색조 배경, 구역 사이 간격.
+		// 줄 색은 맨 앞 기호로 정한다: ● 끝남·충족(초록), ○ 기다리는 조건(흰색), × 막힘(회색), 두 칸 들여쓴 줄 = 참고(옅은 회색)
+		private class PanelSection
+		{
+			public string		Title;
+			public Color		Tone;			// 제목줄 색. 배경은 이 색을 어둡게 섞어 칠한다
+			public bool			Headline;		// 첫 줄을 크게·제목 색으로 (현재 상태의 추세 이름)
+			public List<string>	Lines = new List<string>();
+		}
+
+		// 상태 상자 내용을 쌓는 도우미. 예전 글 상자와 같은 문자열을 받아 줄 단위로 지금 구역에 넣는다
+		private class StatusPanelBuilder
+		{
+			public readonly List<PanelSection> Sections = new List<PanelSection>();
+
+			public void Section(string title, Color tone, bool headline = false)
+			{
+				Sections.Add(new PanelSection { Title = title, Tone = tone, Headline = headline });
+			}
+
+			public void Append(string text)
+			{
+				if (Sections.Count == 0)
+					Section("", Colors.Gray);
+				foreach (string line in text.Split('\n'))
+					if (line.Length > 0)
+						Sections[Sections.Count - 1].Lines.Add(line);
+			}
+
+			public void AppendFormat(string format, params object[] args)
+			{
+				Append(string.Format(format, args));
+			}
+		}
+
+		// OnRender가 읽는 지금의 상자 내용. 통째로 새 목록으로 바꿔 넣으므로 그리는 도중에 내용이 섞이지 않는다
+		private List<PanelSection> panelSections;
+
+		// 구역 색
+		private static readonly Color ToneUp		= Color.FromRgb(0, 150, 60);		// 상승추세
+		private static readonly Color ToneUpSus		= Color.FromRgb(210, 130, 0);		// 하락 전환 의심
+		private static readonly Color ToneDown		= Color.FromRgb(190, 30, 30);		// 하락추세
+		private static readonly Color ToneDownSus	= Color.FromRgb(0, 130, 210);		// 상승 전환 의심
+		private static readonly Color ToneSide		= Color.FromRgb(110, 110, 110);		// 횡보
+		private static readonly Color ToneEntry		= Color.FromRgb(70, 90, 170);		// 진입 조건
+		private static readonly Color TonePosLong	= Color.FromRgb(0, 120, 90);		// 포지션(매수)
+		private static readonly Color TonePosShort	= Color.FromRgb(160, 50, 70);		// 포지션(매도)
+		private static readonly Color ToneTp		= Color.FromRgb(180, 140, 0);		// 익절
+		private static readonly Color ToneStop		= Color.FromRgb(170, 0, 140);		// 손절
+		private static readonly Color ToneExit		= Color.FromRgb(40, 110, 180);		// 청산
+
+		private Color StateTone(int st)
+		{
+			return st == 2 ? ToneUp : st == 1 ? ToneUpSus : st == -2 ? ToneDown : st == -1 ? ToneDownSus : ToneSide;
+		}
+
+		// 왼쪽 위 상자의 내용과 손절선·평단선. 실시간·Playback에서만 갱신한다.
+		// 같은 태그를 다시 써서 그리기 개체는 가로선 2개로 고정된다. 상자는 OnRender가 그린다
 		private void UpdateStatusPanel()
 		{
 			if (!ShowStatus || State != State.Realtime || CurrentBars[0] < minBars0 || CurrentBars[regimeBip] < RegimeSlow
 				|| double.IsNaN(regime.Regime[0]))
 				return;
 
-			System.Text.StringBuilder sb = new System.Text.StringBuilder();
+			StatusPanelBuilder sb = new StatusPanelBuilder();
 
 			int st			= RegimeState();
 			double close	= Closes[0][0];
 			int trendMin	= TrendMinutes();
 
-			// 1줄: 추세. 2줄: 추세의 근거(추세 봉). 3줄: 진입 봉 지표
+			// ── 현재 상태: 추세, 추세의 근거(추세 봉), 진입 봉 지표 ──
+			sb.Section("현재 상태", StateTone(st), true);
 			sb.AppendFormat("{0}  {1:HH:mm}\n", StateText(st), Times[0][0]);
 			if (RegimeMode == 2)
 			{
@@ -2323,11 +2384,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 방향(오르는 중 ▲, 내리는 중 ▼)을 보여 주고, 이 봉이 전환이 확인된 봉이면 "전환"을 붙인다
 				signals.MacdUp[0] ? "▲ 전환" : signals.MacdDown[0] ? "▼ 전환" : signals.MacdRising[0] ? "▲" : signals.MacdFalling[0] ? "▼" : "−",
 				signals.K[0], signals.D[0], signals.Rsi[0], ExitSmaPeriod, close > signals.Sma[0] ? "위" : "아래");
+			if (TwoStageOn() && regimeFast != null)
+				sb.AppendFormat("{0}분봉 추세(두 단계 진입용): {1}\n", BarsPeriod.Value, StateText(FastState(0)));
 
 			if (Position.MarketPosition == MarketPosition.Flat)
 			{
 				RemoveDrawObject("TQ_StopLine");
 				RemoveDrawObject("TQ_AvgLine");
+
+				// ── 진입 조건 ──
+				sb.Section("진입 조건", ToneEntry);
 
 				if (IsFlattenTime())
 					sb.Append("× 대회 시간 밖\n");
@@ -2410,21 +2476,128 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				double avg	= entryFillQty > 0 ? entryFillSum / entryFillQty : Position.AveragePrice;
 				double pts	= isLong ? close - avg : avg - close;
 
+				// ── 포지션 ──
+				sb.Section("포지션", isLong ? TonePosLong : TonePosShort);
 				sb.AppendFormat("{0} {1} @ {2:N2}  {3}{4:N2}  ({5})\n", isLong ? "매수" : "매도", Position.Quantity, avg,
 					pts >= 0 ? "+" : "", pts, UseTestEntry ? "TEST" : RuleName(active) + (adopted ? ", 갈아탐" : ""));
 				if (!double.IsNaN(stopPrice))
-				{
-					sb.AppendFormat("손절 {0:N2}{1}{2}\n", stopPrice, stopNote.Length > 0 ? " (" + stopNote + ")" : "",
-						double.IsNaN(deferredStop) ? "" : string.Format(" → {0:N2} 이동 대기", deferredStop));
 					Draw.HorizontalLine(this, "TQ_StopLine", false, stopPrice, Brushes.Magenta, DashStyleHelper.Solid, 2);
-				}
 				Draw.HorizontalLine(this, "TQ_AvgLine", false, avg, Brushes.Gray, DashStyleHelper.Dash, 1);
 
 				AppendExitSteps(sb);
 			}
 
-			Draw.TextFixed(this, "TQ_Status", sb.ToString().TrimEnd('\n'), TextPosition.TopLeft,
-				Brushes.White, statusFont, Brushes.Transparent, Brushes.Black, 60);
+			panelSections = sb.Sections;
+		}
+
+		// 상태 상자 그리기. 계산은 하지 않고 UpdateStatusPanel이 만든 내용(panelSections)만 그린다 (.claude/rules/ninjascript.md).
+		// SharpDX 자원(글꼴 형식, 글 배치, 붓)은 그릴 때마다 만들고 끝에서 모두 Dispose한다 (공식 샘플 @SampleCustomRender.cs와 같은 방식)
+		protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+		{
+			base.OnRender(chartControl, chartScale);
+
+			List<PanelSection> sections = panelSections;
+			if (!ShowStatus || sections == null || sections.Count == 0 || RenderTarget == null || ChartPanel == null)
+				return;
+
+			// 크기: 글자·여백·폭을 모두 StatusPanelScale(%)만큼 키운다. 100이면 본문 12 / 추세 이름 15 / 폭 560px
+			float k100		= Math.Max(50, StatusPanelScale) / 100f;
+			float margin	= 8f * k100, pad = 6f * k100, gap = 6f * k100, lineGap = 1f * k100;
+			float maxW = Math.Max(200f, Math.Min(560f * k100, ChartPanel.W - 2 * margin));	// 너무 긴 줄은 이 폭에서 줄바꿈
+
+			List<IDisposable> trash = new List<IDisposable>();
+			try
+			{
+				SharpDX.DirectWrite.TextFormat bodyFmt	= new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Malgun Gothic", 12f * k100);
+				SharpDX.DirectWrite.TextFormat titleFmt	= new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Malgun Gothic",
+															SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, 12f * k100);
+				SharpDX.DirectWrite.TextFormat headFmt	= new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Malgun Gothic",
+															SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, 15f * k100);
+				trash.Add(bodyFmt);
+				trash.Add(titleFmt);
+				trash.Add(headFmt);
+
+				// 1단계: 모든 줄의 글 배치를 만들고 상자 폭(가장 긴 줄)을 정한다. 구역 폭을 같게 해서 세로로 가지런히 쌓는다
+				List<SharpDX.DirectWrite.TextLayout> titles = new List<SharpDX.DirectWrite.TextLayout>();
+				List<List<SharpDX.DirectWrite.TextLayout>> bodies = new List<List<SharpDX.DirectWrite.TextLayout>>();
+				float boxW = 0;
+				foreach (PanelSection s in sections)
+				{
+					SharpDX.DirectWrite.TextLayout t = new SharpDX.DirectWrite.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, s.Title, titleFmt, maxW, 100f * k100);
+					trash.Add(t);
+					titles.Add(t);
+					boxW = Math.Max(boxW, t.Metrics.Width);
+					List<SharpDX.DirectWrite.TextLayout> lines = new List<SharpDX.DirectWrite.TextLayout>();
+					for (int i = 0; i < s.Lines.Count; i++)
+					{
+						SharpDX.DirectWrite.TextLayout l = new SharpDX.DirectWrite.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, s.Lines[i],
+							s.Headline && i == 0 ? headFmt : bodyFmt, maxW, 400f * k100);
+						trash.Add(l);
+						lines.Add(l);
+						boxW = Math.Max(boxW, l.Metrics.Width);
+					}
+					bodies.Add(lines);
+				}
+				boxW = Math.Min(maxW, boxW) + 2 * pad;
+
+				// 줄 색 (맨 앞 기호로)
+				SharpDX.Direct2D1.SolidColorBrush white	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)240, (byte)240, (byte)240, (byte)255));
+				SharpDX.Direct2D1.SolidColorBrush done	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)120, (byte)225, (byte)120, (byte)255));
+				SharpDX.Direct2D1.SolidColorBrush block	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)150, (byte)150, (byte)150, (byte)255));
+				SharpDX.Direct2D1.SolidColorBrush note	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)180, (byte)180, (byte)190, (byte)255));
+				trash.Add(white);
+				trash.Add(done);
+				trash.Add(block);
+				trash.Add(note);
+
+				// 2단계: 구역마다 제목줄(구역 색) → 본문 배경(구역 색을 어둡게) → 줄을 그리고, 구역 사이를 띄운다
+				float y = ChartPanel.Y + margin;
+				float x = ChartPanel.X + margin;
+				for (int k = 0; k < sections.Count; k++)
+				{
+					PanelSection s = sections[k];
+					Color c = s.Tone;
+					SharpDX.Direct2D1.SolidColorBrush headBg	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color(c.R, c.G, c.B, (byte)235));
+					SharpDX.Direct2D1.SolidColorBrush bodyBg	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
+						new SharpDX.Color((byte)(c.R / 5 + 12), (byte)(c.G / 5 + 12), (byte)(c.B / 5 + 12), (byte)220));
+					SharpDX.Direct2D1.SolidColorBrush headText	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
+						new SharpDX.Color((byte)((c.R + 255 * 2) / 3), (byte)((c.G + 255 * 2) / 3), (byte)((c.B + 255 * 2) / 3), (byte)255));
+					trash.Add(headBg);
+					trash.Add(bodyBg);
+					trash.Add(headText);
+
+					float titleH = titles[k].Metrics.Height + 4 * k100;
+					float bodyH = pad;
+					foreach (SharpDX.DirectWrite.TextLayout l in bodies[k])
+						bodyH += l.Metrics.Height + lineGap;
+					bodyH += pad - lineGap;
+
+					RenderTarget.FillRectangle(new SharpDX.RectangleF(x, y, boxW, titleH), headBg);
+					RenderTarget.DrawTextLayout(new SharpDX.Vector2(x + pad, y + 2 * k100), titles[k], white, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+					y += titleH;
+
+					if (bodies[k].Count > 0)
+					{
+						RenderTarget.FillRectangle(new SharpDX.RectangleF(x, y, boxW, bodyH), bodyBg);
+						float ly = y + pad;
+						for (int i = 0; i < bodies[k].Count; i++)
+						{
+							string text = s.Lines[i];
+							SharpDX.Direct2D1.SolidColorBrush b = s.Headline && i == 0 ? headText
+								: text.StartsWith("●") ? done : text.StartsWith("×") ? block : text.StartsWith("  ") ? note : white;
+							RenderTarget.DrawTextLayout(new SharpDX.Vector2(x + pad, ly), bodies[k][i], b, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+							ly += bodies[k][i].Metrics.Height + lineGap;
+						}
+						y += bodyH;
+					}
+					y += gap;
+				}
+			}
+			finally
+			{
+				foreach (IDisposable d in trash)
+					d.Dispose();
+			}
 		}
 
 		// 화면 표시용: 의심의 RSI 조건을 상대 기준으로 볼 때(RegimeRsiRelative), 지금의 RSI 중심과 위아래 기준선을 RSI 옆에 보여 준다
@@ -2447,21 +2620,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return string.Format("● {0}: {1} 대기 {2}{3}\n", name, reversalText, new string('■', done), new string('□', total - done));
 		}
 
-		// 보유 중 청산 단계 (spec 5장). ● = 끝난 단계, ○ = 기다리는 단계
-		private void AppendExitSteps(System.Text.StringBuilder sb)
+		// 지금 손절가와 그 출처(본절·1차 익절가·따라가기), 미뤄 둔 이동 (손절 구역의 첫 줄)
+		private void AppendStopLine(StatusPanelBuilder sb)
 		{
-			if (active == Rule.None)
-			{
-				sb.Append("● 청산 주문 냄, 체결 대기\n");
+			if (double.IsNaN(stopPrice))
 				return;
-			}
-			if (UseTestEntry)
+			sb.AppendFormat("손절 {0:N2}{1}{2}\n", stopPrice, stopNote.Length > 0 ? " (" + stopNote + ")" : "",
+				double.IsNaN(deferredStop) ? "" : string.Format(" → {0:N2} 이동 대기", deferredStop));
+		}
+
+		// 보유 중 익절·손절·청산 (spec 5장). ● = 끝난 단계, ○ = 기다리는 단계
+		private void AppendExitSteps(StatusPanelBuilder sb)
+		{
+			if (active == Rule.None || UseTestEntry)
 			{
-				sb.Append("TEST: 2봉째 1차 익절, 3봉째 2차 익절, 4봉째 전량 청산\n");
+				sb.Section("손절", ToneStop);
+				AppendStopLine(sb);
+				sb.Section("청산", ToneExit);
+				sb.Append(active == Rule.None ? "● 청산 주문 냄, 체결 대기\n" : "TEST: 2봉째 1차 익절, 3봉째 2차 익절, 4봉째 전량 청산\n");
 				return;
 			}
 
-			// 밴드 익절 단계: 체결된 단계는 ●, 남은 단계는 ○와 지금 걸려 있는 가격
+			// ── 익절: 밴드 익절 단계(체결된 단계는 ●, 남은 단계는 ○와 지금 걸려 있는 가격)와 마지막 조각 ──
+			sb.Section("익절", ToneTp);
 			foreach (string sig in chunkOrder)
 			{
 				int band = chunkBand[sig];
@@ -2486,11 +2667,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					sb.AppendFormat("○ 마지막 {0}계약: 종가 {1} {2}선 {3:N2}{4}\n", lastQty, side > 0 ? ">" : "<",
 						ExitSmaPeriod, signals.Sma[0], LastChunkEarly || BandStagesDone() ? "" : " (앞 단계가 끝난 뒤부터)");
 			}
+			// ── 손절: 지금 손절가, 따라가기, 다음 익절 때의 손절 이동 ──
+			sb.Section("손절", ToneStop);
+			AppendStopLine(sb);
 			if (OrganicMode && OrganicTrailAtr > 0 && IsMain(active))
 			{
 				string from = string.Format("{0} {1:N2} {2} ATR×{3}", isLongPos ? "최고가" : "최저가", trailExtreme, isLongPos ? "−" : "+", OrganicTrailAtr);
 				sb.Append(tpCount >= 1 ? "○ 따라가기: 손절을 " + from + "로\n" : "  따라가기: 1차 익절 뒤부터 (" + from + ")\n");
 			}
+			if (TrailStopAtTp2 && tpCount == 1 && !double.IsNaN(firstTpPrice))
+				sb.AppendFormat("  다음 익절 때 손절 → {0:N2} (1차 익절가)\n", firstTpPrice);
+
+			// ── 청산: 두 단계 진입 1단계, 전량 청산 조건, 추세 청산 ──
+			sb.Section("청산", ToneExit);
 			if (stage == 1)
 				sb.AppendFormat("○ 두 단계 진입 1단계: 추세 봉이 {0}가 되면 나머지 추가, 그 전에 1분봉 추세가 꺼지면 청산 (지금 1분봉 {1})\n",
 					isLongPos ? "상승추세" : "하락추세", StateText(FastState(0)));
@@ -2503,8 +2692,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string trend = TrendExitText(active);
 			if (trend != null)
 				sb.AppendFormat("○ 추세 청산: {0}\n", trend);
-			if (TrailStopAtTp2 && tpCount == 1 && !double.IsNaN(firstTpPrice))
-				sb.AppendFormat("  다음 익절 때 손절 → {0:N2} (1차 익절가)\n", firstTpPrice);
+			sb.AppendFormat("  종료 청산: {0:00}:{1:00} 봉 마감\n", FlattenTime / 10000, FlattenTime / 100 % 100);
 		}
 
 		// 체결을 차트에 라벨로 표시한다. 매수 체결은 가격 아래, 매도 체결은 가격 위.
@@ -3020,6 +3208,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "[표시] 차트에 상태 표시 (ShowStatus)", Description = "추세 배경색, 밴드, 밴드 조건 마름모, 체결 라벨, 손절선, 왼쪽 위 상태 상자를 차트에 표시", GroupName = "13. 화면·기록·테스트", Order = 0)]
 		public bool ShowStatus { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(50, 300)]
+		[Display(Name = "[표시] 상태 상자 크기 % (StatusPanelScale)", Description = "왼쪽 위 상태 상자의 글자·여백·폭 크기. 기본 130. 100이면 본문 12 / 추세 이름 15 / 폭 560px. 화면에 따라 키우거나 줄임", GroupName = "13. 화면·기록·테스트", Order = 5)]
+		public int StatusPanelScale { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "[표시] 로그를 파일로 저장 (LogToFile)", Description = "실시간·Playback 로그를 내 문서\\NinjaTrader 8\\TQ_log_종목.txt에 이어서 저장. 백테스트에서는 저장하지 않음", GroupName = "13. 화면·기록·테스트", Order = 1)]
