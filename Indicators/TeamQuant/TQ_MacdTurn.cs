@@ -124,6 +124,10 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[XmlIgnore]
 		public Series<double> Hist { get { return Values[0]; } }
 
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<double> MacdLine { get { return Values[1]; } }
+
 		// Update()로 호출 시점 값을 최신화
 		[Browsable(false)]
 		[XmlIgnore]

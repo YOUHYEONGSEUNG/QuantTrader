@@ -66,6 +66,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				trBars;
 		private string			trExits			= "";
 		private int				tradeQty;						// 이번 진입의 총 수량 (역추세는 CounterQtyPercent 적용)
+		private string			mlPath;							// MlLogToFile용 학습 데이터 파일 경로
+		private string			mlRunId			= "";			// 학습 데이터: 이번 실행 ID (같은 백테스트를 여러 번 돌린 중복 제거용)
+		private string			mlSettingsId	= "";			// 학습 데이터: 설정 요약의 해시 (설정별로 나눠 보기용)
+		private bool			mlHeaderWritten;				// 학습 데이터: 이번 실행의 설정 줄을 썼음
+		private string			mlFeatures		= "";			// 학습 데이터: 신호 봉에서 잰 특징값 (CSV 조각)
+		private double			mlPrevR			= double.NaN;	// 학습 데이터: 직전 거래의 손익(R)
+		private DateTime		mlPrevExit		= DateTime.MinValue;	// 학습 데이터: 직전 거래의 청산 시각
 		private ATR				atr;						// 실험 옵션 MinStopAtr용 3분봉 ATR
 		private double			stopAtr			= double.NaN;	// 신호 봉의 ATR (손절 거리 하한 계산용)
 		private Brush			upBackBrush;				// 화면 표시용: 상승추세 배경색
@@ -157,6 +164,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				FastTrendBars		= 2;		// 명세에 없음 (0과 같음)
 				FastTrendSlope		= false;
 				RegimeBarMinutes	= 10;		// 명세 3장: 10분봉. 3이면 3분봉으로 추세 판단
+				// 2026-10-14 테스트: 추세 판단만 점수 방식으로 (spec 3-1). 1이면 위의 이동평균·고저점 규칙
+				RegimeMode			= 2;
+				RegimeScoreMin		= 2;
+				RegimeScoreRsiBand	= 5;
+				RegimeScoreEventBars	= 3;
+				RegimeScoreExit		= 0;
+				RegimeHistBars		= 2;
+				RegimeDivBars		= 15;
+				RegimePivotStrength	= 2;
 
 				// 손절·본절
 				StopPercent			= 0.2;
@@ -169,7 +185,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// 청산
 				SideRestBand		= 3;
-				SideRestNarrowTime	= 223000;
+				SideRestNarrowTime	= 213000;	// 대회 시작 시각과 같게 (2026-10-14 대회 시간 21:30~23:30)
 				MomentumSmaPeriod	= 20;
 				IntrabarTakeProfit	= true;		// 명세 1장에 2026-10-09 추가 (끄면 봉 마감 후 시장가)
 
@@ -177,14 +193,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				EntryQuantity		= 30;
 				MaxQuantity			= 40;
 				MinEntries			= 2;		// 종목당 최소 진입 (나스닥 2, 골드 2)
-				ContestStartTime	= 223000;	// 22:30:00 KST
-				EntryEndTime		= 1500;		// 00:15:00 KST
-				FlattenTime			= 2700;		// 00:27:00 KST 봉 마감
+				// 2026-10-14 대회 시간을 21:30~23:30 KST로 확정 (그 전에는 22:30~00:30)
+				ContestStartTime	= 213000;	// 21:30:00 KST
+				EntryEndTime		= 231500;	// 23:15:00 KST
+				FlattenTime			= 232700;	// 23:27:00 KST 봉 마감
 
 				// 화면·기록·테스트
 				ShowStatus			= true;
 				LogToFile			= true;
 				TradeLogToFile		= true;
+				MlLogToFile			= true;
 				UseTestEntry		= false;
 			}
 			else if (State == State.Configure)
@@ -206,7 +224,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
 				regimeBip	= RegimeBarMinutes == 3 ? 2 : 1;	// 추세를 판단하는 시리즈: 10분봉(1) 또는 3분봉(2)
 				regime		= TQ_Regime(BarsArray[regimeBip], RegimeFast, RegimeMid, RegimeSlow, UseRule12, false,
-								Rule12Bars, Rule12PriceFilter, FastTrendBars, FastTrendSlope);
+								Rule12Bars, Rule12PriceFilter, FastTrendBars, FastTrendSlope,
+								RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit,
+								MacdFast, MacdSlow, MacdSmooth, RegimeHistBars, RsiPeriod,
+								StochPeriodK, StochSmooth, StochPeriodD, CrossLow, CrossHigh, CrossFilterBars,
+								RegimeDivBars, RegimePivotStrength);
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, RsiHigh, RsiLow,
 								DivFrom, DivTo, SwingBars,
 								BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3,
@@ -221,6 +243,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								"NinjaTrader 8", "TQ_log_" + Instrument.MasterInstrument.Name + ".txt");
 				tradePath	= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
 								"NinjaTrader 8", "TQ_trades_" + Instrument.MasterInstrument.Name + ".csv");
+				mlPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+								"NinjaTrader 8", "TQ_ml_" + Instrument.MasterInstrument.Name + ".csv");
+				mlRunId		= DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+				// 설정 ID는 종목 이름([MNQ DEC26])을 빼고 만든다. 월물이 달라도 같은 설정이면 같은 ID
+				string summary	= SettingsSummary();
+				int cut			= summary.IndexOf("] ");
+				mlSettingsId	= HashText(cut >= 0 ? summary.Substring(cut + 2) : summary);
 
 				atr			= ATR(BandAtrPeriod);
 
@@ -250,12 +279,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로 (기본값에서 자주 바꾸는 것만). 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38}",
 				Instrument.FullName, BarsPeriod.Value, UpLongBand, UpShortBand, DnShortBand, DnLongBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, UseCounterTrend, BlockReentryAfterStop, DnShortNeedBoth,
 				RegimeFast, RegimeMid, RegimeSlow, UseRule12, Rule12Bars, Rule12PriceFilter, FastTrendBars,
 				StopPercent, UseSwingStop, MinStopAtr, BreakevenAtR, SideRestBand, MacdConfirmBars, TrendT2Entry,
-				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10);
+				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10,
+				RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -303,6 +333,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (!trOpen)
 				return;
 			trOpen = false;
+			MlEnd();
 			if (!TradeLogToFile || tradePath == null || entryFillQty <= 0)
 				return;
 
@@ -346,10 +377,182 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		}
 		#endregion
 
+		#region 학습 데이터 파일 (MlLogToFile) — 매매 판단에는 영향 없음
+		// 거래 1건마다 한 줄을 내 문서\NinjaTrader 8\TQ_ml_종목.csv에 쓴다.
+		// 진입 신호 봉에서 잰 특징값(지표 상태)과 그 거래의 결과를 한 줄에 같이 둬서, 어떤 신호가 손절로 끝나는지 학습·분석하는 데 쓴다.
+		// 열 이름은 Python(pandas)에서 바로 쓰도록 영어로 둔다. '#'으로 시작하는 줄은 실행별 설정 요약이다 (read_csv(comment='#'))
+		private const string MlHeader =
+			"run_id,settings_id,mode,instrument,bar_min,"
+			+ "signal_time,weekday,hhmm,strategy,regime,dir,via_t2,"
+			+ "close,atr,atr_pct,stop_dist_atr,mid_dist_atr,sma20_dist_atr,"
+			+ "macd_hist_atr,macd_slope_atr,k,d,k_minus_d,rsi,"
+			+ "macd_up,macd_down,golden,dead,bar_range_atr,swing_range_atr,vol_ratio,"
+			+ "htf_sma20_dist_atr,regime_age,regime_changes6,session_entry_no,prev_r,min_since_prev_exit,"
+			+ "exit_time,hold_bars,qty,avg_price,risk_pts,pnl_pts,pnl_usd,pnl_r,mfe_pts,mae_pts,mfe_r,mae_r,win,exits";
+
+		// 신호 봉(BIP 0, 진입 주문을 내는 봉)에서 특징값을 잰다. BeginTrade 끝에서 부른다.
+		// ATR로 나눈 값은 종목·시기에 따라 가격 단위가 달라도 비교할 수 있게 하기 위함이다
+		private void MlBegin(ActiveStrategy act)
+		{
+			mlFeatures = "";
+			if (!MlLogToFile)
+				return;
+
+			double a	= atr[0];
+			double c	= Close[0];
+			bool okA	= a > 0;
+			int r		= (int)regime.Regime[0];
+
+			// 밴드 조건 없이 T2로만 들어간 추세 방향 진입인지 (TrendT2Entry)
+			int viaT2 = 0;
+			if (act == ActiveStrategy.UpLong && !signals.EntryUpLong[0])	viaT2 = 1;
+			if (act == ActiveStrategy.DnShort && !DnShortSignal())			viaT2 = 1;
+
+			// 거래량: 직전 20봉 평균 대비
+			int volBars = Math.Min(20, CurrentBar);
+			double volSum = 0;
+			for (int i = 1; i <= volBars; i++)
+				volSum += Volume[i];
+			double volRatio = volSum > 0 ? Volume[0] / (volSum / volBars) : double.NaN;
+
+			// 추세 봉 기준: 지금 추세가 몇 봉째 이어지는지, 최근 6봉 동안 추세가 몇 번 바뀌었는지
+			int maxBack = Math.Min(200, CurrentBars[regimeBip]);
+			int age = 1;
+			while (age < maxBack && (int)regime.Regime[age] == r)
+				age++;
+			int changes = 0;
+			for (int i = 0; i < 6 && i + 1 <= CurrentBars[regimeBip]; i++)
+				if ((int)regime.Regime[i] != (int)regime.Regime[i + 1])
+					changes++;
+
+			double htfDist = double.IsNaN(regime.Sma20[0]) ? double.NaN : Closes[regimeBip][0] - regime.Sma20[0];
+
+			mlFeatures = string.Join(",", new string[]
+			{
+				Time[0].ToString("yyyy-MM-dd HH:mm:ss"),
+				((int)Time[0].DayOfWeek).ToString(),
+				(ToTime(Time[0]) / 100).ToString(),
+				act.ToString(),
+				r.ToString(),
+				isLongPos ? "1" : "-1",
+				viaT2.ToString(),
+				Ml(c),
+				Ml(a),
+				Ml(c > 0 ? a / c * 100 : double.NaN),
+				Ml(okA ? Math.Abs(c - initialStop) / a : double.NaN),
+				Ml(okA ? (c - channels.Mid[0]) / a : double.NaN),
+				Ml(okA ? (c - signals.Sma20[0]) / a : double.NaN),
+				Ml(okA ? signals.MacdHist[0] / a : double.NaN),
+				Ml(okA ? (signals.MacdHist[0] - signals.MacdHist[1]) / a : double.NaN),
+				Ml(signals.K[0]),
+				Ml(signals.D[0]),
+				Ml(signals.K[0] - signals.D[0]),
+				Ml(signals.Rsi[0]),
+				signals.MacdUp[0] ? "1" : "0",
+				signals.MacdDown[0] ? "1" : "0",
+				signals.Golden[0] ? "1" : "0",
+				signals.Dead[0] ? "1" : "0",
+				Ml(okA ? (High[0] - Low[0]) / a : double.NaN),
+				Ml(okA ? (signals.SwingHigh5[0] - signals.SwingLow5[0]) / a : double.NaN),
+				Ml(volRatio),
+				Ml(okA ? htfDist / a : double.NaN),
+				age.ToString(),
+				changes.ToString(),
+				(entryCount + 1).ToString(),	// 이번 대회 구간의 몇 번째 진입인지 (entryCount는 체결 후 증가)
+				Ml(mlPrevR),
+				mlPrevExit == DateTime.MinValue ? "" : Ml((Time[0] - mlPrevExit).TotalMinutes)
+			});
+		}
+
+		// 거래가 끝나면(보유 → 미보유) 특징값 뒤에 결과를 붙여 한 줄을 쓴다. TradeEnd에서 부른다
+		private void MlEnd()
+		{
+			if (entryFillQty <= 0)
+				return;
+
+			double avg		= entryFillSum / entryFillQty;
+			double pnlPts	= trPnlPts / entryFillQty;	// 계약당 평균 손익 (포인트)
+			double risk		= double.IsNaN(trStop0) ? double.NaN : Math.Abs(avg - trStop0);
+			bool okR		= !double.IsNaN(risk) && risk > 0;
+			double pnlR		= okR ? pnlPts / risk : double.NaN;
+
+			// 다음 거래의 특징값(prev_r, min_since_prev_exit)용. 파일 기록을 꺼도 갱신한다
+			mlPrevR		= pnlR;
+			mlPrevExit	= trExitTime;
+
+			if (!MlLogToFile || mlPath == null || mlFeatures.Length == 0)
+				return;
+
+			System.Text.StringBuilder sb = new System.Text.StringBuilder();
+			try
+			{
+				if (!System.IO.File.Exists(mlPath))
+					sb.AppendLine(MlHeader);
+				if (!mlHeaderWritten)
+				{
+					sb.AppendLine("# " + mlRunId + " settings_id=" + mlSettingsId + " " + SettingsSummary().Replace(",", ";"));
+					mlHeaderWritten = true;
+				}
+				sb.AppendLine(string.Join(",", new string[]
+				{
+					mlRunId,
+					mlSettingsId,
+					State == State.Realtime ? "live" : "hist",
+					Instrument.FullName,
+					BarsPeriod.Value.ToString(),
+					mlFeatures,
+					trExitTime.ToString("yyyy-MM-dd HH:mm:ss"),
+					trBars.ToString(),
+					entryFillQty.ToString(),
+					Ml(avg),
+					Ml(risk),
+					Ml(pnlPts),
+					Ml(trPnlPts * Instrument.MasterInstrument.PointValue),
+					Ml(pnlR),
+					Ml(trMfe),
+					Ml(trMae),
+					Ml(okR ? trMfe / risk : double.NaN),
+					Ml(okR ? trMae / risk : double.NaN),
+					pnlPts > 0 ? "1" : "0",
+					trExits
+				}));
+				System.IO.File.AppendAllText(mlPath, sb.ToString(), new System.Text.UTF8Encoding(true));
+			}
+			catch (Exception)
+			{
+				// 파일을 못 써도 매매에는 영향이 없게 한다
+			}
+			mlFeatures = "";
+		}
+
+		// 숫자를 CSV 칸으로: 소수점은 항상 '.', 값이 없으면 빈칸
+		private string Ml(double v)
+		{
+			if (double.IsNaN(v) || double.IsInfinity(v))
+				return "";
+			return v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+		}
+
+		// 설정 요약 문자열의 짧은 해시 (FNV-1a 32비트). 실행이 달라도 같은 설정이면 같은 값이 나온다
+		private string HashText(string text)
+		{
+			uint h = 2166136261;
+			foreach (char ch in text)
+			{
+				h ^= ch;
+				h *= 16777619;
+			}
+			return h.ToString("x8");
+		}
+		#endregion
+
 		protected override void OnBarUpdate()
 		{
 			// 데이터 부족 가드: 10분봉 SMA120이 채워지기 전에는 아무것도 하지 않는다
 			if (CurrentBars[0] < DivTo || CurrentBars[regimeBip] < RegimeSlow)
+				return;
+			// 점수 방식은 다이버전스 구간까지 채워져야 추세를 낸다. 그 전(NaN)에는 아무것도 하지 않는다
+			if (double.IsNaN(regime.Regime[0]))
 				return;
 
 			if (BarsInProgress == regimeBip)
@@ -401,7 +604,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryStatus),
 				TextPosition.TopRight);
 
-			// spec 7장: 종료 청산 — FlattenTime(00:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
+			// spec 7장: 종료 청산 — FlattenTime(23:27) 봉이 마감되면 남은 포지션을 전량 시장가로 청산한다
 			if (IsFlattenTime())
 			{
 				if (Position.MarketPosition == MarketPosition.Long)
@@ -425,7 +628,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 미보유: 진입·익절·손절 상태 전체 리셋 (spec 1장 3, strategy.md)
 				ResetTradeState();
 
-				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 22:30~00:15)일 때만 신규 진입
+				// spec 1장 2 + 7장: 미보유 + 진입 허용 시간대(신호 봉 21:30~23:15)일 때만 신규 진입
 				if (InEntryWindow())
 				{
 					if (UseTestEntry)	RouteTestEntry();	// task5: 주문 흐름 검증용 임시 진입
@@ -627,6 +830,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			stopSwing	= isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0];
 			initialStop	= CalcStop(Close[0]);	// 신호 봉 종가를 진입가로 보고 계산 (spec 4장)
 			stopPrice	= initialStop;
+			MlBegin(act);	// 학습 데이터: 신호 봉의 특징값 (매매 판단과 무관)
 		}
 
 		// spec 4·6장: 시그널명별 분할 진입. 진입 주문 제출 전에 손절을 먼저 걸어 체결 즉시 손절이 서도록 한다
@@ -1583,7 +1787,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		#endregion
 
 		#region 헬퍼 (대회 시간 — spec 7장)
-		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(22:30)~EntryEndTime(00:15). 자정을 넘는다
+		// 신규 진입 허용 시간대: 신호 봉이 ContestStartTime(21:30)~EntryEndTime(23:15). 자정을 넘는 설정도 처리한다
 		private bool InEntryWindow()
 		{
 			return IsTimeInWindow(ToTime(Time[0]), ContestStartTime, EntryEndTime);
@@ -1597,12 +1801,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return t >= start || t <= end;			// 자정을 넘는 구간
 		}
 
-		// 종료 청산 시각: FlattenTime(00:27)부터 다음 대회 시작(ContestStartTime) 전까지.
+		// 종료 청산 시각: FlattenTime(23:27)부터 다음 대회 시작(ContestStartTime) 전까지.
 		// 이 구간에서 포지션이 있으면 청산하고, 첫 청산 뒤에는 미보유라 추가 주문이 나가지 않는다
 		private bool IsFlattenTime()
 		{
 			int t = ToTime(Time[0]);
-			return t >= FlattenTime && t < ContestStartTime;
+			if (FlattenTime < ContestStartTime)
+				return t >= FlattenTime && t < ContestStartTime;	// 청산 시각이 자정 뒤 (예: 00:27 ~ 다음 날 22:30)
+			return t >= FlattenTime || t < ContestStartTime;		// 청산 시각이 같은 날 (예: 23:27 ~ 자정 ~ 다음 날 21:30)
 		}
 		#endregion
 
@@ -1622,6 +1828,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "거래 요약을 파일로 저장 (TradeLogToFile)", Description = "거래 1건이 끝날 때마다 한 줄을 내 문서\\NinjaTrader 8\\TQ_trades_종목.csv에 저장. 백테스트에서도 저장하므로 여러 날 결과를 거래 단위로 볼 수 있음. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "0. 화면·기록·테스트", Order = 3)]
 		public bool TradeLogToFile { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 진입 신호 봉의 지표 상태(특징값)와 그 거래의 결과를 한 줄로 내 문서\\NinjaTrader 8\\TQ_ml_종목.csv에 저장. 백테스트에서도 저장하므로 여러 기간을 돌리면 계속 쌓임. 매매 판단과 무관. 최적화(Optimize)를 돌릴 때는 끔", GroupName = "0. 화면·기록·테스트", Order = 4)]
+		public bool MlLogToFile { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "주문 테스트용 가짜 진입 (UseTestEntry)", Description = "실제 신호를 무시하고 주문 흐름만 확인. 백테스트 때는 반드시 끔", GroupName = "0. 화면·기록·테스트", Order = 2)]
@@ -1758,6 +1968,46 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Display(Name = "추세를 판단하는 봉: 10분 또는 3분 (RegimeBarMinutes)", Description = "10이면 명세대로 10분봉, 3이면 3분봉으로 추세를 판단. 3과 10만 쓸 수 있고 다른 값은 10으로 본다. 이동평균 기간·연속 봉 수·비교 구간은 모두 이 봉 기준으로 세므로, 3분봉으로 바꾸면 같은 숫자가 3.3배 짧은 시간이 된다(예: 20/60/120 = 1/3/6시간). 상승추세 매도의 '10분봉 저가가 20선 도달' 익절도 이 봉 기준이 된다", GroupName = "5. 추세 판단 (10분봉)", Order = -1)]
 		public int RegimeBarMinutes { get; set; }
 
+		[NinjaScriptProperty]
+		[Range(1, 2)]
+		[Display(Name = "추세 판단 방식 (RegimeMode)", Description = "1 = 이동평균 정배열·고저점·빠른 전환 규칙(위 설정), 2 = 점수 방식(spec 3-1: 가격·MACD·RSI·스토캐스틱·사건 점수). 2면 이동평균 중기·장기와 고저점·빠른 전환 설정은 쓰지 않음", GroupName = "5. 추세 판단 (10분봉)", Order = 8)]
+		public int RegimeMode { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 5)]
+		[Display(Name = "점수 방식: 최소 점수 (RegimeScoreMin)", Description = "가격 항목이 같은 방향이고 합계가 이 값 이상(하락은 이하)이면 추세 시작", GroupName = "5. 추세 판단 (10분봉)", Order = 9)]
+		public int RegimeScoreMin { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 50)]
+		[Display(Name = "점수 방식: RSI 폭 (RegimeScoreRsiBand)", Description = "RSI가 50에서 이만큼 벗어나야 방향으로 인정 (5면 55 이상 / 45 이하)", GroupName = "5. 추세 판단 (10분봉)", Order = 10)]
+		public double RegimeScoreRsiBand { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, int.MaxValue)]
+		[Display(Name = "점수 방식: 사건 봉 수 (RegimeScoreEventBars)", Description = "최근 몇 봉 안의 사건(MACD 전환, 골든·데드크로스, 다이버전스)을 점수에 넣을지. 0 = 안 넣음", GroupName = "5. 추세 판단 (10분봉)", Order = 11)]
+		public int RegimeScoreEventBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(-5, 5)]
+		[Display(Name = "점수 방식: 종료 점수 (RegimeScoreExit)", Description = "상승추세는 합계가 이 값 이하로 내려가면 끝남 (하락추세는 부호 반대). -1이면 지표들이 반대쪽을 가리킬 때 끝남", GroupName = "5. 추세 판단 (10분봉)", Order = 12)]
+		public int RegimeScoreExit { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: MACD 히스토그램 연속 봉 수 (RegimeHistBars)", Description = "사건 항목의 MACD 전환: 히스토그램이 이 봉 수만큼 연속으로 늘어난(줄어든) 것이 처음 확인된 봉", GroupName = "5. 추세 판단 (10분봉)", Order = 13)]
+		public int RegimeHistBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: 다이버전스 비교 봉 수 (RegimeDivBars)", Description = "사건 항목의 다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지", GroupName = "5. 추세 판단 (10분봉)", Order = 14)]
+		public int RegimeDivBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "점수 방식: 다이버전스 고점 좌우 봉 수 (RegimePivotStrength)", Description = "좌우 이 봉 수보다 높은(낮은) 봉을 고점(저점)으로 인정", GroupName = "5. 추세 판단 (10분봉)", Order = 15)]
+		public int RegimePivotStrength { get; set; }
+
 		// ── 6. 손절·본절 ──
 		[NinjaScriptProperty]
 		[Range(0, 100)]
@@ -1825,17 +2075,17 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 223000 = 22:30. 이 시각부터의 신호로 진입", GroupName = "8. 수량·대회 시간", Order = 2)]
+		[Display(Name = "진입 시작 시각 (ContestStartTime)", Description = "HHmmss, 한국시간. 213000 = 21:30. 이 시각부터의 신호로 진입", GroupName = "8. 수량·대회 시간", Order = 2)]
 		public int ContestStartTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 1500 = 00:15. 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "8. 수량·대회 시간", Order = 3)]
+		[Display(Name = "진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 한국시간. 231500 = 23:15 (자정 뒤면 1500 = 00:15처럼 씀). 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "8. 수량·대회 시간", Order = 3)]
 		public int EntryEndTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 2700 = 00:27. 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "8. 수량·대회 시간", Order = 4)]
+		[Display(Name = "전량 청산 시각 (FlattenTime)", Description = "HHmmss, 한국시간. 232700 = 23:27 (자정 뒤면 2700 = 00:27처럼 씀). 이 시각의 봉이 마감되면 남은 수량을 전량 청산", GroupName = "8. 수량·대회 시간", Order = 4)]
 		public int FlattenTime { get; set; }
 
 		[NinjaScriptProperty]
