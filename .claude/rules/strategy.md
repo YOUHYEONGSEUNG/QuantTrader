@@ -19,12 +19,14 @@ paths:
 - 추세 봉의 이벤트(`TrendStart`, `SuspectEvent`)는 새 추세 봉 값을 처음 본 진입 봉에서만 쓴다 (`ObserveRegime`, `trendStartNow`·`suspectEventNow`).
 
 ## 주문 (Managed approach)
-- 분할 진입은 조각마다 시그널명이 하나다: 추세 `TL1`(1차) / `TL2`(2차) / `TL3`(마지막 조각), 횡보 `SL1`(1단계) / `SL2`(나머지). 매도는 TS·SS. `chunkStage`(1 / 2 / 3)로 역할을 구분한다.
+- 분할 진입은 조각마다 시그널명이 하나다: 추세 `TL{n}.1`(1차) / `TL{n}.2`(2차) / `TL{n}.3`(마지막 조각), 횡보 `SL{n}.1`(1단계) / `SL{n}.2`(나머지). 매도는 TS·SS. n은 진입마다 1씩 늘어나는 번호(`signalSeq`): NinjaTrader는 같은 시그널명의 Set 익절·손절 값을 다음 진입에도 쓰고 지울 방법이 없어서, 이름을 재사용하면 지난 거래의 익절가가 남는다(7/27). 닿지 않는 먼 익절을 거는 방법은 차트 가격 축을 늘려서 쓰지 않는다. `chunkStage`(1 / 2 / 3)로 역할을 구분한다.
 - `EntryHandling = UniqueEntries`, `EntriesPerDirection = 1`.
 - 손절은 조각별 `SetStopLoss(signal, CalculationMode.Price, price, false)`, 진입 주문보다 먼저 건다.
 - 지정가 익절은 `SetProfitTarget`(`IntrabarTakeProfit`): 추세 조각은 밴드 값을 봉마다 옮기고, 횡보 1단계는 고정 가격(진입가 ± ATR × 배수, 체결되면 체결가 기준으로 다시 검). `ExitLongLimit` 같은 지정가 Exit 주문은 쓰지 않는다.
 - **조각의 일부만 청산하지 않는다.** 일부 청산 때 그 조각의 Set 익절·손절 수량이 어떻게 되는지 공식 문서에서 확인되지 않았다. 의심 일부청산은 먼 조각부터 조각 단위로 뺀다(`ExitFarChunks`).
 - 봉 마감 조건의 청산은 시장가 `ExitLong/ExitShort`. 주문은 BIP 0으로만.
+- **청산 수량은 항상 직접 준다.** 조각별 실제 보유 수량 `chunkLeft`(진입 체결 +, `FromEntrySignal`이 그 조각인 청산 체결 −)로 조각마다 청산하고, 조각과 상관없이 남은 포지션은 `FlattenLeftover()`(`Position.Quantity`, 직접 낸 청산 주문이 살아 있으면 기다림)로 정리한다. 수량 없는 `ExitLong()`은 쓰지 않는다: 부분 체결 뒤 NinjaTrader가 조각별로 기억하는 수량이 어긋나 반대 포지션이 생겼다(10/6 Playback).
+- 조각을 끝내는 것은 체결 수량으로(`chunkLeft`가 0). 익절 단계 처리는 부분 체결이 여러 번 와도 한 번(`stageFilled`).
 - 체결 콜백이 주문 호출 도중에 올 수 있다. 콜백이 읽는 상태(`liveSignals`, `pendingBandExit`)는 주문 전에 바꿔 둔다.
 - 손절 이동은 `MoveStopTo()`만 쓴다(유리한 쪽으로만, `BreakevenBufferTicks` 안전 거리, 가까우면 미뤘다가 재시도).
 

@@ -82,15 +82,19 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | SuspectExitPercent | 50 | 남은 수량의 %. 먼 조각부터 조각 단위 | 33 / 100 |
 | SuspectStrongSlow / SuspectStrongExitPercent | 1 / 100 | 확인 때 S ≤ 1이면 전량 | |
 | BlockEntryWhileSuspect | 켬 | 의심 중 추세 방향 신규 진입 금지 | |
+| SuspectBlockNeedPrice | 켬 | 그 금지는 의심 뒤 가격 확인(직전 5봉 저점 이탈)이 있었을 때만 | 끔 |
 
 ### 5-3. 03 진입 — 추세, 04 진입 — 횡보, 05 진입 — 공통
 
 | 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
 | UseEntryTrendStart | 켬 | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
-| EntryMinRR | 1.0 | E1: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
+| EntryMinRR | 1.0 | E1·E2: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
+| E1Reaccel | 켬 | E1R: 추세 중 F가 0 이하로 갔다가 다시 시작 조건을 채운 추세 봉에서 E1 | 끔 |
+| E1AtSessionStart | 켬 | E1S: 구간 첫 진입 가능 봉(21:35)에 이미 있는 추세로 E1 | 끔 |
 | UseEntryPullback / TrendPullbackBand | 켬 / 1 | E2: −1배 터치 → [MACD 상승 전환 OR 골든] | |
-| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 한 번 | 끔 |
+| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
+| OrbMaxEntries | 2 | E3를 쓴 뒤 종가가 박스 안으로 돌아오면 다시 열림, 방향별 최대 횟수 | 1 |
 | UseEntrySide / SideBand / SideT2Entry | 켬 / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
 | SideBlockScore | 3 | S+F ≥ 3이면 횡보 매도, ≤ −3이면 횡보 매수 금지 | |
 | BlockSideAfterStop | 켬 | 횡보 손실 손절 뒤 같은 방향 횡보 재진입 금지 | |
@@ -104,6 +108,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | TrendStopMinAtr / TrendStopMaxAtr | 1.5 / 3.0 | 추세 포지션 손절 거리 범위(신호 봉 1분 ATR 배수) |
 | SideStopMinAtr / SideStopMaxAtr | 1.0 / 2.0 | 횡보 포지션 손절 거리 범위 |
 | StopMinTicks | 32 | 최소 손절 거리(MNQ 8pt). 장전 ATR이 작을 때 |
+| BreakevenMinR / BreakevenFallbackAtr | 0.5 / 1.5 | 1차 이익 ≥ 손절 거리 × 0.5면 평단, 아니면 1차 체결가 ∓ 1.5 ATR | 0 (항상 평단) |
 | BreakevenBufferTicks / HandleOrderErrors | 8 / 켬 | 손절 이동 안전 거리, 주문 오류 직접 처리 |
 
 ### 5-5. 07 청산 — 추세, 08 청산 — 횡보
@@ -116,6 +121,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | TrendLastExitMa | 1 | 2차 뒤 추세 봉 종가 < 중기선이면 나머지 전량. 2 단기선, 0 트레일링만 | 0 / 2 |
 | TrendExitOnEnd | 켬 | 추세가 횡보로 바뀌면 전량 | 끔 |
 | TrendExitOnEntryT2 | 끔 | 추세 유지 중에도 1분 T2 반대 신호로 전량 | 켬 |
+| TrendTpMinR | 0.5 | 진입 때 익절 밴드까지 남은 거리 < 예상 손절 × 0.5면 지난 밴드로 봄 | 0 |
 | SideTp1Atr / SideTp1Percent | 2 / 33 | 횡보 1단계: 진입가 + 2 ATR(진입 때 고정)에서 33% | |
 | SideRestBand | 3 | 종가가 +3배에 닿으면 나머지 전량 | |
 | SideOscExitAfterTp1 | 켬 | MACD·크로스 청산은 1단계 뒤에만 | 끔 |
@@ -129,7 +135,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | NewsBlockMinutes | 5 | 21:30부터 5분 진입 금지(지표 발표) | 대회 날 일정대로 |
 | OpenBlockBefore / OpenBlockAfter | 5 / 3 | 22:25~22:32 봉 진입 금지 | |
 | PreOpenQtyPercent | 50 | 장전 수량 % | 100 |
-| PreOpenTrendMinSlow / PreOpenAllowSide | 3 / 켬 | 장전 E1·E2는 S ≥ 3일 때만, 장전 E4 허용 | 2 |
+| PreOpenTrendMinSlow / PreOpenAllowSide | 2 / 켬 | 장전 E1·E2는 S ≥ 2일 때만(10/15에 3에서 내림), 장전 E4 허용 | 3 |
 | ProtectBeforeOpen / ProtectAtr | 끔 / 1 | 22:29 봉 마감에 이익 ≥ 1 ATR이면 손절 평단 | 켬 |
 | MinEntryFallback / MinEntryFallbackTime / MinEntryQtyPercent | 켬 / 230000 / 30 | 23:00 이후 진입 횟수가 최소 목표보다 적으면 다음 유효 신호를 30%로 | |
 
@@ -200,12 +206,12 @@ v3 추가 열 (7장)
 
 | 열 | 뜻 |
 | --- | --- |
-| path | 진입 경로 E1(추세 시작) / E2(추세 눌림) / E3(장전 박스 돌파) / E4(횡보) / TEST |
+| path | 진입 경로 E1(추세 시작) / E1X(반대 추세 청산 뒤) / E1R(재가속) / E1S(구간 첫 봉 추세) / E2(추세 눌림) / E3(장전 박스 돌파) / E4(횡보) / TEST |
 | session | pre(장전) / post(장후) |
 | s1, s2, s3, s4, f1, f2, slow, fast | 신호 봉 시점 추세 봉 점수 항목(+1 / 0 / −1, RSI를 끄면 s4 빈칸)과 S, F |
 | pre_box_high, pre_box_low | 장전 박스 (진입 시점까지 기록된 값) |
 | atr_entry | 신호 봉 1분 ATR (= atr) |
-| rr_expected | E1의 손익비 (2차 익절까지 남은 폭 ÷ 예상 손절 거리). 다른 경로는 빈칸 |
+| rr_expected | E1·E2의 손익비 (2차 익절까지 남은 폭 ÷ 예상 손절 거리). 다른 경로는 빈칸 |
 | fallback_entry | 최소 진입 보장으로 들어갔으면 1 |
 | suspect_events | 보유 중 본 반대 방향 의심 이벤트 수 |
 | suspect_action | 마지막 의심 처리: SUSPECT / SUSPECT_STRONG / CANCEL(해제·확인 없음) |
