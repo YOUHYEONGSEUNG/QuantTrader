@@ -1,6 +1,6 @@
-# 백테스트 가이드와 설정값 설명
+# 백테스트 가이드와 설정값 설명 (v3)
 
-`TQ_Strategy`를 NinjaTrader의 Strategy Analyzer로 백테스트하는 절차와, 설정창에 보이는 값이 각각 무엇을 뜻하는지 정리한 문서입니다. 규칙 자체는 `docs/spec.md`, 바뀐 이력은 `docs/changelog.md`에 있습니다.
+`TQ_Strategy` v3(브랜치 `v3-integrated`)를 Strategy Analyzer로 백테스트하고 Playback으로 확인하는 절차와, 설정창에 보이는 값의 뜻을 정리한 문서입니다. 규칙 자체는 `docs/spec.md`(v3), 바뀐 이력은 `docs/changelog.md`에 있습니다. v2 가이드는 `main` 브랜치의 같은 파일에 있습니다.
 
 ## 1. 돌리기 전에 확인할 것
 
@@ -8,297 +8,207 @@
 | --- | --- |
 | Custom 폴더에 `obj` 폴더가 없다 | 있으면 컴파일이 CS0579로 깨진다. Visual Studio로 이 폴더를 열면 생긴다 |
 | NinjaScript Editor에서 F5를 눌러 에러가 없다 | 에러가 있으면 예전 코드로 백테스트가 돈다 |
-| Connections에서 Playback 연결을 끊는다 | Playback에 연결된 동안에는 Run 버튼이 눌리지 않는다 |
+| 차트에 올려 둔 전략·지표를 지웠다가 다시 올린다 | v3는 설정값이 전부 바뀌어 예전 인스턴스·템플릿을 그대로 쓸 수 없다 |
+| Connections에서 Playback 연결을 끊는다 (백테스트 때) | Playback에 연결된 동안에는 Run 버튼이 눌리지 않는다 |
 
 ## 2. 백테스트 절차
 
-1. Control Center → New → **Strategy Analyzer**.
-2. 종류는 **Backtest**, 전략은 **TQ_Strategy**.
-3. **Instrument**: `MNQ DEC26`. 직접 입력하고 Enter.
-4. **Data Series**: Type은 Minute, Value는 **3**. 여기가 진입 봉이다 (4장 참고).
-5. **기간 (From / To)**: To는 마지막으로 보고 싶은 저녁의 **이틀 뒤 날짜**로 넣는다. 넉넉히 넣어야 그 저녁의 대회 시간이 빠지지 않는다 (대회 시간이 자정을 넘던 22:30~00:30 때 정한 값. 21:30~23:30에서 하루 뒤로 충분한지는 확인 전). 예: 10/5 저녁까지 보려면 To = 10/7.
-6. 아래 설정값을 확인하고 **Run**.
-7. 결과에서 **Summary**(합계)와 **Trades**(거래 목록)를 본다.
-8. Trades 탭에서 우클릭 → **Export**로 저장한다. 문서 폴더에 저장하고 Claude에게 "결과 봐줘"라고 하면 거래 단위로 분석한다.
+1. Control Center → New → **Strategy Analyzer**, 종류 **Backtest**, 전략 **TQ_Strategy**.
+2. **Instrument**: `MNQ DEC26` (골드는 `MGC DEC26`). 직접 입력하고 Enter.
+3. **Data Series**: Minute, Value **1** (진입 봉. 4장).
+4. **기간**: 장기선 60봉(3분봉이면 3시간)이 채워지도록 보고 싶은 첫날보다 며칠 앞부터. To는 마지막으로 볼 저녁의 다음 날.
+5. 설정값을 확인하고 **Run**. 결과는 **Summary**와 **Trades**.
+6. 거래 단위 분석은 `TQ_ml_v3_종목.csv`(9장)가 편하다.
 
-### 지켜야 할 것
-
-- **한 번에 하나만 바꾼다.** 두 개를 같이 바꾸면 어느 쪽 효과인지 알 수 없다.
-- **바꾸기 전에 기본값으로 한 번 돌려 기준을 잡는다.** 같은 기간, 같은 봉으로 비교한다.
-- **지금 가진 데이터는 9/29~10/5뿐이다.** 기간을 그보다 넓게 넣어도 결과는 같다.
-- **결과가 좋아졌다고 바로 믿지 않는다.** 진입이 10번도 안 되는 표본이다.
+**지켜야 할 것:** 한 번에 하나만 바꾼다. 바꾸기 전에 기본값으로 기준을 잡는다. 설정을 고를 때 쓴 날로 확인하지 않는다(9월로 고르고 10월로 확인).
 
 ## 3. 결과 읽는 법
 
-NinjaTrader는 분할 진입 한 덩어리를 거래 1건으로 센다. 30계약을 6 / 12 / 12로 나눠 들어가면 3건이다. 같은 시각에 들어간 건들을 묶어 "진입 1번"으로 읽는다.
+분할 진입 한 덩어리를 NinjaTrader는 조각마다 1건으로 센다. 같은 시각에 들어간 건들을 묶어 "진입 1번"으로 읽는다.
 
-| Trades의 Entry name | 뜻 |
+| Entry name | 뜻 |
 | --- | --- |
-| UpL1, UpL2, UpL3 | 상승추세 매수 (주력). 6 / 12 / 12계약 |
-| UpS1, UpS2 | 상승추세 매도 (역추세). 15 / 15계약 |
-| DnL1, DnL2 | 하락추세 매수 (역추세). 10 / 20계약 |
-| DnS1, DnS2, DnS3 | 하락추세 매도 (주력). 10 / 10 / 10계약 |
-| SideL1, SideL2 | 횡보 매수. 15 / 15계약 |
-| SideS1, SideS2 | 횡보 매도. 15 / 15계약 |
+| TL1, TL2, TL3 | 추세 매수: 1차(+2배) / 2차(+3배) / 마지막 조각. 30계약 33/33이면 9 / 9 / 12 |
+| TS1, TS2, TS3 | 추세 매도 (거울상) |
+| SL1, SL2 | 횡보 매수: 1단계(진입가 + 2 ATR) / 나머지. 30계약 33%면 9 / 21 |
+| SS1, SS2 | 횡보 매도 (거울상) |
 
-| Trades의 Exit name | 뜻 |
+| Exit name | 뜻 |
 | --- | --- |
-| x로 시작 (예: xSideL1) | 분할 익절 |
-| Stop loss | 손절. 체결가가 진입가와 같으면 본절 |
-| Sell / Buy to cover | 나머지 전량 청산 (청산 조건 충족 또는 23:27 종료 청산) |
-
-| 열 | 뜻 |
-| --- | --- |
-| MAE | 보유 중 가장 불리했던 폭 (달러) |
-| MFE | 보유 중 가장 유리했던 폭 (달러) |
-| Bars | 보유한 봉 수 |
+| Profit target | 밴드·ATR 지정가 익절 |
+| x로 시작 (예: xTL3) | 조각 단위 청산(의심 일부청산, 봉 마감 익절) |
+| Stop loss | 손절. 로그·학습 데이터의 사유 코드로 손절(`STOP`) / 본절(`BE_STOP`) / 트레일링(`TRAIL`)을 구분 |
+| Sell / Buy to cover | 나머지 전량 청산 (사유 코드는 로그·`exit_reason`) |
 
 MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러.
 
-## 4. 진입 봉 (Data Series)
+## 4. 진입 봉과 추세 봉
 
-전략은 여기서 고른 봉을 그대로 진입 봉으로 쓴다. 명세(v2)는 **1분봉**이다. 코드에 고정된 것은 추세 판단용 10분봉(과 `RegimeBarMinutes` 3일 때 쓰는 3분봉)뿐이다.
+전략은 Data Series에서 고른 봉을 진입 봉으로 쓴다. v3는 **1분봉**이다. 추세 봉은 코드가 붙이는 3분봉(기본)이나 10분봉이다(`RegimeBarMinutes`).
 
-| | 1분봉 (명세) | 3분봉 |
+| | 진입 봉 1분 | 추세 봉 3분 (기본) |
 | --- | --- | --- |
-| 밴드 중심선 EMA 26봉 | 26분 | 78분 |
-| ATR 14봉 | 14분 | 42분 |
-| 전저점·전고점 5봉 | 5분 | 15분 |
-| 반전 대기 6봉 | 6분 | 18분 |
-| 마지막 조각 18선 | 18분 | 54분 |
-| 추세 판단 | 10분봉 | 10분봉 (같음) |
+| 밴드 EMA 26 / ATR 14 | 26분 / 14분 | – |
+| 구조 손절 5봉, 의심 가격 확인 5봉 | 5분 | – |
+| 반전 대기 6봉 | 6분 | – |
+| 이동평균 6 / 20 / 60 | – | 18분 / 60분 / 180분 |
 
 ## 5. 설정값
 
-기본값만으로 돌리면 회의 문서("대면회의 이후 수정사항")의 규칙이다. 규칙 자체는 `docs/spec.md`, 설정값 전체와 기본값 표는 spec 8장을 본다. 실거래·대회 세팅은 `docs/contest-setup.md`, 지금 시험 중인 설정 세트와 결과는 `docs/status-1012.md`에 있다.
+기본값만으로 돌리면 설계안(v3 지시서) 그대로다. 설정값 전체와 기본값 표는 spec 8장, 고민 → 스위치 대응은 spec 9장.
 
-설정창은 판단 순서대로 14개 묶음이고, 각 항목은 "[태그] 한국어 설명 (코드 이름)"으로 보인다. 태그는 [명세] 회의 문서의 규칙, [추가] 문서에 없는 옵션, [안전] 주문 거부 대비, [표시] 화면·기록이다. 한 묶음 안에서 [명세]가 위, [추가]가 아래다. **[추가]를 건드리지 않으면 회의 문서 그대로 동작한다.** 항목에 마우스를 올리면 "무엇인지 / 명세 값 / 바꾸면 어떻게 되는지" 설명이 나온다.
+설정창은 판단 순서대로 13개 묶음(00~12)이고 각 항목은 "[태그] 한국어 설명 (코드 이름)"이다. 태그: [설계] 설계안의 동작과 값, [선택] 고민사항 스위치, [안전] 주문 거부 대비, [표시] 화면·기록. 한 묶음 안에서 [설계]가 위, [선택]이 아래. 쓰이지 않는 설정은 회색으로 잠긴다. 항목에 마우스를 올리면 기본값과 뜻, 올리거나 켜면 어떻게 되는지가 나온다.
 
-**전략을 차트에 다시 올리면 설정이 모두 기본값으로 돌아간다.** 같은 설정으로 여러 번 돌릴 때는 설정창의 template 저장 기능으로 저장해 두고 불러온다. 돌린 설정은 로그 파일(`TQ_log_종목.txt`) 실행 첫 줄과 거래 요약 파일의 `#` 줄에 그대로 남으니, 결과를 볼 때 그 줄부터 확인한다.
+**전략을 차트에 다시 올리면 설정이 모두 기본값으로 돌아간다.** 같은 설정으로 여러 번 돌릴 때는 설정창의 template 저장 기능을 쓴다. "설계안 기본값으로 되돌리기" 버튼(00 묶음)은 10·12 묶음을 뺀 매매 규칙 설정을 기본값으로 되돌린다. 돌린 설정은 로그 첫 줄(`====`)과 학습 데이터 파일의 `#` 줄에 남는다.
 
-한 번에 하나만 바꿔 기준과 비교한다. 여러 개를 같이 바꾸면 어느 설정의 효과인지 가릴 수 없다.
+### 5-1. 01 추세 판단 (추세 봉)
 
-### 5-1. 추세 판단 (묶음 01)
-
-| 설정값 | 기본 | 뜻 | 볼 것 |
+| 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
-| RegimeFast / RegimeMid / RegimeSlow | 6 / 18 / 36 | [명세] 정배열·역배열을 보는 이동평균. `RegimeSlow`만큼 추세 봉이 쌓여야 전략이 시작한다 | |
-| RegimeRsiHigh / RegimeRsiLow | 60 / 40 | [명세] 하락 전환 의심은 RSI가 60 이상, 상승 전환 의심은 40 이하일 때만 | 의심이 얼마나 자주 뜨는지 |
-| RegimeDivBars | 15 | [명세] 다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지 | |
-| RegimeHistBars | 2 | [명세] 추세 봉의 MACD 히스토그램이 몇 봉 연속 줄어야(늘어야) 전환으로 볼지 | |
-| **RegimeBarMinutes** | 10 | 추세를 판단하는 봉. 3이면 3분봉, 1이면 진입 봉(차트의 봉)으로 추세까지 판단 | 3. 추세 인정이 빨라지는 대신 자주 바뀐다 |
-| **RegimeMode** | 1 | 1 = 회의 문서 정의(정배열 + MACD선 부호), 2 = 점수 방식(가격·MACD·RSI·스토캐스틱·사건의 합, spec 3-1) | 같은 날을 1과 2로. 로그의 "N분봉 마감 추세=… 점수=" 줄 |
-| RegimeScoreMin / RegimeScoreExit | 2 / 0 | 점수 방식: 추세로 인정할 최소 점수 / 추세가 끝나는 점수 | 최소 점수 3(늦지만 확실), 종료 점수 −1(추세가 덜 끊김) |
-| RegimeScoreRsiBand / RegimeScoreEventBars | 5 / 3 | 점수 방식: RSI를 방향으로 세는 폭(55 이상, 45 이하) / 사건을 점수에 넣는 봉 수(0이면 안 넣음) | |
-| RegimeRsiBars | 1 | 의심의 RSI 조건을 최근 몇 봉 안에서 볼지 | 3 |
-| **RegimeRsiRelative** | 끔 | 켜면 의심의 RSI 기준을 고정값(60 / 40) 대신 RSI의 최근 평균 ± 폭으로 본다. 고정값은 오르는 날에 하락 전환 의심만 자주 뜬다 | 켬. 상승·하락 전환 의심이 비슷한 빈도로 뜨는지 |
-| RegimeRsiCenterBars / RegimeRsiOffset | 20 / 8 | 위 옵션의 평균 봉 수 / 벗어나야 하는 폭 | |
-| RegimeSuspectNeedsPrice | 끔 | 켜면 가격이 아직 추세 방향(종가가 단기선 위 + 단기선 상승)일 때는 하락 전환 의심을 띄우지 않는다 | 급등 도중의 의심이 줄어드는지 |
-| RegimeSuspectMaxScore | 5 | 의심은 추세 봉 점수가 이 값 이하(하락 쪽은 −값 이상)일 때만. 5 = 제한 없음 | 1. 의심 횟수와, 뜬 의심이 맞은 비율 |
-| RegimeSuspectMinEvidence / RegimeSuspectEvidenceBars | 1 / 2 | 의심에 필요한 근거 종류 수(다이버전스·MACD 전환·크로스·가격 항목)와 그 근거를 모으는 추세 봉 수 | 2. 로그 의심 근거 [ ]에 두 가지 이상이 나오는지 |
-| RegimeConfirmBars / RegimeExitBars | 1 / 1 | 추세 시작·종료 조건이 몇 봉 연속이어야 바꿀지 | 2 / 2. 추세 값이 바뀌는 횟수와 확정이 늦어지는 시간 |
-| SuspectReturn | 켬 | 의심 중 반대 신호가 나오면 원래 추세로 돌아간다. 끄면 추세 조건이 깨질 때까지 의심 | 끔과 비교 |
-| RegimePivotStrength | 2 | 다이버전스에서 좌우로 몇 봉보다 높아야(낮아야) 고점(저점)으로 볼지 | |
-| RegimeNoSideways | 끔 | 켜면 횡보 없이 추세와 전환 의심만 쓴다 | |
+| RegimeBarMinutes | 3 | 추세 봉. 3 또는 10 | 10 (이때 이평 6/18/36) |
+| RegimeFast / RegimeMid / RegimeSlow | 6 / 20 / 60 | F1 단기선, S1·S2 중기선, S2 장기선 | Fast 8 |
+| TrendStartFast / TrendStartSlow | 2 / 2 | 추세 시작: F ≥ 2 AND S ≥ 2 | |
+| TrendEndSlow | 0 | 추세 끝: S ≤ 0 → 횡보 | |
+| RegimeMacdSlopeBars | 2 | F2: MACD선 연속 증가·감소 봉 수 | |
+| RegimeS2Mode / RegimeSlopeBars | 1 / 5 | S2: 1 중기 > 장기, 2 장기선 기울기(5봉 전 대비) | 2 |
+| RegimeUseRsi / RegimeRsiBand | 켬 / 5 | S4: RSI 55 이상 +1, 45 이하 −1 | 끔 |
 
-### 5-2. 추세 상태별 진입 (묶음 02~06)
+### 5-2. 02 의심 이벤트
 
-밴드 값은 0~3이고 0은 중심선이다. 각 묶음의 "[추가] 매수 사용", "[추가] 매도 사용"으로 9종 규칙을 하나씩 끌 수 있다(기본 모두 켬).
-
-| 묶음 | 설정값 | 기본 | 뜻 |
+| 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
-| 02 상승추세 | UpLongBand | 1 | 매수: 저가가 몇 배 밴드에 닿으면 |
-| 02 | UseUpLong | 켬 | 상승추세 매수 사용 |
-| 03 하락 전환 의심 | UpSusShortBand / UpSusLongBand | 1 / 2 | 매도: 고가가 몇 배 밴드에 닿으면 / 매수: 종가가 몇 배 밴드 아래면 |
-| 03 | UseUpSusShort / UseUpSusLong | 켬 / 켬 | 그 규칙 사용 |
-| 04 하락추세 | DnShortBand | 1 | 매도: 고가가 몇 배 밴드에 닿으면 |
-| 04 | UseCounterTrend / DnLongBand / DnLongRsi | 켬 / 3 / 30 | 역추세 매수 사용 / 저가가 몇 배 밴드에 닿으면 / RSI가 이 값 아래일 때만 |
-| 04 | UseDnShort / CounterQtyPercent | 켬 / 100 | 하락추세 매도 사용 / 역추세 매수의 수량 % |
-| 05 상승 전환 의심 | DnSusLongBand / DnSusShortBand | 1 / 2 | 매수: 저가가 몇 배 밴드에 닿으면 / 매도: 종가가 몇 배 밴드 위면 |
-| 05 | UseDnSusLong / UseDnSusShort | 켬 / 켬 | 그 규칙 사용 |
-| 06 횡보 | SideBand | 2 | 매수·매도: 저가(고가)가 몇 배 밴드에 닿으면 |
-| 06 | UseSideLong / UseSideShort | 켬 / 켬 | 그 규칙 사용 |
+| SuspectFast | 2 | 상승추세 중 F ≤ −2가 된 첫 봉에 하락의심 이벤트 | |
+| SuspectNeedPrice / SuspectConfirmBars | 켬 / 5 | 이벤트 뒤 5봉 안에 종가가 직전 5봉 저점 아래로 마감해야 일부청산 | 끔 |
+| SuspectExitPercent | 50 | 남은 수량의 %. 먼 조각부터 조각 단위 | 33 / 100 |
+| SuspectStrongSlow / SuspectStrongExitPercent | 1 / 100 | 확인 때 S ≤ 1이면 전량 | |
+| BlockEntryWhileSuspect | 켬 | 의심 중 추세 방향 신규 진입 금지 | |
 
-10월 Playback에서는 하락추세 역추세 매수와 하락 전환 의심 매수가 손실의 대부분이었다. 이 둘을 끄고 돌려 보면 회의 문서 규칙에서 그 영향이 얼마인지 볼 수 있다.
+### 5-3. 03 진입 — 추세, 04 진입 — 횡보, 05 진입 — 공통
 
-### 5-3. 진입 공통 (묶음 07)
-
-| 설정값 | 기본 | 뜻 | 볼 것 |
+| 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
-| T1Window | 5 | [명세] 밴드 조건 뒤 반전 신호를 기다리는 봉 수. 실제 대기는 이 값 + (MacdConfirmBars − 1) | |
-| MacdConfirmBars | 2 | [명세] 진입 봉의 MACD 히스토그램이 몇 봉 연속 커져야(작아져야) 전환으로 볼지. 전환은 그것이 처음 확인된 봉 하나에서만 참 | |
-| T1SameBar | 끔 | 켜면 밴드에 닿은 그 봉의 반전 신호도 인정 | |
-| KeepWaitOnTrendChange | 끔 | 켜면 반전 신호를 기다리는 중에 추세가 바뀔 때 그 대기를 새 추세의 같은 방향 규칙으로 이어 간다 | 로그의 "반전 신호 대기를 이어받음" |
-| SkipEntryPastTarget | 끔 | 켜면 신호 봉 종가가 첫 익절 밴드를 이미 넘었을 때 진입하지 않는다 | 로그의 "진입 보류" |
-| T2CountConfirmBars | 켬 | "MACD 전환 + 크로스" 조건에서 MACD가 꺾인 봉의 크로스도 인정. 회의 전부터 켜 둔 것 | |
-| BlockReentryAfterStop | 켬 | 주력이 아닌 진입이 손절 주문으로 손실 청산되면 그 대회 구간에서 같은 방향의 주력 아닌 진입을 다시 하지 않는다. 회의 전부터 켜 둔 것. 유기 모드에서 주력은 상승추세에서 들어간 매수와 하락추세에서 들어간 매도뿐이다(역진입·두 단계 진입 1단계는 주력 아님, 10/14부터) | |
-| MacdMinChangeAtr | 0 | MACD 전환으로 인정할 최소 변화폭(ATR 배수). 0이면 사용 안 함 | |
+| UseEntryTrendStart | 켬 | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
+| EntryMinRR | 1.0 | E1: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
+| UseEntryPullback / TrendPullbackBand | 켬 / 1 | E2: −1배 터치 → [MACD 상승 전환 OR 골든] | |
+| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 한 번 | 끔 |
+| UseEntrySide / SideBand / SideT2Entry | 켬 / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
+| SideBlockScore | 3 | S+F ≥ 3이면 횡보 매도, ≤ −3이면 횡보 매수 금지 | |
+| BlockSideAfterStop | 켬 | 횡보 손실 손절 뒤 같은 방향 횡보 재진입 금지 | |
+| T1Window / MacdConfirmBars / T2CountConfirmBars | 5 / 2 / 켬 | 반전 대기 5+1봉, MACD 전환 2봉 연속, T2에서 MACD 꺾인 봉의 크로스 인정 | |
 
-### 5-4. 손절, 손절 이동 (묶음 08·09)
-
-| 설정값 | 기본 | 뜻 | 볼 것 |
-| --- | --- | --- | --- |
-| StopPercent | 0.2 | [명세] 손절 %. MNQ 31,000이면 62포인트 | |
-| UseSwingStop / SwingBars | 켬 / 5 | [명세] 전저점·전고점을 손절 후보로 쓸지 / 최근 몇 봉에서 찾을지 | |
-| StopWider | 켬 | [명세] 전저점·전고점과 % 중 진입가에서 먼 쪽. 1분봉에서는 0.2%가 거의 항상 더 멀다 | 끔(가까운 쪽) |
-| MinStopAtr | 1 | 손절 거리 하한(신호 봉 ATR 배수). 회의 전부터 1 | |
-| TrailStopAtTp2 | 끔 | 켜면 두 번째 밴드 익절 때 손절을 첫 번째 익절 체결가로 옮긴다 | |
-| BreakevenAtR | 0 | 1차 익절 전이라도 이익이 처음 손절 거리의 이 배수에 닿으면 손절을 평단으로. 0이면 사용 안 함 | |
-| BreakevenBufferTicks | 8 | [안전] 손절을 옮길 때 현재 호가가 그 가격에서 이 틱 수 이상 떨어져 있어야 한다 | 로그의 "손절 이동 대기" |
-| HandleOrderErrors | 켬 | [안전] 주문이 거부돼도 전략이 꺼지지 않고 직접 대처한다 (`docs/contest-setup.md` 7장) | |
-
-1차 익절이 체결되면 손절을 평단으로 옮기는 것은 명세라 설정값 없이 항상 적용된다. 순수하게 ATR만으로 손절하려면 `StopPercent`를 0으로 두고 `MinStopAtr`에 배수를 넣는다.
-
-### 5-5. 익절·청산 (묶음 10)
-
-단계별 익절 밴드와 비율은 설정값이 아니라 spec 5장 표대로 코드에 있다.
-
-| 설정값 | 기본 | 뜻 | 볼 것 |
-| --- | --- | --- | --- |
-| IntrabarTakeProfit | 켬 | [명세] 단계별 밴드 익절을 지정가로 걸어 두어 가격이 닿는 즉시 체결. 끄면 봉 마감 종가로 판단해 시장가 | |
-| ExitSmaPeriod | 18 | [명세] 마지막 조각 청산용 이동평균(진입 봉) | |
-| ExitOnTrendChange | 끔 | 켜면 추세가 포지션과 맞지 않게 바뀔 때 전량 청산(spec 1장 원칙 3) | 로그의 "추세 청산(" |
-| AdoptTrendExits | 끔 | 켜면 의심 상태에서 들어간 포지션이 같은 방향 추세로 확정될 때 추세 규칙의 익절점으로 바꾼다. Playback에서 한 번도 실행된 적이 없다 | |
-| LastChunkEarly | 끔 | 켜면 마지막 조각의 이동평균 조건을 진입 직후부터 본다. Playback에서는 진입 직후 손실로 나가는 일이 생겼다 | |
-
-### 5-6. 유기 모드 (묶음 14, 회의 문서에 없는 실험)
-
-켜면 추세가 진입 방향을 정하고, 손절·본절·청산이 추세와 맞물리게 바뀐다. 규칙은 spec 5-2, 지금 시험 중인 값과 결과는 `docs/status-1012.md`.
-
-| 설정값 | 기본 | 뜻 | 볼 것 |
-| --- | --- | --- | --- |
-| **OrganicMode** | 끔 | 유기 모드 사용. 켜면 의심 진입 밴드, 역추세 매수, 묶음 08의 손절, `TrailStopAtTp2`, `ExitOnTrendChange`, `AdoptTrendExits`는 무시된다 | |
-| OrganicSuspectQtyPercent | 50 | 전환 의심 때의 역진입 수량 %. 0이면 의심 구간에서는 진입하지 않는다 | 0. 10월에는 역진입이 계속 졌다 |
-| OrganicEnterOnConfirm | 켬 | 추세가 확정되는 봉에 밴드 조건 없이 바로 진입 | 로그의 "(추세 확정 봉)" |
-| OrganicEnterAtOpen | 끔 | 켜면 진입 시간대의 첫 봉에서 이미 추세일 때도 바로 진입 | 진입 시작 전에 확정된 추세를 잡는지 |
-| OrganicStopAtr | 2 | 손절 거리(신호 봉 ATR 배수) | |
-| OrganicBeMinR | 0.5 | 1차 익절의 이익이 손절 거리의 이 배수 이상일 때만 손절을 평단으로 | 로그의 "본절 보류(1차 익절 폭 …)" |
-| OrganicSideBlockScore | 2 | 횡보 구간에서 추세 봉 점수가 이만큼 반대쪽이면 그 방향 횡보 진입을 막는다. 0이면 막지 않는다 | |
-| **OrganicHoldWhileTrend** | 끔 | 켜면 추세 판정이 포지션 방향 쪽(매수는 상승추세·상승 전환 의심, 매도는 하락추세·하락 전환 의심)인 동안 진입 봉의 전량 청산 조건을 무시한다. 끄면 상승추세 매수만 1분봉의 작은 눌림에 일찍 청산된다 | 켬. 매수의 보유 시간과 손익 |
-| OrganicTwoStage | 끔 | 두 단계 진입. 1분봉 추세가 먼저 바뀌면 아래 %만 들어가고 추세 봉이 확정하면 나머지를 추가. 확정 전에 1분봉 추세가 꺼지면 청산 | 로그의 "두 단계 진입 1단계", "2단계". 진입이 몇 분 빨라졌는지와 1단계 청산의 손실 |
-| OrganicStage1Percent | 50 | 1단계 수량 % | |
-| OrganicStopSwing | 끔 | 켜면 손절을 직전 저점·고점(진입 봉 5봉 + 추세 봉 아래 봉 수) 한 틱 바깥에, 거리는 ATR 최소~최대 배수 안으로 | 손절 거리(학습 데이터 `risk_pts`)와 손절 횟수 |
-| OrganicStopSwingBars / OrganicStopMinAtr / OrganicStopMaxAtr | 5 / 1.5 / 3 | 구조 손절의 추세 봉 수, 최소·최대 거리 | |
-| OrganicTp1Percent / OrganicTp2Percent | 0 / 0 | 상승추세 매수·하락추세 매도의 1차·2차 익절 수량 %. 0 / 0이면 규칙 표 비율. 2차에 비중을 두려면 20 / 50 | 2차 익절까지 가는 비율 |
-| OrganicTrailAtr | 0 | 0보다 크면 1차 익절 뒤 손절을 최고가(최저가)에서 ATR × 이 값으로 따라 올림 | 3. 로그의 "손절 이동 → … (따라가기)"와 돌려준 이익 |
-| OrganicSignalQueue | 끔 | 켜면 추세와 상관없이 진입 봉의 반전 신호를 큐에 모아 두고, 전환 의심이 뜨면 큐의 반대쪽 신호로 바로 역진입. 손절은 그 신호의 전고점·전저점 바깥 | 로그의 "(큐: N분 전 … 신호)" 진입의 손익, 상태 상자의 "큐:" 줄 |
-| OrganicQueueBars / OrganicQueueMaxAtr | 10 / 1.5 | 큐 신호의 유효 봉 수, 신호 가격에서 진입 방향으로 ATR × 값 넘게 가면 무효. 신호의 고점(매수 신호는 저점)이 깨져도 무효 | |
-| OrganicSuspectTrigger | 끔 | 켜면 전환 의심 동안 밴드 조건 역진입 대신, 1분봉 종가가 직전 5봉 저점(매도)·고점(매수)을 깰 때 역진입. 의심 구간마다 한 번 | 로그의 "(의심 뒤 가격 확인)" 진입의 손익 |
-
-### 5-7. 지표 계산값 (묶음 12, 건드릴 일이 거의 없음)
-
-진입 봉과 추세 봉에 같은 값을 쓴다.
+### 5-4. 06 손절
 
 | 설정값 | 기본 | 뜻 |
 | --- | --- | --- |
-| BandMidPeriod / BandAtrPeriod | 26 / 14 | ATR 채널의 중심선 EMA 기간과 ATR 기간 |
-| BandMult1 / 2 / 3 | 1 / 2 / 3 | 밴드 배수 |
-| MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 | MACD |
-| StochPeriodK / StochSmooth / StochPeriodD | 10 / 5 / 5 | 스토캐스틱 %K 길이, %K 스무딩, %D 스무딩 |
-| CrossLow / CrossHigh | 20 / 80 | 골든크로스는 %K가 20 아래였던 뒤에만, 데드크로스는 80 위였던 뒤에만 인정 |
-| CrossFilterBars | 5 | 위의 "20 아래였던 적"을 최근 몇 봉 안에서 찾을지 |
-| RsiPeriod | 14 | RSI 기간 |
+| SwingBars | 5 | 구조 손절: 최근 5봉 저가 − 1틱 |
+| TrendStopMinAtr / TrendStopMaxAtr | 1.5 / 3.0 | 추세 포지션 손절 거리 범위(신호 봉 1분 ATR 배수) |
+| SideStopMinAtr / SideStopMaxAtr | 1.0 / 2.0 | 횡보 포지션 손절 거리 범위 |
+| StopMinTicks | 32 | 최소 손절 거리(MNQ 8pt). 장전 ATR이 작을 때 |
+| BreakevenBufferTicks / HandleOrderErrors | 8 / 켬 | 손절 이동 안전 거리, 주문 오류 직접 처리 |
 
-### 5-8. 수량·대회 시간 (묶음 11), 화면·기록·테스트 (묶음 13)
+### 5-5. 07 청산 — 추세, 08 청산 — 횡보
 
-시각은 HHmmss 숫자로 넣는다. 한국시간 기준이다.
+| 설정값 | 기본 | 뜻 | 비교할 것 |
+| --- | --- | --- | --- |
+| TrendTp1Band / TrendTp2Band | 2 / 3 | 1차·2차 익절 밴드 | |
+| TrendTp1Percent / TrendTp2Percent | 33 / 33 | 1차·2차 수량 %, 나머지가 마지막 조각 | |
+| TrailAtr | 2.5 | 2차 뒤 트레일링: 최고가 − 2.5 × 1분 ATR | 2 / 3 |
+| TrendLastExitMa | 1 | 2차 뒤 추세 봉 종가 < 중기선이면 나머지 전량. 2 단기선, 0 트레일링만 | 0 / 2 |
+| TrendExitOnEnd | 켬 | 추세가 횡보로 바뀌면 전량 | 끔 |
+| TrendExitOnEntryT2 | 끔 | 추세 유지 중에도 1분 T2 반대 신호로 전량 | 켬 |
+| SideTp1Atr / SideTp1Percent | 2 / 33 | 횡보 1단계: 진입가 + 2 ATR(진입 때 고정)에서 33% | |
+| SideRestBand | 3 | 종가가 +3배에 닿으면 나머지 전량 | |
+| SideOscExitAfterTp1 | 켬 | MACD·크로스 청산은 1단계 뒤에만 | 끔 |
+| SideExitOnOppTrend | 켬 | 반대 추세 시작 시 전량 | |
+
+### 5-6. 09 시간대
+
+| 설정값 | 기본 | 뜻 | 비교할 것 |
+| --- | --- | --- | --- |
+| OpenTime | 223000 | 미국 정규장 개장(KST). 골드는 차트마다 따로 | |
+| NewsBlockMinutes | 5 | 21:30부터 5분 진입 금지(지표 발표) | 대회 날 일정대로 |
+| OpenBlockBefore / OpenBlockAfter | 5 / 3 | 22:25~22:32 봉 진입 금지 | |
+| PreOpenQtyPercent | 50 | 장전 수량 % | 100 |
+| PreOpenTrendMinSlow / PreOpenAllowSide | 3 / 켬 | 장전 E1·E2는 S ≥ 3일 때만, 장전 E4 허용 | 2 |
+| ProtectBeforeOpen / ProtectAtr | 끔 / 1 | 22:29 봉 마감에 이익 ≥ 1 ATR이면 손절 평단 | 켬 |
+| MinEntryFallback / MinEntryFallbackTime / MinEntryQtyPercent | 켬 / 230000 / 30 | 23:00 이후 진입 횟수가 최소 목표보다 적으면 다음 유효 신호를 30%로 | |
+
+### 5-7. 10 수량·대회 시간, 11 지표 계산값, 12 화면·기록
 
 | 설정값 | 기본 | 뜻 |
 | --- | --- | --- |
-| EntryQuantity | 30 | 진입 계약 수. 분할 비율은 내림하고 나머지는 마지막 조각에 붙는다. 대회 한도가 나오면 맞춘다 |
-| MaxQuantity | 40 | 진입 수량이 이 값보다 크면 시작할 때 로그에 경고가 찍힌다. 매매에는 쓰이지 않는다 |
-| ContestStartTime | 213000 | 21:30. 이 시각 이후의 신호부터 진입 |
-| EntryEndTime | 231500 | 23:15. 이 시각 이후의 신호로는 진입하지 않음 |
-| FlattenTime | 232700 | 23:27. 이 봉이 마감되면 남은 수량을 전량 청산 |
-| MinEntries | 2 | 화면의 진입 횟수 표시에 쓰는 최소 진입 목표 |
-| ShowStatus | 켬 | 차트 표시. 배경색 = 추세(초록 상승, 주황 하락 전환 의심, 빨강 하락, 하늘색 상승 전환 의심, 없음 횡보), 밴드 선, 마름모 = 밴드 조건이 충족된 봉, 한글 라벨 = 체결. Playback·실시간에서는 손절선·평단선과 왼쪽 위 상태 상자도 나온다 |
-| LogToFile | 켬 | 실시간·Playback 로그를 `내 문서\NinjaTrader 8\TQ_log_종목.txt`에 저장. 1분봉마다 추세·신호와 그 봉의 시가·고가·저가·종가가 남는다 |
-| MlLogToFile | 켬 | 9장 |
-| UseTestEntry | 끔 | 실제 신호를 무시하고 진입 시간대에 포지션이 없을 때마다 매수한다(상승추세 매수의 분할). 2봉째 1차 익절, 3봉째 2차 익절, 4봉째 전량 청산. 주문 흐름을 보는 용도. **평소에는 반드시 끈다** |
+| EntryQuantity / MaxQuantity / MinEntries | 30 / 40 / 2 | 진입 계약 수, 대회 한도(경고만), 종목당 최소 진입 목표 |
+| ContestStartTime / EntryEndTime / FlattenTime | 213000 / 231500 / 232700 | 진입 시작 / 진입 마감 / 23:27 봉 마감 전량 청산 |
+| BandMidPeriod / BandAtrPeriod / BandMult1~3 | 26 / 14 / 1·2·3 | ATR 채널. ATR 14는 손절·익절·트레일링 거리에도 씀 |
+| MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 | 진입 봉과 추세 봉에 같이 |
+| StochPeriodK / StochSmooth / StochPeriodD | 10 / 5 / 5 | 진입 봉 스토캐스틱 |
+| CrossLow / CrossHigh / CrossFilterBars | 20 / 80 / 5 | 골든은 최근 5봉 안에 %K < 20, 데드는 > 80 |
+| RsiPeriod | 14 | 진입 봉과 추세 봉(S4) |
+| ShowStatus / StatusPanelScale | 켬 / 130 | 차트 표시, 상태 상자 크기 % |
+| LogToFile / MlLogToFile | 켬 / 켬 | 로그(`TQ_log_v3_종목.txt`), 학습 데이터(`TQ_ml_v3_종목.csv`) |
+| UseTestEntry | 끔 | 주문 흐름 검증용 가짜 매수(2봉째 1차, 3봉째 2차, 4봉째 전량). **평소에는 반드시 끔** |
+| IntrabarTakeProfit | 켬 | 익절을 봉 진행 중 지정가로. 끄면 봉 마감 종가로 시장가 |
 
-대회 시간 밖에서도 신호를 보고 싶으면 `ContestStartTime`과 `EntryEndTime`을 넓힌다. 검증할 때만 쓰고 원래 값으로 되돌린다.
+**왼쪽 위 상태 상자:** 구역마다 색 제목줄과 배경이 있다. 현재 상태(추세 색, 큰 글씨 추세 · 의심, S·F와 항목별 방향, 의심 가격 확인 대기, 구간·장전 박스, 1분봉 지표) / 진입 조건(미보유일 때 방향별 E1~E4 상태와 막힌 사유, 진입 횟수) / 포지션 / 익절 / 손절 / 청산. 줄 색: ● 초록(충족·완료), ○ 흰색(기다리는 조건), × 회색(막힘), 들여쓴 줄 옅은 회색(참고).
 
-**왼쪽 위 상태 상자 읽는 법 (10/14부터 구역별):** 구역마다 색 제목줄과 배경이 따로 있고 구역 사이가 떨어져 있다.
-- **현재 상태** (제목줄 색 = 추세 색: 초록 상승추세, 주황 하락 전환 의심, 빨강 하락추세, 하늘색 상승 전환 의심, 회색 횡보): 큰 글씨로 추세와 시각, 추세 봉의 근거(문서 정의면 배열·MACD선·RSI, 점수 방식이면 점수와 항목별 방향, 의심이면 그 근거), 진입 봉 지표, 두 단계 진입을 켜면 1분봉 추세.
-- **진입 조건** (미보유일 때, 남색): 진입 시간 여부, 유기 모드·두 단계 진입 안내, 그 추세의 진입 후보(○ 밴드 조건 대기, ● 반전 신호 대기와 ■□ 지난 봉·남은 봉, × 막힘과 그 이유), 반전 신호 큐.
-- **포지션** (보유 중, 매수 초록 / 매도 자주): 방향·수량·평단·평가 손익·규칙.
-- **익절** (금색): 단계별 익절(● 체결, ○ 대기와 지금 걸린 가격)과 마지막 조각 조건.
-- **손절** (자홍): 지금 손절가와 출처(본절·1차 익절가·따라가기), 이동 대기, 따라가기 기준.
-- **청산** (파랑): 두 단계 진입 1단계, 전량 청산 조건, 추세 청산 조건, 종료 청산 시각.
-- 줄 색: ● 초록(끝남·충족), ○ 흰색(기다리는 조건), × 회색(막힘), 두 칸 들여쓴 줄은 옅은 회색(참고).
+**차트:** 배경 = 추세(초록 상승, 빨강 하락, 의심 중 주황·하늘색), 진입 화살표(매수 초록 ↑, 매도 빨강 ↓), 청산 화살표(파랑), 체결 라벨, 손절선(자홍)·평단선(회색 점선), 장전 박스 고가·저가(금색 점선, 22:30 이후). 영어 체결 글자는 차트 우클릭 → Data Series → Plot executions → Do not plot으로 끈다.
 
-**차트의 영어 체결 글자**("Stop loss", "Profit target", "DnS1 10 @ …")는 NinjaTrader가 그리는 것이다. 차트 우클릭 → Data Series → Plot executions를 Do not plot으로 바꾸면 없어지고 전략의 한글 라벨만 남는다.
+## 6. 확인 순서 (v3 지시서 8장)
 
-## 6. 추천 확인 순서
-
-10/12에 규칙이 전면 교체돼 **예전 결과(9/28~10/8의 손익 표)는 지금 코드와 맞지 않는다.** 예전 표는 `docs/decisions-1009.md`와 git 기록에 있다. 10/12에 돌린 결과와 지금 시험 중인 설정 세트는 `docs/status-1012.md`에 있다.
-
-| 순서 | 할 것 | 보려는 것 |
+| 단계 | 할 것 | 완료 기준 |
 | --- | --- | --- |
-| 1 | 기본값(회의 문서 규칙)으로 Playback 하루 | 추세 5단계 배경색, 9종 진입, 단계별 익절이 로그와 화면에 나오는지 |
-| 2 | `docs/status-1012.md`의 설정 세트로 같은 날 | 기본값과의 차이 |
-| 3 | 그 세트에서 하나씩: 역진입 수량 0, `OrganicEnterAtOpen` 켬, `RegimeSuspectNeedsPrice` 켬, `RegimeScoreExit` −1, `OrganicTwoStage` 켬, `OrganicStopSwing` 켬, `OrganicTp1Percent`/`OrganicTp2Percent` 20 / 50, `OrganicTrailAtr` 3 | 각각의 효과 |
-| 4 | 그 세트로 다른 날(7/28~7/30, 아직 안 본 날), 골드(MGC) | 다른 날에도 통하는지 |
-
-같은 기간에서 좋아진 설정을 고르는 것은 과적합이 되기 쉽다. 지금 세트도 10/5~10/8을 보면서 맞춘 것이다. 설정을 정한 뒤에는 그 설정을 고르는 데 쓰지 않은 날로 확인한다.
-
-Playback을 돌린 뒤에는 `TQ_log_종목.txt`의 그 실행 부분(첫 줄이 `====`로 시작)과 `TQ_ml_종목.csv`(거래 단위 결과, 9장)를 같이 본다. 거래 요약 파일 `TQ_trades_종목.csv`는 10/14에 없앴다(같은 내용이 학습 데이터 파일에 있음). 로그에는 진입 사유("진입 … (추세 확정 봉)", "(역진입 50%)"), 청산 사유("전량 청산 … 추세 청산(…)", "전량 청산 조건(…)"), 손절 이동이 시각과 함께 남는다.
+| 1 | 채점기 `--v3` 비교 (`docs/tools/README.md`) | 9월로 고르고 10월로 확인. 기본값(6/20/60, S2 1, RSI 켬)의 지연이 mode=2 3분보다 짧거나 같은지 |
+| 2 | TQ_Regime을 3분봉 차트에 올리고 `ShowDebugVisuals` 켬 | 배경색, Output 창의 추세·의심 줄. Playback 로그로 `--validate` |
+| 3 | `UseTestEntry` 켜고 Playback | 진입 → 2봉째 1차(손절 평단) → 3봉째 2차 → 4봉째 전량 |
+| 4 | 기본값으로 Playback 하루 | 경로별 진입이 로그(`진입 … 경로=E1~E4`)에 남고, 막힌 신호의 사유가 상태 상자·로그(`후보 …`)에 나옴 |
+| 5 | 지시서 8장 시나리오 14개 | 로그의 사유 코드와 손절 이동 줄로 하나씩 |
+| 8 | Strategy Analyzer 9~10월 MNQ·MGC, spec 9장 스위치 하나씩 | 날짜별 손익·최악의 날을 `docs/status-v3.md`에 |
 
 ## 7. 더 긴 데이터 받기
 
-지금은 Connections에 Playback뿐이라 과거 데이터를 자동으로 받지 못한다. 아래 방법은 시도해 볼 만하지만 된다는 확인은 아직 없다.
-
-1. Connections → Playback Connection에 연결한다.
-2. New → Chart에서 `MNQ SEP26`(9월물), Minute 3, 기간을 6/15~9/14로 직접 지정해 연다.
-3. 봉이 그려지면 데이터가 받아진 것이다. Playback 연결을 끊고 Strategy Analyzer에서 9월물로 돌린다.
-
-9월물이 안 받아지면 같은 방법으로 `MNQ DEC26`을 더 긴 기간으로 열어 본다.
+지금은 Connections에 Playback뿐이라 과거 데이터를 자동으로 받지 못한다. 시도해 볼 방법(확인 전): Playback Connection에 연결 → New → Chart에서 종목·Minute 1·기간을 직접 지정해 열기 → 봉이 그려지면 받아진 것. 채점기용 1분봉은 Control Center → Tools → Historical Data → Export(`docs/tools/README.md`).
 
 ## 8. 자주 겪는 문제
 
 | 증상 | 원인과 해결 |
 | --- | --- |
-| Run 버튼이 눌리지 않는다 | Playback에 연결돼 있다. 연결을 끊는다. 종목이 비어 있어도 안 눌린다 |
-| 거래가 0건이다 | 그 기간의 데이터가 없다. 종목과 기간을 확인한다 |
-| 결과가 지난번과 전혀 다르다 | Data Series의 Value(1인지 3인지), 기간의 To 날짜를 확인한다 |
-| `TargetFrameworkAttribute` 중복 에러 | Visual Studio가 `obj` 폴더를 만들었다. 폴더를 지우고 Visual Studio를 닫는다 |
-| 설정값을 바꿨는데 차트의 지표가 그대로다 | 차트에 올려둔 지표는 예전 설정을 기억한다. 지웠다가 다시 올린다 |
+| Run 버튼이 눌리지 않는다 | Playback에 연결돼 있거나 종목이 비어 있다 |
+| 거래가 0건이다 | 데이터가 없거나, 장기선 60봉(3분봉 3시간)이 채워지기 전이다. 기간을 앞으로 늘린다 |
+| `TargetFrameworkAttribute` 중복 에러 | Visual Studio가 `obj` 폴더를 만들었다. 지우고 다시 F5 |
+| 설정을 바꿨는데 차트 지표가 그대로다 | 차트에 올려 둔 지표는 예전 설정을 기억한다. 지웠다가 다시 올린다 |
 
-## 9. 학습 데이터 쌓기 (`MlLogToFile`)
+## 9. 학습 데이터 (`MlLogToFile`)
 
-`MlLogToFile`(기본 켬)이 켜져 있으면 거래가 끝날 때마다 `내 문서\NinjaTrader 8\TQ_ml_종목.csv`에 한 줄이 쌓인다(예: `TQ_ml_MNQ.csv`). Strategy Analyzer 백테스트에서도 쌓이므로, 기간이나 설정을 바꿔 돌릴 때마다 데이터가 늘어난다. 매매 판단에는 영향이 없다. 머신러닝으로 "어떤 신호가 손절로 끝나는지"를 분석하는 데 쓴다.
+거래가 끝날 때마다 `내 문서\NinjaTrader 8\TQ_ml_v3_종목.csv`에 한 줄이 쌓인다(백테스트 포함). v2 파일(`TQ_ml_종목.csv`)과 섞이지 않게 이름을 따로 둔다. `#` 줄은 실행별 설정 요약이고 pandas에서는 `pd.read_csv(path, comment='#')`. 같은 구간을 여러 번 돌리면 같은 거래가 중복으로 쌓이므로 `signal_time`·`instrument`·`settings_id`가 같은 줄은 하나만 남긴다. 최적화 때는 끈다.
 
-- 한 줄 = 거래 1건(분할 진입 한 덩어리). 왼쪽은 **진입 신호 봉에서 잰 특징값**, 오른쪽은 **그 거래의 결과**다.
-- `#`으로 시작하는 줄은 실행별 설정 요약이다. pandas에서는 `pd.read_csv(path, comment='#')`로 읽는다.
-- **같은 구간을 여러 번 돌리면 같은 거래가 중복으로 쌓인다.** 분석할 때 `signal_time`·`instrument`·`settings_id`가 같은 줄은 하나만 남긴다. 차트에 전략을 켤 때도 과거 구간 거래가 다시 쌓인다(`mode` = `hist`).
-- **최적화(Optimize)를 돌릴 때는 끈다.** 설정 조합마다 줄이 쌓이고, 동시에 쓰다가 일부 줄이 빠질 수 있다.
-- 파일을 처음부터 다시 모으려면 파일을 지우거나 이름을 바꾼다. 다음 실행 때 머리글부터 새로 쓴다.
+main과 같은 열 (뜻은 같고 v3에서 바뀐 것만 적음)
 
 | 열 | 뜻 |
 | --- | --- |
-| run_id | 실행 ID(실행 시작 시각). 같은 실행의 거래는 같은 값 |
-| settings_id | 설정 요약의 해시. 같은 설정이면 월물이 달라도 같은 값. 설정 내용은 `#` 줄에 있다 |
-| mode | `hist` = 과거 데이터(백테스트 포함), `live` = 실시간·Playback |
-| instrument, bar_min | 종목(월물 포함), 진입 봉 분 |
-| signal_time, weekday, hhmm | 신호 봉 시각, 요일(0 = 일요일), 시분(예: 2245, 15 = 00:15) |
-| strategy, regime, dir | 세부 규칙(UpLong, UpSusLong, UpSusShort, DnShort, DnLong, DnSusLong, DnSusShort, SideLong, SideShort), 추세(+2 상승 / +1 하락 전환 의심 / 0 횡보 / −1 상승 전환 의심 / −2 하락), 방향(1 매수, −1 매도). **10/12 전에 쌓인 줄은 예전 6종 이름과 +1/0/−1이라 섞어 쓰지 않는다** |
-| via_t2 | 10/14부터 항상 0 (`TrendT2Entry`를 없앴음. 열 순서를 지키려고 남김). 그 전 줄의 1 = 밴드 조건 없이 MACD 전환 + 크로스로만 들어간 추세 방향 진입 |
-| close, atr, atr_pct | 신호 봉 종가, ATR(14), ATR / 종가 × 100 |
-| stop_dist_atr | 신호 봉 종가 기준 손절 거리 / ATR |
-| mid_dist_atr, sma20_dist_atr | 종가와 밴드 중심선(EMA26), 진입 봉 이동평균(`ExitSmaPeriod`, 기본 18선. 열 이름은 예전 그대로)의 거리 / ATR (+ 위, − 아래) |
-| macd_hist_atr, macd_slope_atr | MACD 히스토그램 / ATR, 직전 봉 대비 변화 / ATR |
-| k, d, k_minus_d, rsi | 스토캐스틱 %K, %D, 그 차이, RSI(14) |
-| macd_up, macd_down, golden, dead | 신호 봉에서 각 조건이 참이면 1 |
-| bar_range_atr, swing_range_atr | 신호 봉 고저폭 / ATR, 최근 5봉 고저폭 / ATR |
-| vol_ratio | 신호 봉 거래량 / 직전 20봉 평균 거래량 |
-| htf_sma20_dist_atr | 추세 봉(10분봉) 종가와 그 봉 단기 이동평균(`RegimeFast`)의 거리 / ATR |
-| regime_age | 지금 추세가 추세 봉 기준 몇 봉째 이어지는지 (최대 200) |
-| regime_changes6 | 최근 추세 봉 6개 동안 추세가 바뀐 횟수. 추세가 자주 뒤집히는 날을 잡기 위함 |
-| session_entry_no | 이번 대회 구간에서 몇 번째 진입인지 |
-| prev_r, min_since_prev_exit | 직전 거래 손익(R), 직전 거래 청산 뒤 지난 분 |
-| exit_time, hold_bars, qty, avg_price | 마지막 청산 시각, 보유 봉 수, 체결 수량, 평단 |
-| risk_pts | 체결 직후 평단에서 손절가까지 거리(포인트, 1R). 갭으로 즉시 청산된 거래는 빈칸 |
-| pnl_pts, pnl_usd, pnl_r | 계약당 평균 손익(포인트), 전체 손익(달러, 수수료 제외), 손익 / 1R |
-| mfe_pts, mae_pts, mfe_r, mae_r | 최대 유리폭·불리폭(포인트, R) |
-| win | 손익이 0보다 크면 1 |
-| exits | 청산 순서(예: `xDnS1 > Stop loss`) |
+| run_id, settings_id, mode, instrument, bar_min | 실행 ID, 설정 해시, `hist`/`live`, 종목, 진입 봉 분 |
+| signal_time, weekday, hhmm | 신호 봉 시각, 요일, 시분 |
+| strategy, regime, dir | 포지션 종류(TL / TS / SL / SS), 추세(+1 / 0 / −1), 방향 |
+| via_t2 | v3에는 없음. 항상 0 (열 순서 유지) |
+| close, atr, atr_pct, stop_dist_atr, mid_dist_atr, sma20_dist_atr | 신호 봉 종가, ATR(14), ATR/종가 %, 손절 거리/ATR, 밴드 중심선·진입 봉 18선과의 거리/ATR |
+| macd_hist_atr, macd_slope_atr, k, d, k_minus_d, rsi, macd_up, macd_down, golden, dead | 진입 봉 지표 |
+| bar_range_atr, swing_range_atr, vol_ratio | 봉 고저폭/ATR, 최근 5봉 고저폭/ATR, 거래량 비 |
+| htf_sma20_dist_atr, regime_age, regime_changes6 | 추세 봉 종가와 단기선 거리/ATR, 지금 추세가 이어진 추세 봉 수, 최근 6봉 추세 변경 횟수 |
+| session_entry_no, prev_r, min_since_prev_exit | 구간 내 진입 순번, 직전 거래 R, 직전 청산 뒤 분 |
+| exit_time, hold_bars, qty, avg_price, risk_pts, pnl_pts, pnl_usd, pnl_r, mfe_pts, mae_pts, mfe_r, mae_r, win, exits | 결과 |
+
+v3 추가 열 (7장)
+
+| 열 | 뜻 |
+| --- | --- |
+| path | 진입 경로 E1(추세 시작) / E2(추세 눌림) / E3(장전 박스 돌파) / E4(횡보) / TEST |
+| session | pre(장전) / post(장후) |
+| s1, s2, s3, s4, f1, f2, slow, fast | 신호 봉 시점 추세 봉 점수 항목(+1 / 0 / −1, RSI를 끄면 s4 빈칸)과 S, F |
+| pre_box_high, pre_box_low | 장전 박스 (진입 시점까지 기록된 값) |
+| atr_entry | 신호 봉 1분 ATR (= atr) |
+| rr_expected | E1의 손익비 (2차 익절까지 남은 폭 ÷ 예상 손절 거리). 다른 경로는 빈칸 |
+| fallback_entry | 최소 진입 보장으로 들어갔으면 1 |
+| suspect_events | 보유 중 본 반대 방향 의심 이벤트 수 |
+| suspect_action | 마지막 의심 처리: SUSPECT / SUSPECT_STRONG / CANCEL(해제·확인 없음) |
+| tp_stages_hit | 체결된 익절 단계 수 |
+| trail_used | 트레일링으로 손절이 한 번이라도 옮겨졌으면 1 |
+| exit_reason | 마지막 청산 사유 코드: TP1, TP2, LAST_MA, TRAIL, STOP, BE_STOP, SUSPECT, SUSPECT_STRONG, TREND_END, OPP_TREND, ENTRY_T2, SIDE_REST_BAND, SIDE_MACD, SIDE_CROSS, FLATTEN_TIME, GAP |

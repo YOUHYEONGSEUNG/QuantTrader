@@ -12,158 +12,100 @@ using NinjaTrader.NinjaScript;
 namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 {
 	/// <summary>
-	/// 10분봉 추세 5단계 (spec 3장, docs/interface.md):
-	/// +2 상승추세, +1 하락 전환 의심, 0 횡보, −1 상승 전환 의심, −2 하락추세.
-	/// 부호는 바탕이 되는 추세의 방향이다 (+1은 상승추세 조건이 유지되는 중에 뜬 의심).
-	/// 입력 시리즈가 추세를 판단하는 봉이어야 한다. 전략에서는 TQ_Regime(BarsArray[1], ...)로 호출한다.
-	/// 이동평균 Slow가 채워지기 전(봉 수 부족)에는 Regime이 NaN이다.
+	/// v3 추세 판단 (v3 지시서 3장, docs/interface.md). 입력 시리즈 = 추세 봉 (전략에서 TQ_Regime(BarsArray[regimeBip], ...)).
+	/// 느린 점수 S(가격 vs 중기선, 구조, MACD선 부호, RSI)와 빠른 점수 F(단기 가격, MACD선 기울기)로
+	/// 추세 +1 상승 / 0 횡보 / −1 하락을 정하고, 추세 중 F가 반대로 꺾이면 의심 이벤트를 낸다.
+	/// 의심은 상태가 아니라 이벤트다: 추세 값은 그대로 두고 SuspectEvent에 한 번만 낸다.
+	/// 데이터가 모자라면(장기선·MACD·RSI가 다 채워지기 전) Regime은 NaN이다.
 	/// </summary>
 	public class TQ_Regime : Indicator
 	{
 		private SMA				smaFast;
 		private SMA				smaMid;
 		private SMA				smaSlow;
-		private TQ_MacdTurn		macdTurn;	// MACD선과 히스토그램 연속 증가·감소 판정
+		private MACD			macd;
 		private RSI				rsi;
-		private SMA				rsiAvg;		// RSI의 최근 평균 (RsiRelative)
-		private double			rsiCenter		= double.NaN;	// 화면 표시용: 지금 RSI 중심
-		private MIN				stochLow;	// 스토캐스틱은 TQ_Signals·TQ_Stochastic과 같은 식으로 직접 계산한다
-		private MAX				stochHigh;
-		private SMA				stochK;
-		private SMA				stochD;
-		private Series<double>	stochRawK;
-		private Series<double>	kSeries;
+		private Series<double>	slowScore;
+		private Series<double>	fastScore;
+		private Series<int>		trendStart;
+		private Series<int>		suspectEvent;
+		private Series<int>		suspectActive;
 		private Brush			upBrush;
 		private Brush			downBrush;
-		private Brush			upSuspectBrush;
-		private Brush			downSuspectBrush;
-		private int				lastRegime;
+		private Brush			upSuspectBrush;		// 상승추세 중 하락의심 (주황)
+		private Brush			downSuspectBrush;	// 하락추세 중 상승의심 (하늘색)
+		private int				trend;				// +1 상승추세, 0 횡보, −1 하락추세
+		private int				suspect;			// 의심 중이면 그 방향: 상승추세 중 하락의심 −1, 하락추세 중 상승의심 +1, 없으면 0
+		private string			scoreText	= "";
 		private int				minBars;
-
-		// 의심 상태는 한 번 뜨면 유지한다 (spec 3장). 추세 조건이 깨지거나, SuspectReturn이 켜져 있고 반대 신호가 나오면 푼다
-		private bool			suspectInUp;
-		private bool			suspectInDown;
-		private string			suspectReason	= "";
-		private int				aligned;		// +1 정배열, −1 역배열, 0 둘 다 아님
-		private int				lastDir;		// 마지막으로 인정된 추세의 방향 (NoSideways용): +1 상승, −1 하락, 0 아직 없음
-		private int				trendDir;		// 점수 방식(Mode 2)의 현재 추세 방향: +1 상승, −1 하락, 0 없음
-		private int				lastEventDir;	// 가장 최근 사건의 방향: +1 상승 쪽(MACD 상승 전환·골든크로스·상승 다이버전스), −1 하락 쪽
-		private int				lastEventBar	= -1;	// 그 사건이 나온 봉 번호
-		private int				score;			// 점수 방식의 합계 (−5 ~ +5)
-		private string			scoreText		= "";	// 화면·로그용: 지표별 방향
-		// 추세 확정·종료의 연속 봉 수 (TrendConfirmBars / TrendExitBars): 각 조건이 몇 봉째 연속으로 맞는지
-		private int				upStartRun;
-		private int				dnStartRun;
-		private int				upEndRun;
-		private int				dnEndRun;
-		// 의심의 근거 기록 (SuspectMinEvidence): 봉마다 나온 근거를 비트로. 1 = 다이버전스, 2 = MACD 전환, 4 = 크로스, 8 = 가격 항목이 추세 방향이 아님
-		private Series<int>		bearEvidence;	// 하락 전환 의심 쪽 근거
-		private Series<int>		bullEvidence;	// 상승 전환 의심 쪽 근거
 
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
 			{
-				Description					= "10분봉 추세 5단계: +2 상승 / +1 하락 전환 의심 / 0 횡보 / −1 상승 전환 의심 / −2 하락 (spec 3장)";
+				Description					= "v3 추세 판단: 느린 점수 S + 빠른 점수 F → +1 상승 / 0 횡보 / −1 하락, 추세 중 의심 이벤트 (v3 지시서 3장)";
 				Name						= "TQ_Regime";
-				Calculate					= Calculate.OnBarClose;	// spec 3장: 추세 봉이 마감될 때마다 다시 계산
-				IsOverlay					= true;		// 가격 패널에 얹어 별도 패널을 만들지 않는다(ShowPlots 꺼지면 투명이라 안 보임)
-				IsAutoScale					= false;	// 오버레이로 올라가도 가격 패널 스케일을 건드리지 않게 한다
+				Calculate					= Calculate.OnBarClose;	// 추세 봉이 마감될 때마다 다시 계산
+				IsOverlay					= true;		// 가격 패널에 얹는다 (ShowPlots가 꺼져 있으면 선은 투명)
+				IsAutoScale					= false;	// 가격 패널 스케일을 건드리지 않는다
 				IsSuspendedWhileInactive	= true;
 
-				// spec 8장 기본값
+				// v3 지시서 5-2 기본값
 				Fast						= 6;
-				Mid							= 18;
-				Slow						= 36;
+				Mid							= 20;
+				Slow						= 60;
 				ShowDebugVisuals			= false;
 				MacdFast					= 12;
 				MacdSlow					= 26;
 				MacdSmooth					= 9;
-				HistBars					= 2;		// MACD 히스토그램이 몇 봉 연속 줄어야(늘어야) 전환으로 볼지
 				RsiPeriod					= 14;
-				RsiHigh						= 60;		// 하락 전환 의심: RSI가 이 값 이상
-				RsiLow						= 40;		// 상승 전환 의심: RSI가 이 값 이하
-				DivBars						= 15;		// 다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지
-				PivotStrength				= 2;		// 고점·저점으로 인정할 좌우 봉 수
-				StochPeriodK				= 10;
-				StochSmooth					= 5;
-				StochPeriodD				= 5;
-				CrossLow					= 20;
-				CrossHigh					= 80;
-				CrossFilterBars				= 5;
-				SuspectReturn				= true;		// 의심 중 반대 신호가 나오면 원래 추세로 돌아감 (spec 3장 시나리오 2)
-				RsiLookback					= 1;		// 의심의 RSI 조건을 최근 몇 봉 안에서 볼지. 1 = 같은 봉에서만
-				Mode						= 1;		// 1 = 회의 문서 정의(정배열 AND MACD선 부호), 2 = 점수 방식(가격·MACD·RSI·스토캐스틱)
-				NoSideways					= false;	// 켜면 횡보 없이 상승·하락추세와 각각의 전환 의심만 낸다
-				ScoreEventBars				= 3;		// 점수 방식: 최근 몇 봉 안의 사건을 점수에 넣을지. 0 = 안 넣음
-				RsiRelative					= false;	// 켜면 의심의 RSI 조건을 고정 기준 대신 최근 평균에서 벗어난 폭으로 본다
-				RsiCenterBars				= 20;		// RSI 중심을 구하는 봉 수
-				RsiOffset					= 8;		// 중심에서 이만큼 벗어나야 과열·침체로 본다
-				ScoreExit					= 0;		// 점수 방식: 상승추세는 점수가 이 값 이하로 내려가면 끝난다 (하락추세는 부호 반대)
-				SuspectNeedsPrice			= false;	// 켜면 가격이 아직 추세 방향(종가가 단기선 위 + 단기선 상승)이면 의심을 띄우지 않는다
-				ScoreMin					= 2;		// 점수 방식: 추세로 인정할 최소 점수 (같은 방향 지표 수 − 반대 방향 지표 수)
-				ScoreRsiBand				= 5;		// 점수 방식: RSI가 50에서 이만큼 벗어나야 방향으로 인정 (5면 55 이상 / 45 이하)
-				// 2026-10-14 추가 (spec 3-1). 기본값은 그 전과 같은 동작
-				SuspectMaxScore				= 5;		// 의심은 추세 점수가 이 값 이하(하락추세 쪽은 −값 이상)일 때만. 5 = 제한 없음
-				SuspectMinEvidence			= 1;		// 의심에 필요한 근거 종류 수. 1 = 근거 하나로 충분
-				SuspectEvidenceBars			= 2;		// 근거를 모으는 봉 수 (현재 포함)
-				TrendConfirmBars			= 1;		// 추세 시작 조건이 몇 봉 연속이어야 추세로 인정할지
-				TrendExitBars				= 1;		// 추세 종료 조건이 몇 봉 연속이어야 추세를 끝낼지
-				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다(값은 그대로, 전략 동작 무관)
+				S2Mode						= 1;		// 1 = 중기선 > 장기선, 2 = 장기선이 SlopeBars봉 전보다 높음
+				SlopeBars					= 5;
+				UseRsi						= true;		// S4 RSI 항목 사용
+				RsiBand						= 5;		// RSI가 50에서 이만큼 벗어나야 +1 / −1
+				MacdSlopeBars				= 2;		// F2: MACD선이 몇 봉 연속 커져야(작아져야) 하는지
+				TrendStartFast				= 2;		// 추세 시작: F ≥ 이 값 (하락은 ≤ −값)
+				TrendStartSlow				= 2;		// 추세 시작: S ≥ 이 값
+				TrendEndSlow				= 0;		// 상승추세 끝: S ≤ 이 값 (하락추세 끝: S ≥ −값)
+				SuspectFast					= 2;		// 의심: 추세 중 F가 반대로 이 값에 닿은 첫 봉
+				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다 (값·전략 동작은 그대로)
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
 				AddPlot(Brushes.Gold, "Regime");
 				AddPlot(Brushes.Gray, "SmaFast");
-				AddPlot(Brushes.DodgerBlue, "MacdLine");
-				AddPlot(Brushes.MediumPurple, "Rsi");
+				AddPlot(Brushes.DodgerBlue, "SmaMid");
+				AddPlot(Brushes.MediumPurple, "SmaSlow");
+				AddPlot(Brushes.Orange, "MacdLine");
+				AddPlot(Brushes.LightGreen, "Rsi");
 			}
 			else if (State == State.Configure)
 			{
-				// ShowPlots가 꺼져 있으면 플롯 선을 투명으로 바꿔 시각적으로만 숨긴다.
-				// SetDefaults가 아니라 여기서 하는 이유: 저장된 설정값이 적용된 뒤라 사용자가 켠 값이 반영된다
+				// ShowPlots가 꺼져 있으면 플롯 선을 투명으로 바꿔 보이지만 않게 한다 (저장된 설정값이 적용된 뒤라 여기서)
 				if (!ShowPlots)
 					for (int i = 0; i < Plots.Length; i++)
 						Plots[i].Brush = Brushes.Transparent;
 			}
 			else if (State == State.DataLoaded)
 			{
-				smaFast		= SMA(Fast);
-				smaMid		= SMA(Mid);
-				smaSlow		= SMA(Slow);
-				macdTurn	= TQ_MacdTurn(MacdFast, MacdSlow, MacdSmooth, HistBars, 14, 0);
-				rsi			= RSI(RsiPeriod, 3);	// 두 번째 인자는 평균선용, RSI 값과 무관
-				rsiAvg		= SMA(Values[3], RsiCenterBars);	// RSI 플롯의 평균 = 그 시점의 RSI 중심 (RsiRelative용)
+				smaFast			= SMA(Fast);
+				smaMid			= SMA(Mid);
+				smaSlow			= SMA(Slow);
+				macd			= MACD(MacdFast, MacdSlow, MacdSmooth);
+				rsi				= RSI(RsiPeriod, 3);	// 두 번째 인자는 평균선용, RSI 값과 무관
+				slowScore		= new Series<double>(this);
+				fastScore		= new Series<double>(this);
+				trendStart		= new Series<int>(this);
+				suspectEvent	= new Series<int>(this);
+				suspectActive	= new Series<int>(this);
 
-				// 스토캐스틱: 원시 %K → SMA(StochSmooth) = %K → SMA(StochPeriodD) = %D (.claude/rules/ninjascript.md)
-				stochRawK	= new Series<double>(this);
-				kSeries		= new Series<double>(this);
-				stochLow	= MIN(Low, StochPeriodK);
-				stochHigh	= MAX(High, StochPeriodK);
-				stochK		= SMA(stochRawK, StochSmooth);
-				stochD		= SMA(kSeries, StochPeriodD);
+				trend		= 0;
+				suspect		= 0;
+				scoreText	= "";
 
-				lastRegime		= int.MinValue;
-				suspectInUp		= false;
-				suspectInDown	= false;
-				suspectReason	= "";
-				aligned			= 0;
-				trendDir		= 0;
-				lastEventDir	= 0;
-				lastEventBar	= -1;
-				lastDir			= 0;
-				score			= 0;
-				scoreText		= "";
-				upStartRun		= 0;
-				dnStartRun		= 0;
-				upEndRun		= 0;
-				dnEndRun		= 0;
-				bearEvidence	= new Series<int>(this);
-				bullEvidence	= new Series<int>(this);
+				// 참조하는 가장 먼 값: 장기선, MACD(장기 + 시그널), RSI 기간, 장기선 기울기, MACD선 기울기 연속 봉 수
+				minBars		= Math.Max(Slow - 1, Math.Max(MacdSlow + MacdSmooth, Math.Max(RsiPeriod, Math.Max(SlopeBars, MacdSlopeBars + 1))));
 
-				// 참조하는 가장 먼 인덱스: 이동평균 Slow, 다이버전스 DivBars + PivotStrength봉 전, 크로스 필터
-				minBars		= Math.Max(Slow - 1, Math.Max(DivBars + PivotStrength, Math.Max(CrossFilterBars, Math.Max(HistBars, Math.Max(RsiLookback + RsiCenterBars, SuspectEvidenceBars)))));
-
-				// 검증용 배경색. 직접 만든 브러시는 한 번만 만들고 Freeze한다
+				// 검증용 배경색. 직접 만든 브러시는 한 번만 만들고 Freeze한다 (main 색 그대로)
 				upBrush				= new SolidColorBrush(Color.FromArgb(45, 0, 200, 0));
 				downBrush			= new SolidColorBrush(Color.FromArgb(45, 230, 0, 0));
 				upSuspectBrush		= new SolidColorBrush(Color.FromArgb(45, 255, 165, 0));
@@ -177,290 +119,143 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		protected override void OnBarUpdate()
 		{
-			// 숫자 값
-			double stochLL		= stochLow[0];
-			double stochRange	= stochHigh[0] - stochLL;
-			// 범위가 0이면(고가=저가) 직전 값 유지
-			stochRawK[0]	= stochRange == 0 ? (CurrentBar == 0 ? 50 : stochRawK[1]) : 100 * (Close[0] - stochLL) / stochRange;
-			kSeries[0]		= stochK[0];
-			double k0		= kSeries[0];
-			double d0		= stochD[0];
+			// 표시·청산·기록용 값
+			Values[1][0]	= smaFast[0];
+			Values[2][0]	= smaMid[0];
+			Values[3][0]	= smaSlow[0];
+			Values[4][0]	= macd[0];
+			Values[5][0]	= rsi[0];
+			trendStart[0]		= 0;
+			suspectEvent[0]		= 0;
+			suspectActive[0]	= 0;
 
-			SmaFast[0]		= smaFast[0];
-			MacdLine[0]		= macdTurn.Values[1][0];
-			Rsi[0]			= rsi[0];
-
-			// 데이터 부족 가드: 이동평균 Slow가 채워지기 전에는 추세를 내지 않는다
+			// 데이터 가드: 장기선·MACD·RSI가 다 채워지기 전에는 추세를 내지 않는다
 			if (CurrentBar < minBars)
 			{
-				Regime[0] = double.NaN;
+				Values[0][0]	= double.NaN;
+				slowScore[0]	= 0;
+				fastScore[0]	= 0;
 				return;
 			}
 
+			double c	= Close[0];
 			double f	= smaFast[0];
 			double m	= smaMid[0];
 			double s	= smaSlow[0];
-			double ml	= MacdLine[0];
-			double r0	= Rsi[0];
+			double ml	= macd[0];
+			double r0	= rsi[0];
 
-			aligned		= f > m && m > s ? 1 : f < m && m < s ? -1 : 0;
+			// ── 느린 점수 S (3-1) ──
+			int s1 = Sign(c - m);																		// S1 가격 vs 중기선
+			int s2 = S2Mode == 1 ? Sign(m - s) : Sign(s - smaSlow[SlopeBars]);							// S2 구조: 중기 > 장기, 또는 장기선 기울기
+			int s3 = Sign(ml);																			// S3 MACD선 부호
+			int s4 = !UseRsi ? 0 : r0 >= 50 + RsiBand ? 1 : r0 <= 50 - RsiBand ? -1 : 0;				// S4 RSI
 
-			// MACD 히스토그램 전환 (spec 2장 MACD 전환과 같은 정의, 최소 변화폭 없음):
-			// 히스토그램이 HistBars봉 연속 감소(증가)한 것이 처음 확인된 봉 하나에서만 참이다
-			bool histDown	= macdTurn.TurnDown[0];
-			bool histUp		= macdTurn.TurnUp[0];
-
-			// 골든·데드크로스 (spec 2장 정의 그대로): %K·%D 교차 AND 최근 CrossFilterBars봉 안에 %K가 20 아래/80 위
-			double k1 = kSeries[1];
-			double d1 = stochD[1];
-			bool kWasLow	= false;
-			bool kWasHigh	= false;
-			for (int i = 0; i < CrossFilterBars; i++)
+			// ── 빠른 점수 F (3-1) ──
+			int f1 = c > f && f > smaFast[1] ? 1 : c < f && f < smaFast[1] ? -1 : 0;					// F1 단기 가격
+			bool rising = true, falling = true;															// F2 MACD선 기울기: MacdSlopeBars봉 연속
+			for (int j = 0; j < MacdSlopeBars; j++)
 			{
-				if (kSeries[i] < CrossLow)	kWasLow = true;
-				if (kSeries[i] > CrossHigh)	kWasHigh = true;
+				if (!(macd[j] > macd[j + 1]))	rising	= false;
+				if (!(macd[j] < macd[j + 1]))	falling	= false;
 			}
-			bool golden	= k1 <= d1 && k0 > d0 && kWasLow;
-			bool dead	= k1 >= d1 && k0 < d0 && kWasHigh;
+			int f2 = rising ? 1 : falling ? -1 : 0;
 
-			// spec 3장 RSI 다이버전스: 최근 DivBars봉 안에 생긴 확연한 고점(좌우 PivotStrength봉보다 높은 봉) 중 가장 높은 것과 비교.
-			// 현재 봉이 그 고점보다 높은 새 고점인데 RSI는 그때보다 낮으면 하락 다이버전스. 상승 쪽은 저점으로 거울상.
-			// 고점·저점이 여러 개면 가장 높은(낮은) 것, 같으면 최근 것
-			bool bearDiv = false;
-			bool bullDiv = false;
-			int hiIdx = -1, loIdx = -1;
-			for (int i = PivotStrength; i <= DivBars; i++)
+			int S = s1 + s2 + s3 + s4;
+			int F = f1 + f2;
+			slowScore[0]	= S;
+			fastScore[0]	= F;
+			scoreText		= "S1" + Arrow(s1) + " S2" + Arrow(s2) + " S3" + Arrow(s3) + (UseRsi ? " S4" + Arrow(s4) : "")
+								+ " │ F1" + Arrow(f1) + " F2" + Arrow(f2);
+
+			// ── 상태 전이 (3-2, 상승 기준이고 하락은 거울상) ──
+			//  · 추세 아님 → F ≥ TrendStartFast AND S ≥ TrendStartSlow 이면 상승추세 (그 봉 = 추세 시작 봉)
+			//  · 상승추세 → 하락추세 시작 조건이면 바로 하락추세, 아니고 S ≤ TrendEndSlow 이면 횡보
+			//  · 확정 연속 봉 수는 두지 않는다 (흔들림은 시작 S ≥ 2 / 종료 S ≤ 0 기준 차이로 막는다)
+			bool startUp	= F >= TrendStartFast && S >= TrendStartSlow;
+			bool startDn	= F <= -TrendStartFast && S <= -TrendStartSlow;
+			int prev		= trend;
+			if (trend == 1)
 			{
-				bool pivotHigh	= true;
-				bool pivotLow	= true;
-				for (int j = 1; j <= PivotStrength; j++)
-				{
-					if (!(High[i] > High[i - j] && High[i] > High[i + j]))	pivotHigh = false;
-					if (!(Low[i] < Low[i - j] && Low[i] < Low[i + j]))		pivotLow = false;
-				}
-				if (pivotHigh && (hiIdx < 0 || High[i] > High[hiIdx]))	hiIdx = i;
-				if (pivotLow && (loIdx < 0 || Low[i] < Low[loIdx]))		loIdx = i;
+				if (startDn)					trend = -1;
+				else if (S <= TrendEndSlow)		trend = 0;
 			}
-			if (hiIdx >= 0)	bearDiv = High[0] > High[hiIdx] && r0 < Rsi[hiIdx];
-			if (loIdx >= 0)	bullDiv = Low[0] < Low[loIdx] && r0 > Rsi[loIdx];
-
-			// 가장 최근의 사건과 그 방향을 기억한다 (점수 방식의 ⑤번 항목용).
-			// 상승 쪽 사건 = MACD 상승 전환, 골든크로스, 상승 다이버전스. 하락 쪽은 그 반대. 한 봉에 양쪽이 같이 나오면 사건으로 치지 않는다
-			bool bullEvent = histUp || golden || bullDiv;
-			bool bearEvent = histDown || dead || bearDiv;
-			if (bullEvent != bearEvent)
+			else if (trend == -1)
 			{
-				lastEventDir	= bullEvent ? 1 : -1;
-				lastEventBar	= CurrentBar;
-			}
-
-			// spec 3장 점수 방식 (Mode 2): 아래 항목이 각각 상승 +1 / 하락 −1 / 중립 0을 내고 합친다 (−5 ~ +5, 사건을 끄면 −4 ~ +4)
-			//  ① 가격: 종가가 단기선 위에 있고 단기선이 오르는 중이면 +1, 아래에 있고 내리는 중이면 −1
-			//  ② MACD: 히스토그램(MACD선 − 시그널선)이 0보다 크고 직전 봉보다 줄지 않았으면 +1, 0보다 작고 늘지 않았으면 −1
-			//  ③ RSI: 50 + ScoreRsiBand 이상이면 +1, 50 − ScoreRsiBand 이하면 −1
-			//  ④ 스토캐스틱: %K가 %D 위이고 50 위면 +1, %D 아래이고 50 아래면 −1
-			//  ⑤ 사건: 최근 ScoreEventBars봉(현재 포함) 안의 가장 최근 사건이 상승 쪽이면 +1, 하락 쪽이면 −1. 0이면 이 항목을 쓰지 않는다
-			// ②와 ④는 방향이 맞아도 힘이 빠지는 중이면(히스토그램이 줄어듦, %K가 반대쪽 절반에 있음) 0점으로 둔다
-			double hist		= macdTurn.Hist[0];
-			double hist1	= macdTurn.Hist[1];
-			int cMa		= Close[0] > f && f > smaFast[1] ? 1 : Close[0] < f && f < smaFast[1] ? -1 : 0;
-			int cMacd	= hist > 0 && hist >= hist1 ? 1 : hist < 0 && hist <= hist1 ? -1 : 0;
-			int cRsi	= r0 >= 50 + ScoreRsiBand ? 1 : r0 <= 50 - ScoreRsiBand ? -1 : 0;
-			int cSto	= k0 > d0 && k0 > 50 ? 1 : k0 < d0 && k0 < 50 ? -1 : 0;
-			int cEvt	= ScoreEventBars > 0 && lastEventBar >= 0 && CurrentBar - lastEventBar < ScoreEventBars ? lastEventDir : 0;
-			score		= cMa + cMacd + cRsi + cSto + cEvt;
-			scoreText	= "가격" + Arrow(cMa) + " MACD" + Arrow(cMacd) + " RSI" + Arrow(cRsi) + " 스토" + Arrow(cSto)
-							+ (ScoreEventBars > 0 ? " 사건" + Arrow(cEvt) : "");
-
-			// 추세의 시작 조건과 종료 조건
-			//  · Mode 2 (점수 방식): 시작 = 가격 조건(①)이 맞고 점수가 ScoreMin 이상. 종료 = 점수가 ScoreExit 이하.
-			//    벗어나는 기준을 들어가는 기준보다 느슨하게 둔다. 같은 기준을 쓰면 지표 하나가 흔들릴 때마다 추세가 켜졌다 꺼졌다 한다
-			//  · Mode 1 (spec 3장 회의 문서 정의): 시작 = 정배열 AND MACD선 > 0 (하락은 반대). 종료 = 그 조건이 깨짐
-			bool startUp, startDn, endUp, endDn;
-			if (Mode == 2)
-			{
-				startUp	= cMa > 0 && score >= ScoreMin;
-				startDn	= cMa < 0 && score <= -ScoreMin;
-				endUp	= score <= ScoreExit;
-				endDn	= score >= -ScoreExit;
+				if (startUp)					trend = 1;
+				else if (S >= -TrendEndSlow)	trend = 0;
 			}
 			else
 			{
-				startUp	= aligned > 0 && ml > 0;
-				startDn	= aligned < 0 && ml < 0;
-				endUp	= !startUp;
-				endDn	= !startDn;
+				if (startUp)					trend = 1;
+				else if (startDn)				trend = -1;
 			}
+			if (trend != prev && trend != 0)
+				trendStart[0] = trend;
 
-			// spec 3-1 추세 확정·종료의 연속 봉 수 (TrendConfirmBars / TrendExitBars, 기본 1 = 그 봉에서 바로):
-			// 시작 조건이 TrendConfirmBars봉 연속이어야 추세로 인정하고, 종료 조건이 TrendExitBars봉 연속이어야 끝낸다.
-			// 2026-10-14 로그: 대회 시간 3분봉 40봉 동안 추세 값이 11~16번 바뀌었다(약 3봉에 한 번). 한 봉짜리 흔들림을 거르기 위함
-			upStartRun	= startUp ? upStartRun + 1 : 0;
-			dnStartRun	= startDn ? dnStartRun + 1 : 0;
-			upEndRun	= endUp ? upEndRun + 1 : 0;
-			dnEndRun	= endDn ? dnEndRun + 1 : 0;
-			if (trendDir == 1 && upEndRun >= TrendExitBars)		trendDir = 0;
-			if (trendDir == -1 && dnEndRun >= TrendExitBars)	trendDir = 0;
-			if (trendDir != 1 && upStartRun >= TrendConfirmBars)		trendDir = 1;
-			else if (trendDir != -1 && dnStartRun >= TrendConfirmBars)	trendDir = -1;
-			bool upCond = trendDir == 1;
-			bool dnCond = trendDir == -1;
-
-			// spec 3-1 의심의 근거 (SuspectMinEvidence): 이 봉의 근거를 기록하고, 최근 SuspectEvidenceBars봉 동안 나온 근거의 종류 수를 센다.
-			// 근거 = 다이버전스, MACD 전환, 크로스, 가격 항목(①)이 더는 추세 방향이 아님(하락 전환 의심 쪽은 cMa ≤ 0)
-			bearEvidence[0]	= (bearDiv ? 1 : 0) | (histDown ? 2 : 0) | (dead ? 4 : 0) | (cMa <= 0 ? 8 : 0);
-			bullEvidence[0]	= (bullDiv ? 1 : 0) | (histUp ? 2 : 0) | (golden ? 4 : 0) | (cMa >= 0 ? 8 : 0);
-			int bearKinds = EvidenceKinds(bearEvidence);
-			int bullKinds = EvidenceKinds(bullEvidence);
-			// spec 3-1 의심은 추세의 힘이 빠진 뒤에만 (SuspectMaxScore, 기본 5 = 제한 없음): 하락 전환 의심은 점수 ≤ SuspectMaxScore일 때만,
-			// 상승 전환 의심은 점수 ≥ −SuspectMaxScore일 때만 띄운다.
-			// 2026-10-14 로그(의심 17건): 점수 ±1 이하에서 뜬 의심은 7건 모두 30분 안에 의심 방향으로 더 크게 움직였고, ±2 이상에서 뜬 것은 10건 중 3건
-			bool bearRoom = score <= SuspectMaxScore;
-			bool bullRoom = score >= -SuspectMaxScore;
-
-			// spec 3장 의심의 RSI 조건: 최근 RsiLookback봉(현재 포함) 안에 기준을 넘은 적이 있으면 충족.
-			// MACD 전환·크로스는 가격이 꺾인 뒤 1~2봉 늦게 확인되는데 그때는 RSI가 이미 기준 안쪽으로 돌아와 있어서,
-			// 같은 봉에서만 보면(RsiLookback 1) 급하게 꺾이는 장에서 의심이 뜨지 않는다 (2026-10-12 Playback)
-			bool rsiWasHigh	= false;
-			bool rsiWasLow	= false;
-			// RsiRelative: 고정 기준(RsiHigh / RsiLow) 대신 그 시점의 RSI 중심(최근 RsiCenterBars봉 평균)에서
-			// RsiOffset만큼 벗어났는지로 본다. RSI는 오르는 날에는 60 위에 오래 머물고 그런 날의 하락 구간에서는 40까지 내려가지 않아서,
-			// 고정 기준으로는 하락 전환 의심만 자주 뜨고 상승 전환 의심은 거의 뜨지 않는다 (2026-10-12 Playback: 60 이상 37봉, 40 이하 8봉)
-			for (int i = 0; i < RsiLookback; i++)
+			// ── 의심 이벤트 (3-2) ──
+			// 추세가 바뀌면 의심을 지운다. 추세 중 F가 반대로 SuspectFast에 닿은 첫 봉에서 이벤트 한 번, F가 0 이상(하락추세는 0 이하)으로 돌아오면 해제.
+			// 해제된 뒤 다시 닿으면 다시 이벤트
+			if (trend != prev || trend == 0)
+				suspect = 0;
+			if (trend != 0)
 			{
-				double hiLine = RsiRelative ? rsiAvg[i] + RsiOffset : RsiHigh;
-				double loLine = RsiRelative ? rsiAvg[i] - RsiOffset : RsiLow;
-				if (Rsi[i] >= hiLine)	rsiWasHigh = true;
-				if (Rsi[i] <= loLine)	rsiWasLow = true;
-			}
-			rsiCenter = rsiAvg[0];
-
-			int r = 0;	// spec 3장 횡보
-			if (upCond)
-			{
-				suspectInDown = false;
-				// 하락 전환 의심: RSI ≥ RsiHigh (최근 RsiLookback봉) AND [RSI 다이버전스 OR MACD 하락 전환 OR 데드크로스]
-				if (rsiWasHigh && (bearDiv || histDown || dead) && !(SuspectNeedsPrice && cMa > 0)
-					&& bearKinds >= SuspectMinEvidence && bearRoom)
+				if (suspect == 0 && F * trend <= -SuspectFast)
 				{
-					suspectInUp		= true;
-					suspectReason	= Reason(bearDiv, histDown, dead, false);
+					suspect			= -trend;
+					suspectEvent[0]	= suspect;
 				}
-				// 시나리오 2 (SuspectReturn): 의심 중 MACD 히스토그램 연속 증가 또는 골든크로스가 나오면 상승추세로 돌아간다
-				else if (suspectInUp && SuspectReturn && (histUp || golden))
-					suspectInUp = false;
-
-				r = suspectInUp ? 1 : 2;
+				else if (suspect != 0 && F * trend >= 0)
+					suspect = 0;
 			}
-			else if (dnCond)
-			{
-				suspectInUp = false;
-				// 상승 전환 의심: RSI ≤ RsiLow (최근 RsiLookback봉) AND [RSI 다이버전스 OR MACD 상승 전환 OR 골든크로스]
-				if (rsiWasLow && (bullDiv || histUp || golden) && !(SuspectNeedsPrice && cMa < 0)
-					&& bullKinds >= SuspectMinEvidence && bullRoom)
-				{
-					suspectInDown	= true;
-					suspectReason	= Reason(bullDiv, histUp, golden, true);
-				}
-				else if (suspectInDown && SuspectReturn && (histDown || dead))
-					suspectInDown = false;
+			suspectActive[0]	= suspect;
+			Values[0][0]		= trend;
 
-				r = suspectInDown ? -1 : -2;
-			}
-			else
-			{
-				// 추세 조건이 깨지면 의심도 끝난다 (시나리오 1: 추세 → 의심 → 횡보 또는 반대 추세)
-				suspectInUp		= false;
-				suspectInDown	= false;
-
-				// NoSideways: 횡보를 두지 않는다. 상승·하락 조건이 둘 다 아닌 구간은 마지막 추세의 "전환 의심"으로 본다
-				// (상승추세였으면 하락 전환 의심, 하락추세였으면 상승 전환 의심). 반대 추세 조건이 충족될 때까지 이어진다.
-				// 아직 추세가 한 번도 없었으면 종가가 장기선 위인지 아래인지로 방향을 정한다
-				if (NoSideways)
-				{
-					if (lastDir == 0)
-						lastDir = Close[0] >= s ? 1 : -1;
-					r				= lastDir;
-					suspectReason	= "추세 조건이 깨짐";
-				}
-			}
-			if (upCond)			lastDir = 1;
-			else if (dnCond)	lastDir = -1;
-			if (r == 2 || r == -2 || r == 0)
-				suspectReason = "";
-
-			Regime[0] = r;
-
-			if (r != lastRegime)
-			{
-				Print(string.Format("[{0}][{1}][TQ_Regime] 추세 전환 {2} → {3}{4} (배열={5} MACD선={6:F2} RSI={7:F1} 점수={8} {9})",
-					Time[0], Instrument.FullName, lastRegime == int.MinValue ? "없음" : StateName(lastRegime), StateName(r),
-					suspectReason.Length > 0 ? " [" + suspectReason + "]" : "", aligned, ml, r0, score, scoreText));
-				lastRegime = r;
-			}
+			if (trendStart[0] != 0 || trend != prev || suspectEvent[0] != 0)
+				Print(string.Format("[{0}][{1}][TQ_Regime] {2}{3} S={4:+0;-0;0} F={5:+0;-0;0} ({6})",
+					Time[0], Instrument.FullName,
+					trend != prev ? "추세 " + StateName(prev) + " → " + StateName(trend) : StateName(trend),
+					suspectEvent[0] != 0 ? (suspectEvent[0] < 0 ? " · 하락의심 이벤트" : " · 상승의심 이벤트") : "",
+					S, F, scoreText));
 
 			if (ShowDebugVisuals)
-				BackBrushAll = r == 2 ? upBrush : r == 1 ? upSuspectBrush : r == -1 ? downSuspectBrush : r == -2 ? downBrush : null;
+				BackBrushAll = trend == 1 ? (suspect != 0 ? upSuspectBrush : upBrush)
+					: trend == -1 ? (suspect != 0 ? downSuspectBrush : downBrush) : null;
 		}
 
-		// 최근 SuspectEvidenceBars봉(현재 포함)에 나온 근거의 종류 수 (비트 OR 후 켜진 비트 수)
-		private int EvidenceKinds(Series<int> evidence)
+		private static int Sign(double v)
 		{
-			int bits = 0;
-			for (int i = 0; i < SuspectEvidenceBars && i <= CurrentBar; i++)
-				bits |= evidence[i];
-			int kinds = 0;
-			for (; bits != 0; bits >>= 1)
-				kinds += bits & 1;
-			return kinds;
+			return v > 0 ? 1 : v < 0 ? -1 : 0;
 		}
 
-		private string Arrow(int v)
+		private static string Arrow(int v)
 		{
 			return v > 0 ? "▲" : v < 0 ? "▼" : "−";
 		}
 
-		// 의심의 근거를 화면·로그용 글로
-		private string Reason(bool div, bool hist, bool cross, bool bullish)
+		private static string StateName(int state)
 		{
-			string text = "";
-			if (div)	text += (text.Length > 0 ? ", " : "") + "RSI 다이버전스";
-			if (hist)	text += (text.Length > 0 ? ", " : "") + (bullish ? "MACD 상승 전환" : "MACD 하락 전환");
-			if (cross)	text += (text.Length > 0 ? ", " : "") + (bullish ? "골든크로스" : "데드크로스");
-			return text;
-		}
-
-		// 추세 값(+2 ~ −2)의 이름 (로그용)
-		private string StateName(int state)
-		{
-			switch (state)
-			{
-				case 2:		return "상승추세";
-				case 1:		return "하락 전환 의심";
-				case -1:	return "상승 전환 의심";
-				case -2:	return "하락추세";
-				default:	return "횡보";
-			}
+			return state == 1 ? "상승추세" : state == -1 ? "하락추세" : "횡보";
 		}
 
 		#region Properties
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "Fast", Description = "추세 이동평균 단기", GroupName = "Parameters", Order = 0)]
+		[Display(Name = "Fast", Description = "단기 이동평균 (F1)", GroupName = "Parameters", Order = 0)]
 		public int Fast { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "Mid", Description = "추세 이동평균 중기", GroupName = "Parameters", Order = 1)]
+		[Display(Name = "Mid", Description = "중기 이동평균 (S1, S2 방식 1)", GroupName = "Parameters", Order = 1)]
 		public int Mid { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "Slow", Description = "추세 이동평균 장기", GroupName = "Parameters", Order = 2)]
+		[Display(Name = "Slow", Description = "장기 이동평균 (S2)", GroupName = "Parameters", Order = 2)]
 		public int Slow { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "ShowDebugVisuals", Description = "검증용 배경색 표시", GroupName = "Parameters", Order = 3)]
+		[Display(Name = "ShowDebugVisuals", Description = "검증용 배경색: 상승 초록, 하락 빨강, 의심 중 주황(하락의심)·하늘색(상승의심)", GroupName = "Parameters", Order = 3)]
 		public bool ShowDebugVisuals { get; set; }
 
 		[NinjaScriptProperty]
@@ -480,147 +275,55 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "HistBars", Description = "MACD 히스토그램이 몇 봉 연속 줄어야(늘어야) 전환으로 볼지", GroupName = "Parameters", Order = 7)]
-		public int HistBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "RsiPeriod", Description = "RSI 기간", GroupName = "Parameters", Order = 8)]
+		[Display(Name = "RsiPeriod", Description = "RSI 기간 (S4)", GroupName = "Parameters", Order = 7)]
 		public int RsiPeriod { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "RsiHigh", Description = "하락 전환 의심: RSI가 이 값 이상", GroupName = "Parameters", Order = 9)]
-		public double RsiHigh { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "RsiLow", Description = "상승 전환 의심: RSI가 이 값 이하", GroupName = "Parameters", Order = 10)]
-		public double RsiLow { get; set; }
+		[Range(1, 2)]
+		[Display(Name = "S2Mode", Description = "S2 구조 항목: 1 = 중기선 > 장기선, 2 = 장기선이 SlopeBars봉 전보다 높음", GroupName = "Parameters", Order = 8)]
+		public int S2Mode { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "DivBars", Description = "다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지", GroupName = "Parameters", Order = 11)]
-		public int DivBars { get; set; }
+		[Display(Name = "SlopeBars", Description = "S2 방식 2: 장기선 기울기를 몇 봉 전과 비교할지", GroupName = "Parameters", Order = 9)]
+		public int SlopeBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "UseRsi", Description = "S4 RSI 항목 사용. 끄면 S는 −3 ~ +3", GroupName = "Parameters", Order = 10)]
+		public bool UseRsi { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 50)]
+		[Display(Name = "RsiBand", Description = "S4: RSI가 50 + 이 값 이상이면 +1, 50 − 이 값 이하면 −1", GroupName = "Parameters", Order = 11)]
+		public double RsiBand { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "PivotStrength", Description = "고점·저점으로 인정할 좌우 봉 수 (좌우 N봉보다 높으면 고점)", GroupName = "Parameters", Order = 12)]
-		public int PivotStrength { get; set; }
+		[Display(Name = "MacdSlopeBars", Description = "F2: MACD선이 몇 봉 연속 커지면 +1, 작아지면 −1", GroupName = "Parameters", Order = 12)]
+		public int MacdSlopeBars { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "StochPeriodK", Description = "스토캐스틱 %K 길이", GroupName = "Parameters", Order = 13)]
-		public int StochPeriodK { get; set; }
+		[Range(0, 2)]
+		[Display(Name = "TrendStartFast", Description = "추세 시작: F ≥ 이 값 (하락추세는 F ≤ −이 값)", GroupName = "Parameters", Order = 13)]
+		public int TrendStartFast { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "StochSmooth", Description = "스토캐스틱 %K 스무딩", GroupName = "Parameters", Order = 14)]
-		public int StochSmooth { get; set; }
+		[Range(0, 4)]
+		[Display(Name = "TrendStartSlow", Description = "추세 시작: S ≥ 이 값 (하락추세는 S ≤ −이 값)", GroupName = "Parameters", Order = 14)]
+		public int TrendStartSlow { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "StochPeriodD", Description = "스토캐스틱 %D 스무딩", GroupName = "Parameters", Order = 15)]
-		public int StochPeriodD { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "CrossLow", Description = "골든크로스 필터 기준", GroupName = "Parameters", Order = 16)]
-		public double CrossLow { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "CrossHigh", Description = "데드크로스 필터 기준", GroupName = "Parameters", Order = 17)]
-		public double CrossHigh { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "CrossFilterBars", Description = "크로스 필터 봉 수 (현재 봉 포함)", GroupName = "Parameters", Order = 18)]
-		public int CrossFilterBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "SuspectReturn", Description = "의심 중 반대 신호(MACD 히스토그램 연속 반전 또는 크로스)가 나오면 원래 추세로 돌아감. 끄면 추세 조건이 깨질 때까지 의심 유지", GroupName = "Parameters", Order = 19)]
-		public bool SuspectReturn { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "RsiLookback", Description = "의심의 RSI 조건을 최근 몇 봉(현재 포함) 안에서 볼지. 1 = 같은 봉에서만", GroupName = "Parameters", Order = 20)]
-		public int RsiLookback { get; set; }
+		[Range(-4, 4)]
+		[Display(Name = "TrendEndSlow", Description = "상승추세 끝: S ≤ 이 값 (하락추세 끝: S ≥ −이 값)", GroupName = "Parameters", Order = 15)]
+		public int TrendEndSlow { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, 2)]
-		[Display(Name = "Mode", Description = "추세 판단 방식. 1 = 회의 문서 정의(정배열 AND MACD선 부호), 2 = 점수 방식(가격·MACD·RSI·스토캐스틱)", GroupName = "Parameters", Order = 21)]
-		public int Mode { get; set; }
+		[Display(Name = "SuspectFast", Description = "의심 이벤트: 상승추세 중 F ≤ −이 값이 된 첫 봉 (하락추세는 F ≥ 이 값)", GroupName = "Parameters", Order = 16)]
+		public int SuspectFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 5)]
-		[Display(Name = "ScoreMin", Description = "점수 방식: 추세로 인정할 최소 점수 (1~4)", GroupName = "Parameters", Order = 22)]
-		public int ScoreMin { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 50)]
-		[Display(Name = "ScoreRsiBand", Description = "점수 방식: RSI가 50에서 이만큼 벗어나야 방향으로 인정", GroupName = "Parameters", Order = 23)]
-		public double ScoreRsiBand { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "NoSideways", Description = "켜면 횡보를 내지 않는다. 상승·하락 조건이 둘 다 아닌 구간은 마지막 추세의 전환 의심으로 본다", GroupName = "Parameters", Order = 24)]
-		public bool NoSideways { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, int.MaxValue)]
-		[Display(Name = "ScoreEventBars", Description = "점수 방식: 최근 몇 봉(현재 포함) 안의 사건(MACD 전환, 골든·데드크로스, 다이버전스)을 점수의 한 항목으로 넣을지. 0 = 안 넣음", GroupName = "Parameters", Order = 25)]
-		public int ScoreEventBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "RsiRelative", Description = "의심의 RSI 조건을 고정 기준(RsiHigh / RsiLow) 대신 최근 RsiCenterBars봉의 RSI 평균에서 RsiOffset만큼 벗어났는지로 본다", GroupName = "Parameters", Order = 26)]
-		public bool RsiRelative { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "RsiCenterBars", Description = "RsiRelative: RSI 중심(평균)을 구하는 봉 수", GroupName = "Parameters", Order = 27)]
-		public int RsiCenterBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 50)]
-		[Display(Name = "RsiOffset", Description = "RsiRelative: RSI가 중심에서 이만큼 위면 하락 전환 의심의 RSI 조건 충족, 이만큼 아래면 상승 전환 의심의 RSI 조건 충족", GroupName = "Parameters", Order = 28)]
-		public double RsiOffset { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(-5, 5)]
-		[Display(Name = "ScoreExit", Description = "점수 방식: 상승추세는 점수가 이 값 이하로 내려가면 끝난다. 하락추세는 점수가 이 값의 부호를 바꾼 값 이상으로 올라가면 끝난다. 0이면 지표들이 중립이 되는 순간, -1이면 반대쪽을 가리킬 때", GroupName = "Parameters", Order = 29)]
-		public int ScoreExit { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "SuspectNeedsPrice", Description = "켜면 종가가 아직 단기선 위에 있고 단기선이 오르는 중일 때는 하락 전환 의심을 띄우지 않는다 (상승 전환 의심은 반대)", GroupName = "Parameters", Order = 30)]
-		public bool SuspectNeedsPrice { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(0, 5)]
-		[Display(Name = "SuspectMaxScore", Description = "하락 전환 의심은 추세 점수가 이 값 이하일 때만, 상승 전환 의심은 −이 값 이상일 때만 띄운다(추세의 힘이 빠진 뒤에만). 5 = 제한 없음(기본). 1이면 점수 +2 이상인 강한 상승 중에는 하락 전환 의심을 띄우지 않음", GroupName = "Parameters", Order = 31)]
-		public int SuspectMaxScore { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, 4)]
-		[Display(Name = "SuspectMinEvidence", Description = "의심에 필요한 근거 종류 수. 근거 = 다이버전스, MACD 전환, 크로스, 가격 항목이 더는 추세 방향이 아님. 최근 SuspectEvidenceBars봉 안에서 센다. 1 = 근거 하나로 충분(기본). 그 봉에 다이버전스·MACD 전환·크로스 중 하나는 있어야 하는 것은 같음", GroupName = "Parameters", Order = 32)]
-		public int SuspectMinEvidence { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "SuspectEvidenceBars", Description = "SuspectMinEvidence: 근거를 모으는 봉 수(현재 포함). 기본 2", GroupName = "Parameters", Order = 33)]
-		public int SuspectEvidenceBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "TrendConfirmBars", Description = "추세 시작 조건(Mode 2: 가격 조건 + 최소 점수, Mode 1: 정배열 + MACD선 부호)이 몇 봉 연속이어야 추세로 인정할지. 1 = 그 봉에서 바로(기본)", GroupName = "Parameters", Order = 34)]
-		public int TrendConfirmBars { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "TrendExitBars", Description = "추세 종료 조건(Mode 2: 점수가 ScoreExit 이하, Mode 1: 시작 조건이 깨짐)이 몇 봉 연속이어야 추세를 끝낼지. 1 = 그 봉에서 바로(기본). 반대 방향 추세의 시작 조건이 TrendConfirmBars를 채우면 그때는 바로 바뀜", GroupName = "Parameters", Order = 35)]
-		public int TrendExitBars { get; set; }
-
-		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다(전략 호출부·생성 코드 그대로)
-		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 36)]
+		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다
+		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 17)]
 		public bool ShowPlots { get; set; }
 
 		[Browsable(false)]
@@ -633,35 +336,49 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 
 		[Browsable(false)]
 		[XmlIgnore]
-		public Series<double> MacdLine { get { return Values[2]; } }
+		public Series<double> SmaMid { get { return Values[2]; } }
 
 		[Browsable(false)]
 		[XmlIgnore]
-		public Series<double> Rsi { get { return Values[3]; } }
+		public Series<double> SmaSlow { get { return Values[3]; } }
 
-		// 화면 표시용: 이동평균 배열 (+1 정배열, −1 역배열, 0 둘 다 아님)
 		[Browsable(false)]
 		[XmlIgnore]
-		public int Aligned { get { Update(); return aligned; } }
+		public Series<double> MacdLine { get { return Values[4]; } }
 
-		// 화면 표시용: 지금 의심 상태의 근거 (의심이 아니면 빈 문자열)
 		[Browsable(false)]
 		[XmlIgnore]
-		public string SuspectReason { get { Update(); return suspectReason; } }
+		public Series<double> Rsi { get { return Values[5]; } }
 
-		// 화면 표시용: 점수 방식의 합계(−5 ~ +5, 사건 항목을 끄면 −4 ~ +4)와 지표별 방향. Mode 1에서도 계산은 한다
+		// 느린 점수 S (−4 ~ +4, RSI를 끄면 −3 ~ +3)
 		[Browsable(false)]
 		[XmlIgnore]
-		public int Score { get { Update(); return score; } }
+		public Series<double> SlowScore { get { Update(); return slowScore; } }
 
+		// 빠른 점수 F (−2 ~ +2)
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<double> FastScore { get { Update(); return fastScore; } }
+
+		// 이 봉에서 추세가 시작되면 ±1, 아니면 0
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<int> TrendStart { get { Update(); return trendStart; } }
+
+		// 이 봉에서 의심이 생기면 상승추세 중 하락의심 −1, 하락추세 중 상승의심 +1, 아니면 0
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<int> SuspectEvent { get { Update(); return suspectEvent; } }
+
+		// 의심 중이면 그 방향(−1 / +1), 아니면 0 (표시용)
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<int> SuspectActive { get { Update(); return suspectActive; } }
+
+		// 상태 상자·로그용: "S1▲ S2▲ S3− S4▲ │ F1▼ F2▼"
 		[Browsable(false)]
 		[XmlIgnore]
 		public string ScoreText { get { Update(); return scoreText; } }
-
-		// 화면 표시용: 지금의 RSI 중심 (최근 RsiCenterBars봉 평균). RsiRelative가 꺼져 있어도 계산한다
-		[Browsable(false)]
-		[XmlIgnore]
-		public double RsiCenter { get { Update(); return rsiCenter; } }
 		#endregion
 	}
 }
@@ -673,18 +390,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_Regime[] cacheTQ_Regime;
-		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
-			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
+			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
 		}
 
-		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
 			if (cacheTQ_Regime != null)
 				for (int idx = 0; idx < cacheTQ_Regime.Length; idx++)
-					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].HistBars == histBars && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].RsiHigh == rsiHigh && cacheTQ_Regime[idx].RsiLow == rsiLow && cacheTQ_Regime[idx].DivBars == divBars && cacheTQ_Regime[idx].PivotStrength == pivotStrength && cacheTQ_Regime[idx].StochPeriodK == stochPeriodK && cacheTQ_Regime[idx].StochSmooth == stochSmooth && cacheTQ_Regime[idx].StochPeriodD == stochPeriodD && cacheTQ_Regime[idx].CrossLow == crossLow && cacheTQ_Regime[idx].CrossHigh == crossHigh && cacheTQ_Regime[idx].CrossFilterBars == crossFilterBars && cacheTQ_Regime[idx].SuspectReturn == suspectReturn && cacheTQ_Regime[idx].RsiLookback == rsiLookback && cacheTQ_Regime[idx].Mode == mode && cacheTQ_Regime[idx].ScoreMin == scoreMin && cacheTQ_Regime[idx].ScoreRsiBand == scoreRsiBand && cacheTQ_Regime[idx].NoSideways == noSideways && cacheTQ_Regime[idx].ScoreEventBars == scoreEventBars && cacheTQ_Regime[idx].RsiRelative == rsiRelative && cacheTQ_Regime[idx].RsiCenterBars == rsiCenterBars && cacheTQ_Regime[idx].RsiOffset == rsiOffset && cacheTQ_Regime[idx].ScoreExit == scoreExit && cacheTQ_Regime[idx].SuspectNeedsPrice == suspectNeedsPrice && cacheTQ_Regime[idx].SuspectMaxScore == suspectMaxScore && cacheTQ_Regime[idx].SuspectMinEvidence == suspectMinEvidence && cacheTQ_Regime[idx].SuspectEvidenceBars == suspectEvidenceBars && cacheTQ_Regime[idx].TrendConfirmBars == trendConfirmBars && cacheTQ_Regime[idx].TrendExitBars == trendExitBars && cacheTQ_Regime[idx].EqualsInput(input))
+					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].S2Mode == s2Mode && cacheTQ_Regime[idx].SlopeBars == slopeBars && cacheTQ_Regime[idx].UseRsi == useRsi && cacheTQ_Regime[idx].RsiBand == rsiBand && cacheTQ_Regime[idx].MacdSlopeBars == macdSlopeBars && cacheTQ_Regime[idx].TrendStartFast == trendStartFast && cacheTQ_Regime[idx].TrendStartSlow == trendStartSlow && cacheTQ_Regime[idx].TrendEndSlow == trendEndSlow && cacheTQ_Regime[idx].SuspectFast == suspectFast && cacheTQ_Regime[idx].EqualsInput(input))
 						return cacheTQ_Regime[idx];
-			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, HistBars = histBars, RsiPeriod = rsiPeriod, RsiHigh = rsiHigh, RsiLow = rsiLow, DivBars = divBars, PivotStrength = pivotStrength, StochPeriodK = stochPeriodK, StochSmooth = stochSmooth, StochPeriodD = stochPeriodD, CrossLow = crossLow, CrossHigh = crossHigh, CrossFilterBars = crossFilterBars, SuspectReturn = suspectReturn, RsiLookback = rsiLookback, Mode = mode, ScoreMin = scoreMin, ScoreRsiBand = scoreRsiBand, NoSideways = noSideways, ScoreEventBars = scoreEventBars, RsiRelative = rsiRelative, RsiCenterBars = rsiCenterBars, RsiOffset = rsiOffset, ScoreExit = scoreExit, SuspectNeedsPrice = suspectNeedsPrice, SuspectMaxScore = suspectMaxScore, SuspectMinEvidence = suspectMinEvidence, SuspectEvidenceBars = suspectEvidenceBars, TrendConfirmBars = trendConfirmBars, TrendExitBars = trendExitBars }, input, ref cacheTQ_Regime);
+			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, RsiPeriod = rsiPeriod, S2Mode = s2Mode, SlopeBars = slopeBars, UseRsi = useRsi, RsiBand = rsiBand, MacdSlopeBars = macdSlopeBars, TrendStartFast = trendStartFast, TrendStartSlow = trendStartSlow, TrendEndSlow = trendEndSlow, SuspectFast = suspectFast }, input, ref cacheTQ_Regime);
 		}
 	}
 }
@@ -693,14 +410,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
 		}
 	}
 }
@@ -709,14 +426,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int histBars, int rsiPeriod, double rsiHigh, double rsiLow, int divBars, int pivotStrength, int stochPeriodK, int stochSmooth, int stochPeriodD, double crossLow, double crossHigh, int crossFilterBars, bool suspectReturn, int rsiLookback, int mode, int scoreMin, double scoreRsiBand, bool noSideways, int scoreEventBars, bool rsiRelative, int rsiCenterBars, double rsiOffset, int scoreExit, bool suspectNeedsPrice, int suspectMaxScore, int suspectMinEvidence, int suspectEvidenceBars, int trendConfirmBars, int trendExitBars)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, histBars, rsiPeriod, rsiHigh, rsiLow, divBars, pivotStrength, stochPeriodK, stochSmooth, stochPeriodD, crossLow, crossHigh, crossFilterBars, suspectReturn, rsiLookback, mode, scoreMin, scoreRsiBand, noSideways, scoreEventBars, rsiRelative, rsiCenterBars, rsiOffset, scoreExit, suspectNeedsPrice, suspectMaxScore, suspectMinEvidence, suspectEvidenceBars, trendConfirmBars, trendExitBars);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
 		}
 	}
 }

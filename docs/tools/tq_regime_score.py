@@ -191,6 +191,9 @@ DEFAULTS = dict(
     rsi_center_bars=20, rsi_offset=8.0, score_exit=0, suspect_needs_price=False, pivot=2,
     # 2026-10-14 TQ_Regime 추가 설정 (기본값이면 그 전과 같은 값)
     suspect_max_score=5, suspect_min_evidence=1, suspect_evidence_bars=2, trend_confirm_bars=1, trend_exit_bars=1,
+    # v3 (mode=3, docs/v3 지시서 3장). 이동평균은 위의 fast / mid / slow, RSI 폭은 score_rsi_band를 같이 쓴다
+    s2_mode=1, slope_bars=5, use_rsi=True, macd_slope_bars=2,
+    trend_start_fast=2, trend_start_slow=2, trend_end_slow=0, suspect_fast=2,
 )
 
 # 설정 문자열의 짧은 이름 → DEFAULTS 키
@@ -200,11 +203,89 @@ ALIASES = {
     "needsprice": "suspect_needs_price", "return": "suspect_return", "rsibars": "rsi_lookback",
     "maxscore": "suspect_max_score", "evidence": "suspect_min_evidence", "evbars": "suspect_evidence_bars",
     "confirm": "trend_confirm_bars", "exitbars": "trend_exit_bars",
+    # v3
+    "s2": "s2_mode", "slope": "slope_bars", "userrsi": "use_rsi", "mslope": "macd_slope_bars",
+    "tsf": "trend_start_fast", "tss": "trend_start_slow", "tes": "trend_end_slow", "sf": "suspect_fast",
 }
+
+
+def compute_regime_v3(tb, p):
+    """v3 (mode=3): 느린 점수 S와 빠른 점수 F로 추세 +1 / 0 / −1을 정하고, 추세 중 F가 반대로 꺾이면 의심 이벤트를 낸다.
+    TQ_Regime.cs v3와 같은 식 (v3 지시서 3장). 다른 방식과 같이 채점하려고 regime은 +2 / 0 / −2로 돌려준다
+    (v3에는 의심 '상태'가 없다. 의심은 suspect_event로 따로 낸다: 상승추세 중 하락의심 −1, 하락추세 중 상승의심 +1)."""
+    n = len(tb)
+    C = [b[4] for b in tb]
+    sF, sM, sS = sma(C, p["fast"]), sma(C, p["mid"]), sma(C, p["slow"])
+    mline, _, _ = macd(C, p["macd_fast"], p["macd_slow"], p["macd_smooth"])
+    R = rsi(C, p["rsi_period"])
+
+    def sign(x):
+        return 1 if x > 0 else (-1 if x < 0 else 0)
+
+    msb = p["macd_slope_bars"]
+    min_bars = max(p["slow"] - 1, p["macd_slow"] + p["macd_smooth"], p["rsi_period"], p["slope_bars"], msb + 1)
+    trend = 0
+    suspect = 0          # 의심 중이면 그 방향 (상승추세 중 하락의심 = −1)
+    out = []
+    for i in range(n):
+        rec = dict(regime=NAN, macd_line=mline[i], rsi=R[i], aligned=0, score=0, slow=0, fast=0,
+                   trend_start=0, suspect_event=0, suspect_active=0, text="")
+        if i < min_bars or math.isnan(R[i]):
+            out.append(rec)
+            continue
+        s1 = sign(C[i] - sM[i])
+        s2 = sign(sM[i] - sS[i]) if p["s2_mode"] == 1 else sign(sS[i] - sS[i - p["slope_bars"]])
+        s3 = sign(mline[i])
+        s4 = 0
+        if p["use_rsi"]:
+            s4 = 1 if R[i] >= 50 + p["score_rsi_band"] else (-1 if R[i] <= 50 - p["score_rsi_band"] else 0)
+        f1 = 1 if (C[i] > sF[i] and sF[i] > sF[i - 1]) else (-1 if (C[i] < sF[i] and sF[i] < sF[i - 1]) else 0)
+        f2 = 1 if all(mline[i - j] > mline[i - j - 1] for j in range(msb)) else (
+            -1 if all(mline[i - j] < mline[i - j - 1] for j in range(msb)) else 0)
+        S = s1 + s2 + s3 + s4
+        F = f1 + f2
+
+        start_up = F >= p["trend_start_fast"] and S >= p["trend_start_slow"]
+        start_dn = F <= -p["trend_start_fast"] and S <= -p["trend_start_slow"]
+        prev = trend
+        if trend == 1:
+            if start_dn:
+                trend = -1
+            elif S <= p["trend_end_slow"]:
+                trend = 0
+        elif trend == -1:
+            if start_up:
+                trend = 1
+            elif S >= -p["trend_end_slow"]:
+                trend = 0
+        else:
+            if start_up:
+                trend = 1
+            elif start_dn:
+                trend = -1
+        ts = trend if trend != prev and trend != 0 else 0
+
+        # 의심: 추세가 바뀌면 지운다. 추세 중 F가 반대로 SuspectFast에 닿은 첫 봉에 이벤트, F가 0 이상(하락추세는 0 이하)으로 돌아오면 해제
+        ev = 0
+        if trend != prev or trend == 0:
+            suspect = 0
+        if trend != 0:
+            if suspect == 0 and F * trend <= -p["suspect_fast"]:
+                suspect = -trend
+                ev = suspect
+            elif suspect != 0 and F * trend >= 0:
+                suspect = 0
+
+        rec.update(regime=2 * trend, slow=S, fast=F, score=S, trend_start=ts, suspect_event=ev, suspect_active=suspect,
+                   text=f"S1{s1:+d} S2{s2:+d} S3{s3:+d} S4{s4:+d} | F1{f1:+d} F2{f2:+d}")
+        out.append(rec)
+    return out
 
 
 def compute_regime(tb, p):
     """추세 봉 목록 tb → 봉마다 dict(regime, macd_line, rsi, aligned, score). TQ_Regime.OnBarUpdate와 같은 순서."""
+    if p["mode"] == 3:
+        return compute_regime_v3(tb, p)
     n = len(tb)
     H = [b[2] for b in tb]
     L = [b[3] for b in tb]
@@ -381,24 +462,69 @@ def compute_regime(tb, p):
     return out
 
 
+def bar_suspect_events(rec):
+    """추세 봉마다 의심 이벤트 (+1 상승의심 / −1 하락의심 / 0). mode=3은 판정이 낸 값, mode 1·2는 의심 상태(±1)로 들어간 봉."""
+    ev = []
+    prev = NAN
+    for x in rec:
+        if "suspect_event" in x:
+            ev.append(x["suspect_event"])
+        else:
+            r = x["regime"]
+            ev.append(-int(r) if (not math.isnan(r) and int(r) in (1, -1) and r != prev) else 0)
+        prev = x["regime"]
+    return ev
+
+
 def regime_per_minute(bars1, p, cache):
-    """1분봉마다 그 봉 마감에 전략이 보는 추세 값. 추세 봉은 1분봉보다 마감이 앞선 것 중 가장 최근 것 (spec 3장 1봉 지연)."""
+    """1분봉마다 그 봉 마감에 전략이 보는 추세 값. 추세 봉은 1분봉보다 마감이 앞선 것 중 가장 최근 것 (spec 3장 1봉 지연).
+    (추세 값 목록, 의심 이벤트 목록)을 돌려준다. 이벤트는 그 추세 봉 값을 처음 보는 1분봉에 하나만 둔다"""
     key = tuple(sorted(p.items()))
     if key in cache:
         return cache[key]
     tb = resample(bars1, p["bar"])
     rec = compute_regime(tb, p)
+    bev = bar_suspect_events(rec)
     if p["bar"] == 1:
         res = [0 if math.isnan(x["regime"]) else int(x["regime"]) for x in rec]
+        ev = list(bev)
     else:
         ends = [b[0] for b in tb]
-        res = []
+        res, ev = [], []
+        last_k = -1
         for b in bars1:
             k = bisect.bisect_left(ends, b[0]) - 1   # 마감 시각 < 1분봉 마감
             v = rec[k]["regime"] if k >= 0 else NAN
             res.append(0 if math.isnan(v) else int(v))
-    cache[key] = res
-    return res
+            ev.append(bev[k] if (k >= 0 and k != last_k) else 0)
+            last_k = k
+    cache[key] = (res, ev)
+    return res, ev
+
+
+def score_suspects(bars1, ev, args, minutes=30):
+    """의심 이벤트 채점: 대회 시간 안의 이벤트마다 그 뒤 minutes분 동안 의심 방향으로 간 최대 폭이 반대 방향 최대 폭보다 크면 적중.
+    (개수, 적중 수, 의심 방향 평균 폭, 반대 방향 평균 폭)"""
+    C = [b[4] for b in bars1]
+    H = [b[2] for b in bars1]
+    L = [b[3] for b in bars1]
+    T = [b[0] for b in bars1]
+    n = hit = 0
+    fav_sum = adv_sum = 0.0
+    for i, d in enumerate(ev):
+        if d == 0 or not in_window(T[i], args.start, args.end_all):
+            continue
+        fav = adv = 0.0
+        for j in range(i + 1, len(bars1)):
+            if (T[j] - T[i]) > timedelta(minutes=minutes):
+                break
+            fav = max(fav, (H[j] - C[i]) if d > 0 else (C[i] - L[j]))
+            adv = max(adv, (C[i] - L[j]) if d > 0 else (H[j] - C[i]))
+        n += 1
+        hit += fav > adv
+        fav_sum += fav
+        adv_sum += adv
+    return n, hit, (fav_sum / n if n else NAN), (adv_sum / n if n else NAN)
 
 # ───────────────────────── 사후 정답 ─────────────────────────
 
@@ -590,7 +716,35 @@ REG_LINE = re.compile(r"(\d+)분봉 마감 추세=(\S+) .*?배열=(-?\d) MACD선
 SYM = {"▲": 2, "△": 1, "◆": 0, "▽": -1, "▼": -2}
 
 
+# v3 전략 로그 (TQ_Strategy v3): 실행 머리줄에 "버전=v3", 추세 봉 줄은 "N분봉 마감 추세=… S=+3 F=-1 (…) … 종가=… 이평=… MACD선=… RSI=…"
+HDR_V3_NUM = {
+    "bar": r"추세봉=(\d+)분", "s2_mode": r"S2방식=(\d)", "slope_bars": r"기울기봉=(\d+)", "score_rsi_band": r"RSI폭=([\d.]+)",
+    "macd_slope_bars": r"MACD기울기봉=(\d+)", "trend_start_fast": r"시작F=(\d+)", "trend_start_slow": r"시작S=(\d+)",
+    "trend_end_slow": r"종료S=(-?\d+)", "suspect_fast": r"의심F=(\d+)",
+}
+REG_LINE_V3 = re.compile(r"(\d+)분봉 마감 추세=(\S+) .*?S=([+-]?\d+) F=([+-]?\d+) .*?종가=([\d.]+) .*?MACD선=(-?[\d.]+) RSI=([\d.]+)")
+SYM_V3 = {"▲": 2, "◆": 0, "▼": -2}
+
+
+def header_params_v3(h):
+    p = dict(DEFAULTS)
+    p["mode"] = 3
+    for k, rx in HDR_V3_NUM.items():
+        m = re.search(rx, h)
+        if m:
+            p[k] = type(DEFAULTS[k])(float(m.group(1))) if isinstance(DEFAULTS[k], int) else float(m.group(1))
+    m = re.search(r"RSI항목=(True|False)", h)
+    if m:
+        p["use_rsi"] = m.group(1) == "True"
+    m = re.search(r"MA=(\d+)/(\d+)/(\d+)", h)
+    if m:
+        p["fast"], p["mid"], p["slow"] = (int(x) for x in m.groups())
+    return p
+
+
 def header_params(h):
+    if "버전=v3" in h:
+        return header_params_v3(h)
     if "추세방식=" not in h:
         return None
     p = dict(DEFAULTS)
@@ -625,6 +779,13 @@ def validate(bars1, log_path, contract):
                 continue
             if cur is None or cur["p"] is None:
                 continue
+            if cur["p"]["mode"] == 3:
+                m = REG_LINE_V3.search(line)
+                if m:
+                    # v3 줄: (시각, 봉, 추세, S, MACD선, RSI, 종가, F) — 아래 비교에서 배열 자리에 S, 점수 자리에 F를 둔다
+                    cur["rows"].append((parse_log_time(line), int(m.group(1)), SYM_V3.get(m.group(2)[0]), int(m.group(3)),
+                                        float(m.group(6)), float(m.group(7)), float(m.group(5)), int(m.group(4))))
+                continue
             m = REG_LINE.search(line)
             if m:
                 cur["rows"].append((parse_log_time(line), int(m.group(1)), SYM.get(m.group(2)[0]), int(m.group(3)),
@@ -636,7 +797,7 @@ def validate(bars1, log_path, contract):
         if not run["rows"] or (contract and contract not in run["contract"]):
             continue
         p = run["p"]
-        if p["mode"] not in (1, 2):
+        if p["mode"] not in (1, 2, 3):
             continue
         key = tuple(sorted(p.items()))
         if key not in tbc:
@@ -649,8 +810,13 @@ def validate(bars1, log_path, contract):
                 continue
             r = rec[i]
             stats["rows"] += 1
-            ok = dict(close=abs(tb[i][4] - cl) < 1e-6, regime=r["regime"] == reg, aligned=r["aligned"] == al,
-                      score=r["score"] == sc, macd=abs(r["macd_line"] - ml) <= 0.011, rsi=abs(r["rsi"] - rs) <= 0.051)
+            if p["mode"] == 3:
+                # v3: 배열 칸 = S, 점수 칸 = F
+                ok = dict(close=abs(tb[i][4] - cl) < 1e-6, regime=r["regime"] == reg, aligned=r["slow"] == al,
+                          score=r["fast"] == sc, macd=abs(r["macd_line"] - ml) <= 0.011, rsi=abs(r["rsi"] - rs) <= 0.051)
+            else:
+                ok = dict(close=abs(tb[i][4] - cl) < 1e-6, regime=r["regime"] == reg, aligned=r["aligned"] == al,
+                          score=r["score"] == sc, macd=abs(r["macd_line"] - ml) <= 0.011, rsi=abs(r["rsi"] - rs) <= 0.051)
             for k, v in ok.items():
                 stats[k] += v
             if not all(ok.values()) and len(bad) < 15:
@@ -675,6 +841,16 @@ PRESETS = [
     ("점수 3분", "mode=2,bar=3"),
     ("예전 유기 기준 세트 (점수 3분 + RSI 상대 26/6)", "mode=2,bar=3,rsirel=1,center=26,offset=6"),
     ("유기 기준 세트 10/14 (RSI 상대 14/6 + 의심 점수 상한 2)", "mode=2,bar=3,rsirel=1,center=14,offset=6,maxscore=2"),
+]
+
+# v3 지시서 3-4의 비교 목록: mode=2 10분(score-v1 기본), mode=2 3분(유기 기준), mode=3 3분 {Fast 6/8, Mid 20, Slow 60} × {S2Mode 1/2} × {S4 켬/끔}
+PRESETS_V3 = [
+    ("mode=2 10분 (score-v1 기본)", "mode=2,bar=10"),
+    ("mode=2 3분 (유기 기준)", "mode=2,bar=3,rsirel=1,center=26,offset=6"),
+] + [
+    (f"mode=3 3분 {fast}/20/60 S2={s2} RSI={'켬' if r else '끔'}",
+     f"mode=3,bar=3,fast={fast},mid=20,slow=60,s2={s2},userrsi={r}")
+    for fast in (6, 8) for s2 in (1, 2) for r in (1, 0)
 ]
 
 
@@ -710,6 +886,7 @@ def main():
     ap.add_argument("--end", type=int, default=2330, help="대회 끝 HHMM (분 단위 채점 범위)")
     ap.add_argument("--all-hours", action="store_true", help="대회 시간 대신 하루 전체를 채점")
     ap.add_argument("--report", help="결과를 마크다운 파일로도 저장")
+    ap.add_argument("--v3", action="store_true", help="설정을 주지 않았을 때 v3 비교 목록(PRESETS_V3, v3 지시서 3-4)을 쓴다")
     args = ap.parse_args()
     args.end_all = args.end
     if args.all_hours:
@@ -737,7 +914,7 @@ def main():
         name, _, s = c.partition(":") if ":" in c else (c, "", c)
         cfgs.append((name, parse_cfg(s)))
     if not cfgs:
-        cfgs = [(n, parse_cfg(s)) for n, s in PRESETS]
+        cfgs = [(n, parse_cfg(s)) for n, s in (PRESETS_V3 if args.v3 else PRESETS)]
 
     legs = truth_legs(bars1, args)
     if legs:
@@ -749,15 +926,19 @@ def main():
 
     cache = {}
     lines = []
-    head = ("| 방식 | 보기 | 잡은 다리 | 지연 중간(분) | 지연 평균(분) | 잡은 뒤 남은 몫(%) | 따라가기 거래 | 승률(%) | 합계(pt) | 거래당(pt) | 분 정확도(%) | 추세라 한 분 중 맞음(%) | 추세 분 중 잡음(%) |\n"
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    head = ("| 방식 | 보기 | 잡은 다리 | 지연 중간(분) | 지연 평균(분) | 잡은 뒤 남은 몫(%) | 따라가기 거래 | 승률(%) | 합계(pt) | 거래당(pt) | 분 정확도(%) | 추세라 한 분 중 맞음(%) | 추세 분 중 잡음(%) | 의심 이벤트 | 30분 적중(%) | 의심 방향/반대(pt) |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     lines.append(head)
     for name, p in cfgs:
-        reg = regime_per_minute(bars1, p, cache)
-        for view, vname in (("trend", "추세만"), ("organic", "유기 방향")):
+        reg, ev = regime_per_minute(bars1, p, cache)
+        sn, sh, sfav, sadv = score_suspects(bars1, ev, args)
+        # v3(mode=3)에는 의심 '상태'가 없어 유기 방향 보기는 추세만과 같으므로 한 줄만 낸다
+        views = (("trend", "추세만"),) if p["mode"] == 3 else (("trend", "추세만"), ("organic", "유기 방향"))
+        for view, vname in views:
             r = score_method(bars1, direction_view(reg, view), legs, args)
             lines.append(f"| {name} | {vname} | {r['caught']}/{r['legs']} | {fmt(r['lag_med'])} | {fmt(r['lag_avg'], 1)} | {fmt(r['cap'])} | "
-                         f"{r['n_tr']} | {fmt(r['win'])} | {fmt(r['pts'])} | {fmt(r['pts_avg'], 1)} | {fmt(r['acc'])} | {fmt(r['prec'])} | {fmt(r['recall'])} |")
+                         f"{r['n_tr']} | {fmt(r['win'])} | {fmt(r['pts'])} | {fmt(r['pts_avg'], 1)} | {fmt(r['acc'])} | {fmt(r['prec'])} | {fmt(r['recall'])} | "
+                         f"{sn} | {fmt(100 * sh / sn if sn else NAN)} | {fmt(sfav, 1)} / {fmt(sadv, 1)} |")
     print()
     print("\n".join(lines))
     print("\n읽는 법: 지연 = 정답 다리 시작에서 그 방향 추세로 처음 판정한 1분봉까지. 남은 몫 = 판정 시점부터 다리 끝까지의 움직임 ÷ 다리 크기 (놓친 다리는 0).")

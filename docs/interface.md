@@ -1,12 +1,12 @@
 # 지표 ↔ 전략 인터페이스 (계약서)
 
 담당 A(신호 엔진)는 아래 이름·타입·의미대로 값을 노출하고, 담당 B(전략)는 이것만 읽어서 주문을 낸다.
-변경은 두 사람이 합의한 뒤 이 파일부터 고친다. 2026-10-12에 spec v2(대면회의 이후 규칙)에 맞춰 전체를 다시 썼다.
+변경은 두 사람이 합의한 뒤 이 파일부터 고친다. 2026-10-12에 spec v2(대면회의 이후 규칙)에 맞춰 전체를 다시 썼고, 2026-10-15 브랜치 `v3-integrated`에서 TQ_Regime 절을 v3로 바꿨다(v3 지시서 3장).
 
 ## 원칙
 - A는 "이 봉에서 이 조건이 참인가"만 계산한다. 포지션·주문·시간대와 무관한 값만 낸다.
 - B는 포지션 상태에 따라 달라지는 모든 것(어느 진입 신호를 쓸지, 익절 단계, 손절, 수량, 대회 시간)을 처리한다.
-- 모든 값은 진입 봉(1분봉) 마감 시점 기준이다 (TQ_Regime만 추세 봉 기준. 기본 10분봉).
+- 모든 값은 진입 봉(1분봉) 마감 시점 기준이다 (TQ_Regime만 추세 봉 기준. v3 기본 3분봉).
 - 설정값 타입: 기간·봉 수·밴드 배수 선택은 int, 기준값(CrossLow/High, RSI 기준)과 ATR 배수는 double, 켜고 끄는 것은 bool.
 
 ## TQ_ATRChannels (A) — 입력: 진입 봉
@@ -23,67 +23,49 @@
 | Dn1, Dn2, Dn3 | Mid − ATR × Mult1·Mult2·Mult3 |
 
 ## TQ_Regime (A) — 입력: 추세 봉 (전략에서 `TQ_Regime(BarsArray[regimeBip], ...)`)
-추세 5단계를 낸다 (spec 3장). 입력 시리즈는 전략이 정한다: 전략의 `RegimeBarMinutes`가 10이면 10분봉(기본), 3이면 3분봉, 1이면 진입 봉 자체다.
-전략의 두 단계 진입(`OrganicTwoStage`, spec 5-2)이 켜져 있으면 같은 설정으로 진입 봉(`BarsArray[0]`)에 하나 더 만든다. 그 인스턴스도 추세가 바뀔 때마다 Output 창에 "추세 전환" 줄을 찍는다.
+v3 추세 판단 (spec v3 3장). 추세를 +1 상승 / 0 횡보 / −1 하락으로 내고, 의심은 상태가 아니라 이벤트로 낸다. 입력 시리즈는 전략이 정한다: `RegimeBarMinutes` 3이면 3분봉(기본, `BarsArray[2]`), 10이면 10분봉(`BarsArray[1]`).
+모든 이동평균·MACD·RSI는 추세 봉 기준이다. MACD는 내장 `MACD(MacdFast, MacdSlow, MacdSmooth)`의 MACD선, RSI는 내장 `RSI(RsiPeriod, 3)`을 쓴다. 옛 Mode 1·2, 의심 RSI·다이버전스·스토캐스틱 판정은 없다.
 
 | 설정값 (생성자 인자 순서) | 기본값 | 의미 |
 | --- | --- | --- |
-| Fast / Mid / Slow | 6 / 18 / 36 | 정배열·역배열을 보는 SMA. 점수 방식은 Fast만 쓴다 |
-| ShowDebugVisuals | false | 검증용 배경색 |
-| MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 | MACD선 부호와 히스토그램 |
-| HistBars | 2 | MACD 히스토그램이 몇 봉 연속 줄어야(늘어야) 전환으로 볼지 |
-| RsiPeriod | 14 | |
-| RsiHigh / RsiLow | 60 / 40 | 하락 전환 의심은 RSI ≥ RsiHigh, 상승 전환 의심은 RSI ≤ RsiLow (RsiRelative가 꺼져 있을 때) |
-| DivBars | 15 | 다이버전스: 최근 몇 봉 안의 고점·저점과 비교할지 |
-| PivotStrength | 2 | 고점·저점으로 인정할 좌우 봉 수 |
-| StochPeriodK / StochSmooth / StochPeriodD | 10 / 5 / 5 | |
-| CrossLow / CrossHigh / CrossFilterBars | 20 / 80 / 5 | 골든·데드크로스 필터 (spec 2장 정의 그대로) |
-| SuspectReturn | true | 의심 중 반대 신호가 나오면 원래 추세로 돌아감 |
-| RsiLookback | 1 | 의심의 RSI 조건을 최근 몇 봉(현재 포함) 안에서 볼지. 1 = 같은 봉에서만 (전략의 `RegimeRsiBars`) |
-| Mode | 1 | 추세 판단 방식. 1 = 회의 문서 정의, 2 = 점수 방식 |
-| ScoreMin | 2 | 점수 방식: 추세로 인정할 최소 점수 |
-| ScoreRsiBand | 5 | 점수 방식: RSI가 50에서 이만큼 벗어나야 방향으로 인정 |
-| NoSideways | false | 켜면 횡보(0)를 내지 않고, 상승·하락 조건이 둘 다 아닌 구간을 마지막 추세의 전환 의심(±1)으로 낸다 |
-| ScoreEventBars | 3 | 점수 방식: 최근 몇 봉 안의 사건을 점수의 한 항목으로 넣을지. 0 = 넣지 않음 |
-| RsiRelative | false | 켜면 의심의 RSI 조건을 고정 기준 대신 RSI의 최근 평균 대비로 본다 |
-| RsiCenterBars | 20 | RsiRelative: RSI 중심(평균)을 구하는 봉 수 |
-| RsiOffset | 8 | RsiRelative: 중심에서 이만큼 벗어나야 조건 충족 |
-| ScoreExit | 0 | 점수 방식: 상승추세는 점수가 이 값 이하로 내려가면 끝난다 (하락추세는 부호 반대) |
-| SuspectNeedsPrice | false | 켜면 가격 항목이 아직 추세 방향일 때는 의심을 켜지 않는다 |
-| SuspectMaxScore | 5 | 하락 전환 의심은 점수 ≤ 이 값, 상승 전환 의심은 점수 ≥ −이 값일 때만 켠다. 5 = 제한 없음 (2026-10-14 추가) |
-| SuspectMinEvidence | 1 | 의심에 필요한 근거 종류 수 (다이버전스, MACD 전환, 크로스, 가격 항목이 추세 방향이 아님). 1 = 하나로 충분 (2026-10-14 추가) |
-| SuspectEvidenceBars | 2 | 근거를 모으는 봉 수(현재 포함) (2026-10-14 추가) |
-| TrendConfirmBars | 1 | 추세 시작 조건이 몇 봉 연속이어야 추세로 인정할지 (2026-10-14 추가) |
-| TrendExitBars | 1 | 추세 종료 조건이 몇 봉 연속이어야 추세를 끝낼지 (2026-10-14 추가) |
+| Fast / Mid / Slow | 6 / 20 / 60 | 단기(F1) / 중기(S1, S2 방식 1) / 장기(S2) SMA |
+| ShowDebugVisuals | false | 검증용 배경색: 상승 초록, 하락 빨강, 의심 중 주황(하락의심)·하늘색(상승의심) |
+| MacdFast / MacdSlow / MacdSmooth | 12 / 26 / 9 | S3 MACD선 부호, F2 MACD선 기울기 |
+| RsiPeriod | 14 | S4 |
+| S2Mode | 1 | 1 = 중기선 > 장기선, 2 = 장기선이 SlopeBars봉 전보다 높음 |
+| SlopeBars | 5 | S2 방식 2의 비교 봉 수 |
+| UseRsi | true | S4 RSI 항목 사용 |
+| RsiBand | 5 | S4: RSI ≥ 50 + 이 값이면 +1, ≤ 50 − 이 값이면 −1 |
+| MacdSlopeBars | 2 | F2: MACD선이 이 봉 수 연속 커지면 +1, 작아지면 −1 |
+| TrendStartFast / TrendStartSlow | 2 / 2 | 추세 시작: F ≥ 앞의 값 AND S ≥ 뒤의 값 (하락은 거울상) |
+| TrendEndSlow | 0 | 상승추세 끝: S ≤ 이 값 (하락추세 끝: S ≥ −이 값) |
+| SuspectFast | 2 | 의심 이벤트: 상승추세 중 F ≤ −이 값이 된 첫 봉 (하락추세는 F ≥ 이 값) |
 | ShowPlots | false | 차트 표시 전용. 생성자 인자가 아니다 |
 
-전략의 설정값 이름은 앞에 `Regime`이 붙는다(`RegimeMode`, `RegimeScoreMin`, `RegimeRsiRelative`, `RegimeSuspectMaxScore` 등). 예외: `RsiLookback` ↔ `RegimeRsiBars`, `HistBars` ↔ `RegimeHistBars`, `TrendConfirmBars` ↔ `RegimeConfirmBars`, `TrendExitBars` ↔ `RegimeExitBars`, `SuspectReturn`·MACD·스토캐스틱·크로스·RSI 기간은 같은 이름.
+전략의 설정값 이름: `Fast/Mid/Slow` ↔ `RegimeFast/RegimeMid/RegimeSlow`, `S2Mode` ↔ `RegimeS2Mode`, `SlopeBars` ↔ `RegimeSlopeBars`, `UseRsi` ↔ `RegimeUseRsi`, `RsiBand` ↔ `RegimeRsiBand`, `MacdSlopeBars` ↔ `RegimeMacdSlopeBars`. `TrendStartFast`·`TrendStartSlow`·`TrendEndSlow`·`SuspectFast`·MACD·RSI 기간은 같은 이름.
 
 | 이름 | 타입 | 의미 |
 | --- | --- | --- |
-| Regime | 플롯 | +2 상승추세, +1 하락 전환 의심, 0 횡보, −1 상승 전환 의심, −2 하락추세. 부호는 바탕 추세의 방향. 데이터가 모자라면 NaN |
-| SmaFast | 플롯 | SMA(Fast) |
-| MacdLine | 플롯 | 추세 봉의 MACD선 |
-| Rsi | 플롯 | 추세 봉의 RSI |
-| Aligned | int | 화면 표시용. +1 정배열, −1 역배열, 0 둘 다 아님 |
-| SuspectReason | string | 화면 표시용. 지금 의심 상태의 근거 (의심이 아니면 빈 문자열) |
-| Score | int | 점수 방식의 합계 (−5 ~ +5). Mode 1에서도 계산한다. 전략의 유기 모드가 횡보 진입 필터에 쓴다 |
-| ScoreText | string | 화면 표시용. 항목별 방향 (예: "가격▲ MACD▼ RSI− 스토▲ 사건▲") |
-| RsiCenter | double | 화면 표시용. RSI의 최근 RsiCenterBars봉 평균 |
+| Regime | 플롯 | +1 상승추세 / 0 횡보 / −1 하락추세. 데이터가 모자라면 NaN |
+| SmaFast, SmaMid, SmaSlow | 플롯 | 세 SMA (표시·마지막 조각 청산·기록용) |
+| MacdLine | 플롯 | 추세 봉 MACD선 |
+| Rsi | 플롯 | 추세 봉 RSI |
+| SlowScore, FastScore | Series&lt;double&gt; | S (−4 ~ +4, RSI를 끄면 −3 ~ +3), F (−2 ~ +2) |
+| TrendStart | Series&lt;int&gt; | 이 봉에서 추세가 시작되면 ±1, 아니면 0 |
+| SuspectEvent | Series&lt;int&gt; | 이 봉에서 의심이 생기면: 상승추세 중 하락의심 = −1, 하락추세 중 상승의심 = +1, 아니면 0 |
+| SuspectActive | Series&lt;int&gt; | 의심 중이면 그 방향(−1 / +1), 아니면 0 |
+| ScoreText | string | 상태 상자·로그용: "S1▲ S2▲ S3− S4▲ │ F1▼ F2▼" (RSI를 끄면 S4 없음) |
 
-판정 (spec 3장, 3-1):
-- Mode 1: 상승추세 조건 = 정배열 AND MACD선 > 0. 하락추세 조건 = 역배열 AND MACD선 < 0.
-- Mode 2: 다섯 항목이 각각 +1 / −1 / 0을 낸다. 가격(종가 vs SMA Fast, 그리고 SMA Fast가 직전 봉보다 높은지), MACD 히스토그램(부호 AND 직전 봉 대비 같은 방향), RSI(50 ± ScoreRsiBand), 스토캐스틱(%K vs %D AND %K가 50의 같은 쪽), 사건(최근 ScoreEventBars봉 안의 가장 최근 사건의 방향. 상승 쪽 = MACD 상승 전환·골든크로스·상승 다이버전스). 가격이 +1이고 합계 ≥ ScoreMin이면 상승추세 시작, 합계 ≤ ScoreExit이면 끝. 하락은 거울상.
-- 두 방식 모두, 시작 조건이 TrendConfirmBars봉 연속이면 추세가 되고, 종료 조건(Mode 2는 점수 ≤ ScoreExit, Mode 1은 시작 조건이 깨짐)이 TrendExitBars봉 연속이면 끝난다. 반대 방향의 시작 조건이 채워지면 바로 바뀐다. 기본(1 / 1)이면 그 봉의 조건 그대로다.
-- 두 방식 모두, 상승·하락 조건이 둘 다 아니면 횡보이고 의심 상태도 끝난다 (NoSideways가 켜져 있으면 마지막 추세의 전환 의심).
-- 의심을 켜는 추가 조건(기본은 모두 통과): 최근 SuspectEvidenceBars봉 안의 근거 종류 수 ≥ SuspectMinEvidence, 그리고 점수 ≤ SuspectMaxScore(상승 전환 의심은 ≥ −SuspectMaxScore).
-- 상승추세 조건 중: RSI 조건(최근 RsiLookback봉 안에 한 번이라도) AND [하락 다이버전스 OR MACD 하락 전환 OR 데드크로스]면 의심을 켠다. RSI 조건은 RsiRelative가 꺼져 있으면 RSI ≥ RsiHigh, 켜져 있으면 RSI ≥ 그 봉의 RSI 평균 + RsiOffset. SuspectNeedsPrice가 켜져 있으면 가격 항목이 +1인 봉에서는 켜지 않는다. 의심은 유지되고, SuspectReturn이 켜져 있으면 MACD 상승 전환 또는 골든크로스에서 푼다. 하락 쪽은 거울상.
-- 다이버전스: DivBars봉 안에서 좌우 PivotStrength봉보다 고가가 높은 봉(고점) 중 가장 높은 것과 지금 봉을 비교. 지금 고가가 더 높은데 RSI는 낮으면 하락 다이버전스. 저점으로 거울상이 상승 다이버전스.
-- MACD 전환은 TQ_MacdTurn(…, HistBars, 14, 0)의 TurnUp/TurnDown을 쓴다 (히스토그램 HistBars봉 연속 증가·감소가 처음 확인된 봉).
-- 스토캐스틱은 TQ_Signals·TQ_Stochastic과 같은 식으로 직접 계산한다.
+판정 (spec v3 3-1, 3-2, 추세 봉 마감마다):
+- S1 = 부호(종가 − SMA Mid). S2 = 방식 1이면 부호(SMA Mid − SMA Slow), 방식 2면 부호(SMA Slow − SlopeBars봉 전 SMA Slow). S3 = 부호(MACD선). S4 = RSI ≥ 50 + RsiBand → +1, ≤ 50 − RsiBand → −1, 아니면 0.
+- F1 = 종가 > SMA Fast AND SMA Fast > 직전 봉 → +1, 반대 → −1, 나머지 0. F2 = MACD선이 MacdSlopeBars봉 연속 커짐 → +1, 연속 작아짐 → −1.
+- 상태: 추세 아님 → 시작 조건이면 그 방향 추세(TrendStart = ±1). 상승추세 → 하락 시작 조건이면 바로 하락추세, 아니고 S ≤ TrendEndSlow면 횡보. 하락은 거울상. 확정 연속 봉 수는 없다.
+- 의심: 추세가 바뀌면 지운다. 추세 중 F × 추세 ≤ −SuspectFast가 된 첫 봉에 이벤트, F × 추세 ≥ 0이면 해제(이벤트 없음). 해제 뒤 다시 닿으면 다시 이벤트.
+- 데이터 가드: CurrentBar < max(Slow − 1, MacdSlow + MacdSmooth, RsiPeriod, SlopeBars, MacdSlopeBars + 1)이면 Regime = NaN.
+- 같은 식이 `docs/tools/tq_regime_score.py`의 `mode=3`(`compute_regime_v3`)에 있다. 한쪽을 고치면 같이 고친다.
 
 ## TQ_MacdTurn (A) — 입력: 진입 봉 또는 추세 봉
-MACD 전환 판정을 한곳에서 한다. TQ_Signals와 TQ_Regime이 내부에서 호출하고, 전략은 직접 호출하지 않는다.
+MACD 전환 판정을 한곳에서 한다. TQ_Signals가 내부에서 호출하고, 전략은 직접 호출하지 않는다 (v3의 TQ_Regime은 쓰지 않는다).
 차트에 올리면 히스토그램 막대 색으로 방향을 볼 수 있다: 초록 = 연속 증가, 빨강 = 연속 감소, 회색 = 둘 다 아님. 회색·빨강에서 초록으로 바뀐 첫 봉이 상승 전환이다.
 
 | 설정값 | 기본값 |
@@ -191,10 +173,10 @@ T1 처리 규칙 (spec 2장 T1)
 - 밴드 조건 1번당 진입 신호는 1번이다. 지표는 포지션을 모르므로, B가 보유 중이라 쓰지 못한 신호도 그 밴드 조건의 기회를 쓴 것으로 본다.
 - 9개 진입 신호는 각자 따로 대기 상태를 가진다.
 
-## B가 직접 계산하는 것
-- 어느 진입 신호를 쓸지: 신호 봉의 `TQ_Regime.Regime` 값으로 고른다 (spec 5장 표).
-- 단계별 익절 밴드와 수량 비율: 전략의 규칙 표 (`Plan`). 밴드 값은 TQ_ATRChannels에서 읽는다.
-- 마지막 조각 조건: `Close[0]`과 `TQ_Signals.Sma[0]` 비교.
-- 전량 청산 조건: MacdDown / Dead / T2Bull / T2Bear, 그리고 추세가 전환 의심으로 바뀌는지.
-- 손절가: 신호 봉의 SwingLow5/SwingHigh5와 ±StopPercent% 중 한쪽(StopWider). 신호 봉 종가로 먼저 걸고 체결되면 실제 체결가로 다시 계산 (spec 4장).
-- 유기 모드(`OrganicMode`, spec 5-2)와 추가 옵션들: 추세가 정하는 진입 방향, 추세 확정 봉 진입, `TQ_Regime.Score`로 횡보 진입 막기, ATR 손절과 구조 손절(추세 봉의 고가·저가는 전략이 `Highs`/`Lows[regimeBip]`로 직접 읽는다), 추세 청산, 두 단계 진입(진입 봉 `TQ_Regime.Regime`), 의심 뒤 가격 확인 역진입(`SwingHigh5`/`SwingLow5[1]` 돌파), 반전 신호 큐(9개 진입 신호를 추세와 상관없이 기억), 익절 비중, 이익 따라가기 청산, 추세가 바뀔 때 대기 이어 가기(`KeepWaitOnTrendChange`). 모두 전략 쪽에 있고 지표는 추세·포지션을 모른 채 값만 낸다.
+## B가 직접 계산하는 것 (v3 전략)
+- TQ_Signals에서 쓰는 값: `EntryUpLong`·`EntryDnShort`(E2 추세 눌림, 생성자 `UpLongBand`·`DnShortBand` ← `TrendPullbackBand`), `EntrySideLong`·`EntrySideShort`(E4 횡보, `SideBand` ← `SideBand`), `T2Bull/T2Bear`, `MacdUp/MacdDown`, `Golden/Dead`, `SwingHigh5/SwingLow5`, `K/D/Rsi`, 화면용 `MacdRising/Falling`·`Wait…`·`T1Bars…`·`MacdHist`·`Sma`(기록용). 나머지 5개 진입 신호는 계산되지만 쓰지 않으며, 그 밴드 인자에는 main 기본값(2 / 1 / 3 / 30 / 1 / 2)을, `SmaPeriod`에는 18을, `T1WindowUp/Dn/Side`에는 0을, `T1SameBar`에는 false를 넘긴다.
+- 포지션 종류(TL·TS·SL·SS)와 진입 경로(E1~E4): `TQ_Regime.Regime`·`TrendStart`·`SuspectActive`·`SlowScore`·`FastScore`와 위 진입 신호, 장전 박스(진입 봉 21:31~22:30 최고가·최저가)로 고른다 (spec v3 4-2).
+- 단계별 익절: 추세 포지션은 TQ_ATRChannels 밴드(1차·2차), 횡보 1단계는 진입가 ± ATR × 배수(고정 가격). 마지막 조각 조건은 추세 봉 종가(`Closes[regimeBip][0]`)와 `TQ_Regime.SmaMid`/`SmaFast` 비교.
+- 손절: 신호 봉의 `SwingLow5`/`SwingHigh5` 한 틱 바깥, ATR 범위와 최소 틱으로 자름. 신호 봉 종가로 먼저 걸고 체결되면 체결가로 다시 계산 (spec v3 4-3).
+- 의심 일부청산: `TQ_Regime.SuspectEvent`(새 추세 봉 값을 처음 본 진입 봉에서) → 가격 확인(`SwingLow5[1]`/`SwingHigh5[1]`) → 조각 단위 청산 (spec v3 4-5).
+- 지표는 추세·포지션·시간대를 모른 채 값만 낸다.
