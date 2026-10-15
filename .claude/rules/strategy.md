@@ -27,7 +27,8 @@ paths:
 - 봉 마감 조건의 청산은 시장가 `ExitLong/ExitShort`. 주문은 BIP 0으로만.
 - **청산 수량은 항상 직접 준다.** 조각별 실제 보유 수량 `chunkLeft`(진입 체결 +, `FromEntrySignal`이 그 조각인 청산 체결 −)로 조각마다 청산하고, 조각과 상관없이 남은 포지션은 `FlattenLeftover()`(`Position.Quantity`, 직접 낸 청산 주문이 살아 있으면 기다림)로 정리한다. 수량 없는 `ExitLong()`은 쓰지 않는다: 부분 체결 뒤 NinjaTrader가 조각별로 기억하는 수량이 어긋나 반대 포지션이 생겼다(10/6 Playback).
 - 조각을 끝내는 것은 체결 수량으로(`chunkLeft`가 0). 익절 단계 처리는 부분 체결이 여러 번 와도 한 번(`stageFilled`).
-- 체결 콜백이 주문 호출 도중에 올 수 있다. 콜백이 읽는 상태(`liveSignals`, `pendingBandExit`)는 주문 전에 바꿔 둔다.
+- 체결 콜백이 주문 호출 도중에 올 수 있다. 콜백이 읽는 상태(`liveSignals`)는 주문 전에 바꿔 둔다.
+- E3 스탑 진입 주문(`PlaceE3Stop`)은 같은 방향이면 같은 시그널명으로 다시 내서 고친다. 다시 안 내면 봉 끝에 취소된다. 시장가 진입 전에는 `CancelE3Stop`.
 - 손절 이동은 `MoveStopTo()`만 쓴다(유리한 쪽으로만, `BreakevenBufferTicks` 안전 거리, 가까우면 미뤘다가 재시도).
 
 ## 상태 관리
@@ -36,6 +37,6 @@ paths:
 - 시간대 구분은 `ZoneNow()`(지표 발표 / 장전 / 개장 전후 / 장후)로 한다. 시각은 모두 설정값이고 자정을 넘는 경우도 처리한다(`RelMinutes`).
 
 ## 검증
-- 주문 흐름 테스트용 임시 진입은 `UseTestEntry`(기본 false).
+- 설정창은 정말 조절할 값만 둔다(v6 정리, 사용자 결정). 나머지는 `#region 고정값`의 `private const`. 새 설정을 늘리기 전에 고정값으로 충분한지 먼저 본다.
 - 상태 상자(`UpdateStatusPanel`)는 규칙이 바뀌면 같이 고친다. 구역(현재 상태 / 진입 조건 / 포지션 / 익절 / 손절 / 청산)별로 `sb.Section(...)` 아래에 줄을 넣고, 그리기는 `OnRender`가 한다. 줄 색은 맨 앞 기호(●○×, 두 칸 들여쓰기)로 정해진다. 막힌 진입에는 사유를 수치와 함께 적는다(`EvaluateEntries`).
 - 추세 판정 식을 바꾸면 `docs/tools/tq_regime_score.py`의 `compute_regime_v3`도 같이 고친다.

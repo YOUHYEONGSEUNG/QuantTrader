@@ -32,7 +32,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private TQ_Regime		regime;		// 추세 봉 추세 판단 (v3)
 		private TQ_Signals		signals;	// 진입 봉 신호
 		private ATR				atr;		// 진입 봉 ATR (손절·익절·트레일링 거리)
-		private int				regimeBip	= 2;	// 추세를 판단하는 시리즈 번호: 1 = 10분봉, 2 = 3분봉
+		private int				regimeBip	= 1;	// 추세를 판단하는 시리즈 번호: 3분봉 (BarsArray[1])
 		private int				minBars0;			// 진입 봉 데이터 부족 가드
 
 		// ── 포지션 ──
@@ -48,14 +48,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool			wasInEntryWindow;
 
 		// ── 분할 조각 ── 조각마다 진입 시그널명이 하나씩 있다 (예: TL1, TL2, TL3)
-		private const int		NoBand			= int.MinValue;
 		private readonly List<string>				liveSignals		= new List<string>();				// 아직 보유 중인 조각
 		private readonly List<string>				chunkOrder		= new List<string>();				// 이번 진입의 모든 조각 (단계 순서)
 		private readonly Dictionary<string, int>	chunkQty		= new Dictionary<string, int>();
 		private readonly Dictionary<string, int>	chunkStage		= new Dictionary<string, int>();	// 1 = 1차(1단계), 2 = 2차, 3 = 마지막 조각(횡보는 나머지)
-		private readonly Dictionary<string, int>	chunkBand		= new Dictionary<string, int>();	// 밴드 익절 배수 (NoBand = 밴드 익절 아님)
 		private readonly Dictionary<string, double>	chunkFixed		= new Dictionary<string, double>();	// 고정 가격 익절 (횡보 1단계, NaN = 없음)
-		private readonly HashSet<string>			pendingBandExit	= new HashSet<string>();			// 봉 마감 시장가로 낸 익절 주문 이름 (IntrabarTakeProfit 끔)
 		// 조각별 실제 보유 수량: 진입 체결로 늘고, 그 조각에서 나간 청산 체결(FromEntrySignal)로 준다. 0이 되면 조각이 끝난 것.
 		// 진입·청산이 여러 번에 나눠 체결되면 NinjaTrader가 조각별로 기억하는 수량이 실제와 어긋날 수 있어(10/6 Playback: 9계약 보유에 11계약 청산) 청산 수량은 이 값으로 직접 준다
 		private readonly Dictionary<string, int>	chunkLeft		= new Dictionary<string, int>();
@@ -69,6 +66,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 추가 진입 (spec 4-4-1, 사용자 결정 2026-10-15): 1차 익절 뒤 점수 속도가 포지션 방향으로 AddOnMinVel 이상이면 한 번
 		private string			addSig			= "";			// 추가 진입 조각 시그널명 (없으면 "")
 		private int				baseQty;						// 처음 진입 계약 수 (추가 수량 계산용)
+		// E3 스탑 주문 진입 (spec 4-2 v6): 봉 마감에 박스 고가 + 1틱(매도는 저가 − 1틱)에 스탑 진입 주문을 걸고, 닿는 순간 체결
+		private double			e3StopPx		= double.NaN;	// Enter가 이번에 거는 스탑 진입 가격 (NaN = 시장가 진입)
+		private int				e3StopDir;						// 걸어 둔 E3 스탑 주문 방향 (0 = 없음)
+		private string			e3StopPrefix	= "";			// 걸어 둔 E3 스탑 주문 시그널명 앞부분 (같은 방향이면 이름을 그대로 써서 주문을 고침)
+		private bool			e3StopPlacedNow;				// 이번 봉에 다시 걸었음 (안 걸면 NinjaTrader가 봉 끝에 취소)
+		private readonly List<Order>	e3StopOrders	= new List<Order>();
 		private bool			earlyEntry;						// 개장 뒤 EarlyWindowMinutes 안에 들어간 추세 진입 (E5 제외, spec 4-4-2)
 		private double			addFillSum;						// 추가분 체결가 합 (손익은 추가분 체결가 기준으로 따로 셈)
 		private int				addFillQty;
@@ -99,7 +102,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private string			suspectAction	= "";			// 기록용: SUSPECT / SUSPECT_STRONG / CANCEL
 
 		// ── 추세 봉 관찰 ── 진입 봉에서 새 추세 봉 값을 처음 볼 때를 잡는다
-		private int				lastRegimeBar	= -1;
+		private int				lastRegimeBar	= -1;			// 의심 이벤트 번호: 이벤트를 본 진입 봉 번호 (의심 하나당 한 번 실행, 4-5)
 		private int				trendStartNow;					// 이 진입 봉에서 처음 본 추세 시작 (±1, 없으면 0)
 		private int				suspectEventNow;				// 이 진입 봉에서 처음 본 의심 이벤트
 		private DateTime		lastTrendStartTime;
@@ -130,7 +133,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// ── v4 돌파 구조 (docs/spec.md 4-9) ── 진입 방향은 가격 돌파 + 빠른 점수, 느린 점수는 강한 반대만 거른다
 		private MAX				rangeHigh;						// 진입 봉 고가의 BreakoutBars봉 최고 ([1] = 직전 봉까지, 지금 봉 제외)
 		private MIN				rangeLow;
-		private int				fastPrevObserved;				// 직전 추세 봉의 F (F가 반대로 ±SuspectFast를 처음 넘는 봉을 잡는다)
 		private int				fastCrossNow;					// 이 진입 봉에서 처음 본 추세 봉에서 F가 −SuspectFast 아래로(−1) / 위로(+1) 넘어감
 		private int				lastBreakoutDir;				// 표시용: 마지막 돌파 신호 방향과 시각
 		private DateTime		lastBreakoutTime;
@@ -182,11 +184,107 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private string			markTag			= "";
 		private int				markQty;
 
-		// 검증용 임시 진입 (UseTestEntry)
-		private int				testHoldBars;
-		private const int		TestTp1Bar	= 2;
-		private const int		TestTp2Bar	= 3;
-		private const int		TestExitBar	= 4;
+		#region 고정값 (v6 정리, 2026-10-15 사용자 결정: 설정창에는 정말 조절할 값만. 값은 정리 전 기본값 그대로, 근거는 spec)
+		private const int RegimeBarMinutes = 3;
+		private const double ScoreScale = 0.9;
+		private const double ScoreTrendOff = 0.0;
+		private const int ScoreVelBars = 6;
+		private const int RegimeFast = 6;
+		private const int RegimeMid = 20;
+		private const int RegimeSlow = 60;
+		private const int TrendStartFast = 1;
+		private const int TrendStartSlow = 1;
+		private const int TrendEndSlow = 0;
+		private const int RegimeMacdSlopeBars = 2;
+		private const int RegimeS2Mode = 1;
+		private const int RegimeSlopeBars = 5;
+		private const bool RegimeUseRsi = true;
+		private const double RegimeRsiBand = 5;
+		private const int SuspectFast = 2;
+		private const bool SuspectNeedPrice = true;
+		private const int SuspectConfirmBars = 5;
+		private const int SuspectExitPercent = 50;
+		private const int SuspectStrongSlow = 1;
+		private const int SuspectStrongExitPercent = 100;
+		private const bool BlockEntryWhileSuspect = true;
+		private const bool TrendEntryNeedFast = true;
+		private const int TrendPullbackBand = 0;
+		private const int PullbackMinSlow = 2;
+		private const int OrbEndTime = 230000;
+		private const int OrbMinSlow = 1;
+		private const int OrbMinFast = 1;
+		private const int OrbMaxEntries = 2;
+		private const double E5BreakevenR = 1.0;
+		private const double E5StopMinAtr = 1.0;
+		private const double E5StopMaxAtr = 4.0;
+		private const int BreakoutBars = 15;
+		private const int BreakoutMinFast = 1;
+		private const int BreakoutBoxBars = 30;
+		private const double BreakoutMaxEr = 0.25;
+		private const bool BreakoutExitOnOpposite = true;
+		private const double EntryMinRR = 1.0;
+		private const bool E1Reaccel = true;
+		private const int SideBand = 2;
+		private const bool SideT2Entry = true;
+		private const int SideBlockScore = 3;
+		private const bool BlockSideAfterStop = true;
+		private const int T1Window = 5;
+		private const int MacdConfirmBars = 2;
+		private const bool T2CountConfirmBars = true;
+		private const int SwingBars = 5;
+		private const double TrendStopMinAtr = 1.5;
+		private const double TrendStopMaxAtr = 3.0;
+		private const double SideStopMinAtr = 1.0;
+		private const double SideStopMaxAtr = 2.0;
+		private const int BreakevenBufferTicks = 8;
+		private const bool HandleOrderErrors = true;
+		private const double BreakevenMinR = 0.5;
+		private const double BreakevenFallbackAtr = 1.5;
+		private const double BreakevenAtR = 0.8;
+		private const int TrendTp1Band = 2;
+		private const int TrendTp2Band = 3;
+		private const int TrendTp1Percent = 33;
+		private const int TrendTp2Percent = 33;
+		private const int TrendLastExitMa = 1;
+		private const bool TrendExitOnEnd = true;
+		private const bool TrendExitOnEntryT2 = false;
+		private const double AddOnMinVel = 0.3;
+		private const int AddOnPercent = 50;
+		private const int EarlyWindowMinutes = 5;
+		private const double ExtendedEntryAtr = 2.0;
+		private const int ExtendedQtyPercent = 50;
+		private const int AddOnEndTime = 231000;
+		private const double SideTp1Atr = 2;
+		private const int SideTp1Percent = 33;
+		private const int SideRestBand = 3;
+		private const bool SideOscExitAfterTp1 = true;
+		private const bool SideExitOnOppTrend = true;
+		private const int OpenBlockBefore = 5;
+		private const int OpenBlockAfter = 3;
+		private const int PreOpenQtyPercent = 50;
+		private const int PreOpenTrendMinSlow = 2;
+		private const bool PreOpenAllowSide = true;
+		private const bool MinEntryFallback = true;
+		private const int MinEntryFallbackTime = 230000;
+		private const int MinEntryQtyPercent = 30;
+		private const bool UseRiskSizing = true;
+		private const int MaxQuantity = 40;
+		private const int BandMidPeriod = 26;
+		private const int BandAtrPeriod = 14;
+		private const double BandMult1 = 1;
+		private const double BandMult2 = 2;
+		private const double BandMult3 = 3;
+		private const int MacdFast = 12;
+		private const int MacdSlow = 26;
+		private const int MacdSmooth = 9;
+		private const int StochPeriodK = 10;
+		private const int StochSmooth = 5;
+		private const int StochPeriodD = 5;
+		private const double CrossLow = 20;
+		private const double CrossHigh = 80;
+		private const int CrossFilterBars = 5;
+		private const int RsiPeriod = 14;
+		#endregion
 
 		protected override void OnStateChange()
 		{
@@ -200,169 +298,61 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 				// 기본값 = v3 지시서 5-2 (설계안)
 				// 01 추세 판단
-				RegimeBarMinutes		= 3;
 				// spec 3-3 연속 점수 + 속도 판정 (v6 기본, 사용자 제안 2026-10-15). 1 = v3 TQ_Regime 판정
-				RegimeMode				= 2;
-				ScoreScale				= 0.9;
 				ScoreTrendOn			= 0.2;
-				ScoreTrendOff			= 0.0;
-				ScoreVelBars			= 6;
 				ScoreVelMin				= 0.25;
 				ScoreExitOff			= -0.1;
-				RegimeFast				= 6;
-				RegimeMid				= 20;
-				RegimeSlow				= 60;
-				TrendStartFast			= 1;	// 2026-10-15 사용자 결정 2 → 1 (21일 재현: 지연 중간 20 → 7분, 추세 전환은 늘어남)
-				TrendStartSlow			= 1;
-				TrendEndSlow			= 0;
-				RegimeMacdSlopeBars		= 2;
-				RegimeS2Mode			= 1;
-				RegimeSlopeBars			= 5;
-				RegimeUseRsi			= true;
-				RegimeRsiBand			= 5;
 				// 02 의심 이벤트
-				SuspectFast				= 2;
-				SuspectNeedPrice		= true;
-				SuspectConfirmBars		= 5;
-				SuspectExitPercent		= 50;
-				SuspectStrongSlow		= 1;
-				SuspectStrongExitPercent	= 100;
-				BlockEntryWhileSuspect	= true;
-				TrendEntryNeedFast		= true;
 				// 03 진입 — 추세
 				// v6: 진입 경로 E1·E2·E3·E4 + B1 박스 돌파 켬 (진입 횟수를 줄이지 않고 B1 조건만 '박스에서 나오는 돌파'로 바꿈, spec 4-9)
 				UseEntryTrendStart		= true;
 				UseEntryPullback		= true;
-				TrendPullbackBand		= 0;	// 2026-10-15 사용자 결정 1(−1배) → 0(중심선)
-				PullbackMinSlow			= 2;
 				UseEntryOrb				= true;
-				OrbEndTime				= 230000;
-				OrbMinSlow				= 1;
-				OrbMinFast				= 1;
-				OrbMaxEntries			= 2;
+				E3StopEntry				= true;
 				// E5 개장 범위 돌파 (spec 4-10, 사용자 결정 2026-10-15): 28일 시뮬레이션 38건 +10.5R, 7월·10월 모두 이익
 				UseEntryOpenRange		= true;
 				E5RangeMinutes			= 5;
 				E5TargetR				= 2.0;
-				E5BreakevenR			= 1.0;
-				E5StopMinAtr			= 1.0;
-				E5StopMaxAtr			= 4.0;
 				// B1 박스 돌파 (4-9) — v6 기본 켬. 직전 BreakoutBoxBars봉 효율비 ≤ BreakoutMaxEr(박스)일 때 돌파 진입, 느린 점수는 안 봄(4)
 				UseBreakoutEntry		= true;
-				BreakoutBars			= 15;
-				BreakoutMinFast			= 1;	// v6: 연속 F 기준(×0.9)에서 2 = 1.8은 대회 구간 6%만 넘어 B1이 사라짐 → 1(0.9)
-				BreakoutMaxAbsSlow		= 4;
-				BreakoutBoxBars			= 30;
-				BreakoutMaxEr			= 0.25;
-				BreakoutExitOnOpposite	= true;
-				EntryMinRR				= 1.0;
-				E1Reaccel				= true;
 				// 04 진입 — 횡보
 				UseEntrySide			= true;
-				SideBand				= 2;
-				SideT2Entry				= true;
-				SideBlockScore			= 3;
-				BlockSideAfterStop		= true;
 				// 05 진입 — 공통
-				T1Window				= 5;
-				MacdConfirmBars			= 2;
-				T2CountConfirmBars		= true;
 				// 06 손절
-				SwingBars				= 5;
-				TrendStopMinAtr			= 1.5;
-				TrendStopMaxAtr			= 3.0;
-				SideStopMinAtr			= 1.0;
-				SideStopMaxAtr			= 2.0;
 				StopMinTicks			= 32;
-				BreakevenBufferTicks	= 8;
-				HandleOrderErrors		= true;
-				BreakevenMinR			= 0.5;
-				BreakevenFallbackAtr	= 1.5;
-				BreakevenAtR			= 0.8;
 				// 07 청산 — 추세
-				TrendTp1Band			= 2;
-				TrendTp2Band			= 3;
-				TrendTp1Percent			= 33;
-				TrendTp2Percent			= 33;
 				TrailAtr				= 2.5;
-				TrendLastExitMa			= 1;
-				TrendExitOnEnd			= true;
-				TrendExitOnEntryT2		= false;
-				TrendTpMinR				= 0.5;
 				// spec 4-4 v6: 추세 익절을 손절 거리(R) 기준으로 (1 = 밴드 +2/+3배, 2 = R). 18일 시뮬레이션 두 달 모두 나음
-				TrendTpMode				= 2;
 				TrendTp1R				= 1.0;
 				TrendTp2R				= 2.5;
 				UseAddOn				= true;
-				ExtendedEntryAtr		= 2.0;
 				// spec 4-4-2 개장 직후 진입 옵션 (기본 끔, 2026-10-15 사용자 결정: 옵션으로)
-				EarlyWindowMinutes		= 5;
 				EarlyFullExitAtTp1		= false;
 				EarlyStopMult			= 1.0;
-				ExtendedQtyPercent		= 50;
-				AddOnMinVel				= 0.3;
-				AddOnPercent			= 50;
-				AddOnEndTime			= 231000;
 				// 08 청산 — 횡보
-				SideTp1Atr				= 2;
-				SideTp1Percent			= 33;
-				SideRestBand			= 3;
-				SideOscExitAfterTp1		= true;
-				SideExitOnOppTrend		= true;
 				// 09 시간대
 				OpenTime				= 223000;
 				NewsBlockMinutes		= 5;
-				OpenBlockBefore			= 5;
-				OpenBlockAfter			= 3;
-				PreOpenQtyPercent		= 50;
-				PreOpenTrendMinSlow		= 2;	// 2026-10-15 사용자 결정 (3 → 2)
-				PreOpenAllowSide		= true;
-				ProtectBeforeOpen		= false;
-				ProtectAtr				= 1;
-				MinEntryFallback		= true;
-				MinEntryFallbackTime	= 230000;
-				MinEntryQtyPercent		= 30;
 				// 10 수량·대회 시간
 				EntryQuantity			= 30;
-				UseRiskSizing			= true;
 				RiskPerTrade			= 2000;
-				MaxQuantity				= 40;
 				MinEntries				= 2;
 				ContestStartTime		= 213000;
 				EntryEndTime			= 231500;
 				FlattenTime				= 232700;
 				// 11 지표 계산값 (main 12번 묶음 그대로)
-				BandMidPeriod			= 26;
-				BandAtrPeriod			= 14;
-				BandMult1				= 1;
-				BandMult2				= 2;
-				BandMult3				= 3;
-				MacdFast				= 12;
-				MacdSlow				= 26;
-				MacdSmooth				= 9;
-				StochPeriodK			= 10;
-				StochSmooth				= 5;
-				StochPeriodD			= 5;
-				CrossLow				= 20;
-				CrossHigh				= 80;
-				CrossFilterBars			= 5;
-				RsiPeriod				= 14;
 				// 12 화면·기록
 				ShowStatus				= true;
-				ShowAdvanced			= false;
 				StatusPanelScale		= 130;
 				LogToFile				= true;
 				MlLogToFile				= true;
-				UseTestEntry			= false;
-				IntrabarTakeProfit		= true;
 
 				// 여기까지가 설계안 기본값이다. "설계안 기본값으로 되돌리기" 버튼이 쓰도록 담아 둔다
 				RememberDesignDefaults();
 			}
 			else if (State == State.Configure)
 			{
-				// 10분봉 → BarsArray[1], 3분봉 → BarsArray[2]. AddDataSeries 인자는 변수로 줄 수 없어서 둘 다 추가하고 고른다
-				AddDataSeries(BarsPeriodType.Minute, 10);
+				// 추세 봉 = 3분봉 → BarsArray[1] (v6 정리에서 10분봉 선택을 뺐음)
 				AddDataSeries(BarsPeriodType.Minute, 3);
 
 				// 주문 오류를 NinjaTrader 기본 동작(포지션을 닫고 전략 종료)에 맡기지 않고 OnOrderUpdate에서 직접 처리한다 (SetDefaults·Configure에서만 정할 수 있음)
@@ -372,7 +362,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			else if (State == State.DataLoaded)
 			{
 				channels	= TQ_ATRChannels(BandMidPeriod, BandAtrPeriod, BandMult1, BandMult2, BandMult3);
-				regimeBip	= RegimeBarMinutes == 10 ? 1 : 2;
 				regime		= TQ_Regime(BarsArray[regimeBip], RegimeFast, RegimeMid, RegimeSlow, false, MacdFast, MacdSlow, MacdSmooth, RsiPeriod,
 								RegimeS2Mode, RegimeSlopeBars, RegimeUseRsi, RegimeRsiBand, RegimeMacdSlopeBars,
 								TrendStartFast, TrendStartSlow, TrendEndSlow, SuspectFast, false);	// DirectReverse: v5에서 설정을 뺐고 항상 끔
@@ -436,36 +425,36 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
 			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v6"
-				+ " | 판정=" + (RegimeMode == 2 ? "점수(기준x" + ScoreScale.ToString(inv) + " 켬" + ScoreTrendOn.ToString(inv) + " 끔" + ScoreTrendOff.ToString(inv)
-					+ " 속도" + ScoreVelBars + "봉≥" + ScoreVelMin.ToString(inv) + " 청산끔" + ScoreExitOff.ToString(inv) + ")" : "v3")
+				+ " | 판정=" + ("점수(기준x" + ScoreScale.ToString(inv) + " 켬" + ScoreTrendOn.ToString(inv) + " 끔" + ScoreTrendOff.ToString(inv)
+					+ " 속도" + ScoreVelBars + "봉≥" + ScoreVelMin.ToString(inv) + " 청산끔" + ScoreExitOff.ToString(inv) + ")")
 				+ " | 추세봉=" + RegimeBarMinutes + "분 MA=" + RegimeFast + "/" + RegimeMid + "/" + RegimeSlow
 				+ " S2방식=" + RegimeS2Mode + " 기울기봉=" + RegimeSlopeBars + " RSI항목=" + RegimeUseRsi + " RSI폭=" + RegimeRsiBand.ToString(inv)
 				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow
 				+ " | 의심F=" + SuspectFast + " 가격확인=" + SuspectNeedPrice + "(" + SuspectConfirmBars + "봉) 청산%=" + SuspectExitPercent
 				+ " 강한의심S=" + SuspectStrongSlow + "(" + SuspectStrongExitPercent + "%) 의심중진입금지=" + BlockEntryWhileSuspect + " 추세진입F필요=" + TrendEntryNeedFast
 				+ " | E1=" + UseEntryTrendStart + "(재가속=" + E1Reaccel + ") E2=" + UseEntryPullback + "(밴드" + TrendPullbackBand + " S" + PullbackMinSlow + ") E3=" + UseEntryOrb
-				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
-				+ " | 추세익절=" + (TrendTpMode == 2 ? TrendTp1R.ToString(inv) + "R/" + TrendTp2R.ToString(inv) + "R" : "밴드") + " 추가진입=" + UseAddOn
+				+ "(스탑주문=" + E3StopEntry + " ~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
+				+ " | 추세익절=" + TrendTp1R.ToString(inv) + "R/" + TrendTp2R.ToString(inv) + "R" + " 추가진입=" + UseAddOn
 					+ "(속도≥" + AddOnMinVel.ToString(inv) + " " + AddOnPercent + "% ~" + AddOnEndTime + ")"
 				+ " 개장직후(" + EarlyWindowMinutes + "분 1차전량=" + EarlyFullExitAtTp1 + " 손절x" + EarlyStopMult.ToString(inv) + ")"
 				+ " 달린진입=" + ExtendedEntryAtr.ToString(inv) + "ATR→" + ExtendedQtyPercent + "%"
 				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
-				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast + " |S|≤" + BreakoutMaxAbsSlow
+				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast
 				+ " 효율비≤" + BreakoutMaxEr.ToString(inv) + "(" + BreakoutBoxBars + "봉) 반대청산=" + BreakoutExitOnOpposite + ")"
 				+ " | E4=" + UseEntrySide + "(밴드" + SideBand + " T2=" + SideT2Entry + ") 횡보필터=" + SideBlockScore + " 횡보재진입금지=" + BlockSideAfterStop
 				+ " | 대기=" + T1Window + " MACD확인=" + MacdConfirmBars + " T2앞봉인정=" + T2CountConfirmBars
 				+ " | 손절봉=" + SwingBars + " 추세손절ATR=" + TrendStopMinAtr.ToString(inv) + "~" + TrendStopMaxAtr.ToString(inv)
 				+ " 횡보손절ATR=" + SideStopMinAtr.ToString(inv) + "~" + SideStopMaxAtr.ToString(inv) + " 최소손절틱=" + StopMinTicks
-				+ " 본절최소R=" + BreakevenMinR.ToString(inv) + " 모자라면ATR=" + BreakevenFallbackAtr.ToString(inv) + " 밴드최소R=" + TrendTpMinR.ToString(inv) + " 이익보호R=" + BreakevenAtR.ToString(inv)
-				+ " | 추세익절=" + TrendTp1Band + "/" + TrendTp2Band + "배 " + TrendTp1Percent + "/" + TrendTp2Percent + "% 트레일링ATR=" + TrailAtr.ToString(inv)
+				+ " 본절최소R=" + BreakevenMinR.ToString(inv) + " 모자라면ATR=" + BreakevenFallbackAtr.ToString(inv) + " 이익보호R=" + BreakevenAtR.ToString(inv)
+				+ " | 추세조각=" + TrendTp1Percent + "/" + TrendTp2Percent + "% 트레일링ATR=" + TrailAtr.ToString(inv)
 				+ " 마지막조각=" + TrendLastExitMa + " 추세종료청산=" + TrendExitOnEnd + " 1분T2청산=" + TrendExitOnEntryT2
 				+ " | 횡보1단계=" + SideTp1Atr.ToString(inv) + "ATR " + SideTp1Percent + "% 전량밴드=" + SideRestBand
 				+ " 오실레이터는1단계뒤=" + SideOscExitAfterTp1 + " 반대추세청산=" + SideExitOnOppTrend
 				+ " | 개장=" + OpenTime + " 지표금지=" + NewsBlockMinutes + "분 개장전후금지=" + OpenBlockBefore + "/" + OpenBlockAfter
 				+ " 장전수량%=" + PreOpenQtyPercent + " 장전추세S=" + PreOpenTrendMinSlow + " 장전횡보=" + PreOpenAllowSide
-				+ " 개장보호=" + ProtectBeforeOpen + "(" + ProtectAtr.ToString(inv) + ") 최소진입보장=" + MinEntryFallback + "(" + MinEntryFallbackTime + " " + MinEntryQtyPercent + "%)"
-				+ " | 수량=" + EntryQuantity + (UseRiskSizing ? "(위험 $" + RiskPerTrade.ToString(inv) + ")" : "(고정)") + " 시간=" + ContestStartTime + "/" + EntryEndTime + "/" + FlattenTime + " 봉중익절=" + IntrabarTakeProfit;
+				+ " 최소진입보장=" + MinEntryFallback + "(" + MinEntryFallbackTime + " " + MinEntryQtyPercent + "%)"
+				+ " | 수량=" + EntryQuantity + (UseRiskSizing ? "(위험 $" + RiskPerTrade.ToString(inv) + ")" : "(고정)") + " 시간=" + ContestStartTime + "/" + EntryEndTime + "/" + FlattenTime;
 		}
 
 		protected override void OnBarUpdate()
@@ -506,10 +495,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				ResetTradeState();
 				cands = EvaluateEntries();
 				if (InEntryWindow())
-				{
-					if (UseTestEntry)	RouteTestEntry();
-					else				RouteEntry(cands);
-				}
+					RouteEntry(cands);
+				else
+					ForgetE3Stop();	// 진입 시간 밖: 걸어 둔 E3 스탑은 다시 걸지 않으니 봉 끝에 취소됨
 			}
 			else
 			{
@@ -521,21 +509,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				else
 				{
 					RetryDeferredStop();
-					if (UseTestEntry)
-					{
-						testHoldBars++;
-						ManageTestExits();
-					}
-					else
-					{
-						ProtectBeforeOpenCheck();
-						ProtectProfitCheck();
-						UpdateTrailStop();
-						UpdateTargets();
-						if (IsTrendPos())	ManageTrendExits();
-						else				ManageSideExits();
-						TryAddOn();
-					}
+					ProtectProfitCheck();
+					UpdateTrailStop();
+					UpdateTargets();
+					if (IsTrendPos())	ManageTrendExits();
+					else				ManageSideExits();
+					TryAddOn();
 				}
 			}
 
@@ -552,6 +531,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			if (lastPosition == MarketPosition.Flat && marketPosition != MarketPosition.Flat)
 			{
+				// E3 스탑 주문이 체결됐으면 그때 E3 횟수를 센다 (걸어 두기만 한 봉은 세지 않음)
+				if (path == "E3" && e3StopDir != 0)
+				{
+					if (dir > 0)	{ orbCountLong++;	orbArmedLong = false; }
+					else			{ orbCountShort++;	orbArmedShort = false; }
+					Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 체결 {2}", Time[0], Instrument.FullName, DirText(dir)));
+					e3StopOrders.Clear();
+					ForgetE3Stop();
+				}
 				entryCount++;
 				Out(string.Format("[{0}][{1}][TQ_Strategy] 신규 진입 #{2} 방향={3} 평균가={4} 수량={5}",
 					Time[0], Instrument.FullName, entryCount, marketPosition, averagePrice, quantity));
@@ -579,12 +567,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		#region 추세 봉 관찰과 공통 헬퍼
 		// 직전에 마감된 추세 봉의 추세: +1 상승, 0 횡보, −1 하락
-		private int RegimeState()
-		{
-			if (RegimeMode == 2)
-				return contReady ? contState : 0;
-			return RawRegimeState();
-		}
+		private int RegimeState()	{ return contReady ? contState : 0; }
 
 		// TQ_Regime(v3)의 판정 그대로 (추세 봉 마감 줄과 채점기 --validate는 항상 이 값)
 		private int RawRegimeState()
@@ -593,9 +576,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return double.IsNaN(v) ? 0 : (int)v;
 		}
 
-		// 진입·청산 기준이 보는 S·F. RegimeMode 2면 연속 S·F를 정수로 환산: "S ≥ k" ⇔ "연속 S ≥ ScoreScale × k" (기준 코드는 그대로)
-		private int SlowNow()	{ return RegimeMode == 2 ? ScoreLevel(contSlow, RegimeUseRsi ? 4 : 3) : (int)regime.SlowScore[0]; }
-		private int FastNow()	{ return RegimeMode == 2 ? ScoreLevel(contFast, 2) : (int)regime.FastScore[0]; }
+		// 진입·청산 기준이 보는 S·F: 연속 S·F를 정수로 환산 "S ≥ k" ⇔ "연속 S ≥ ScoreScale × k" (spec 3-3)
+		private int SlowNow()	{ return ScoreLevel(contSlow, RegimeUseRsi ? 4 : 3); }
+		private int FastNow()	{ return ScoreLevel(contFast, 2); }
 
 		private int ScoreLevel(double x, int top)
 		{
@@ -605,15 +588,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return x > 0 ? n : -n;
 		}
 
-		// 보유 포지션의 추세 청산(TREND_END·OPP_TREND)이 보는 판정. RegimeMode 2면 흔들림에 둔한 청산용 판정, 1이면 v3 판정 그대로
-		private int ExitState()
-		{
-			if (RegimeMode == 2)
-				return contReady ? contExitState : 0;
-			return RawRegimeState();
-		}
+		// 보유 포지션의 추세 청산(TREND_END·OPP_TREND)이 보는 흔들림에 둔한 청산용 판정 (spec 3-3)
+		private int ExitState()	{ return contReady ? contExitState : 0; }
 
-		private int SuspectActiveNow()	{ return RegimeMode == 2 ? contSuspect : regime.SuspectActive[0]; }
+		private int SuspectActiveNow()	{ return contSuspect; }
 
 		private static double R6(double x)	{ return Math.Round(x, 6); }
 
@@ -728,30 +706,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			suspectEventNow	= 0;
 			reaccelNow		= 0;
 			fastCrossNow	= 0;
-			if (RegimeMode == 2)
-			{
-				UpdateContScore();
-				ObserveCont();
-				ObserveReaccel();		// 판정이 1분마다 바뀌므로 재가속도 1분마다 본다
-				return;
-			}
-			int rb = CurrentBars[regimeBip];
-			if (rb == lastRegimeBar)
-				return;
-			lastRegimeBar	= rb;
-			// v4 의심(돌파 포지션용): 추세 판정과 상관없이 F가 −SuspectFast 아래로 / +SuspectFast 위로 처음 넘어간 추세 봉
-			int fNow = FastNow();
-			if (fNow <= -SuspectFast && fastPrevObserved > -SuspectFast)	fastCrossNow = -1;
-			else if (fNow >= SuspectFast && fastPrevObserved < SuspectFast)	fastCrossNow = 1;
-			fastPrevObserved = fNow;
-			trendStartNow	= regime.TrendStart[0];
-			suspectEventNow	= regime.SuspectEvent[0];
-			if (trendStartNow != 0)
-			{
-				lastTrendStartTime	= Time[0];
-				lastTrendStartDir	= trendStartNow;
-			}
-			ObserveReaccel();
+			// 의심 이벤트 번호 = 이 진입 봉 (판정이 1분마다라 이벤트도 1분봉 단위). v6 처음에는 이 값을 갱신하지 않아
+			// 한 실행에서 첫 의심이 끝나면 그 뒤 의심을 다시 처리하지 못했음 (2026-10-15 정리 중 발견)
+			lastRegimeBar = CurrentBars[0];
+			UpdateContScore();
+			ObserveCont();
+			ObserveReaccel();		// 판정이 1분마다 바뀌므로 재가속도 1분마다 본다
 		}
 
 		// 추세 재가속 (E1Reaccel): 추세가 이어지는 중에 F가 0 이하(매도는 0 이상)로 내려갔다가 다시 추세 시작 조건(F, S)을 채운 추세 봉.
@@ -957,7 +917,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			public double	QtyPercent	= 100;
 			public bool		Fallback;
 			public double	RR			= double.NaN;
-			public string	Note		= "";	// E1이 열린 이유 (추세 시작 / 반대 추세 청산 뒤 / 재가속 / 구간 첫 봉 추세)
+			public string	Note		= "";
+			public double	StopPrice	= double.NaN;	// E3 스탑 주문 진입 가격 (조건은 맞고 종가만 아직 박스 안)	// E1이 열린 이유 (추세 시작 / 반대 추세 청산 뒤 / 재가속 / 구간 첫 봉 추세)
 		}
 
 		// 경로 우선순위: E1 > E3 > E2 > E4 (4-2)
@@ -1096,6 +1057,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 													{ c.Ready = true; c.Line = "● E3 박스 돌파: 지금 진입"; c.Code = "go"; }
 					else if (d * (Close[0] - edge) > 0)
 						{ c.Line = string.Format("× E3 박스 돌파: 종가는 박스 밖이지만 S {0} / F {1} (필요 {2} / {3})", Signed(S), Signed(F), Signed(d * OrbMinSlow), Signed(d * OrbMinFast)); c.Code = "score"; }
+					else if (E3StopEntry && d * S >= OrbMinSlow && d * F >= OrbMinFast)
+					{
+						c.StopPrice	= Instrument.MasterInstrument.RoundToTickSize(edge + d * TickSize);
+						c.Line		= string.Format("● E3 박스 돌파: 스탑 주문 {0:N2} (박스 {1} {2:N2})", c.StopPrice, d > 0 ? "고가" : "저가", edge);
+						c.Code		= "stop";
+					}
 					else							{ c.Line = string.Format("○ E3 박스 돌파: 종가 {0} {1:N2}", d > 0 ? ">" : "<", edge); c.Code = "wait"; }
 					list.Add(c);
 				}
@@ -1123,8 +1090,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					double edge	= d > 0 ? rangeHigh[1] : rangeLow[1];
 					string rangeTxt = string.Format("{0}분 {1} {2:N2}", BreakoutBars, d > 0 ? "고가" : "저가", edge);
 					string block = !UseBreakoutEntry ? "꺼짐" : timeBlock;
-					if (block == null && !fallback && BreakoutMaxAbsSlow < 4 && Math.Abs(S) > BreakoutMaxAbsSlow)
-						block = string.Format("느린 점수가 중립이 아님 (S {0}, |S| ≤ {1}일 때만)", Signed(S), BreakoutMaxAbsSlow);
 					double er = BoxEfficiency();
 					if (block == null && !fallback && BreakoutMaxEr < 1 && er > BreakoutMaxEr)
 						block = string.Format("박스가 아님: 직전 {0}봉 효율비 {1:N2} (≤ {2:N2}일 때만)", BreakoutBoxBars, er, BreakoutMaxEr);
@@ -1201,8 +1166,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			foreach (Candidate c in cands)
 				if (c.Ready && (best == null || PathRank(c.Path) < PathRank(best.Path)))
 					best = c;
+			e3StopPlacedNow = false;
 			if (best == null)
+			{
+				PlaceE3Stop(cands);
+				if (!e3StopPlacedNow)
+					ForgetE3Stop();
 				return;
+			}
+			CancelE3Stop(best.Path + DirText(best.Dir) + " 진입");
 
 			Pos p = best.Path == "E4" ? (best.Dir > 0 ? Pos.SL : Pos.SS) : (best.Dir > 0 ? Pos.TL : Pos.TS);
 			// 기록용 경로 이름: E1은 열린 이유별로 나눈다 (E1 추세 시작, E1X 반대 추세 청산 뒤, E1R 재가속, E1S 구간 첫 봉 추세)
@@ -1228,9 +1200,57 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
+		// spec 4-2 v6 E3 스탑 주문: 시장가로 들어갈 경로가 없을 때, E3 조건(S·F·횟수·시간)은 맞고 종가만 박스 안이면 박스 밖 1틱에 스탑 진입.
+		// 한 방향만 건다(관리형 주문은 미보유 때 한 방향 진입 주문이 살아 있으면 반대 진입을 무시, NT8 Managed Approach 문서). 가까운 쪽 우선.
+		// 같은 방향을 다음 봉에도 걸면 같은 시그널명으로 다시 내서 주문을 고친다(두 번 체결 방지). 다시 안 걸면 봉 끝에 NinjaTrader가 취소
+		private void PlaceE3Stop(List<Candidate> cands)
+		{
+			if (!E3StopEntry || !UseEntryOrb || cands == null)
+				return;
+			Candidate pick = null;
+			foreach (Candidate c in cands)
+				if (c.Path == "E3" && !double.IsNaN(c.StopPrice)
+					&& (pick == null || Math.Abs(c.StopPrice - Close[0]) < Math.Abs(pick.StopPrice - Close[0])))
+					pick = c;
+			if (pick == null)
+				return;
+			if (e3StopDir != 0 && e3StopDir != pick.Dir)
+				return;	// 반대 방향 스탑이 아직 살아 있음: 이번 봉 끝에 취소되면 다음 봉에 건다
+			bool renew = e3StopDir == pick.Dir;
+			e3StopPx = pick.StopPrice;
+			Enter(pick.Dir > 0 ? Pos.TL : Pos.TS, pick.Dir, "E3", pick.QtyPercent, pick.Fallback, double.NaN);
+			e3StopPx = double.NaN;
+			e3StopDir		= pick.Dir;
+			e3StopPlacedNow	= true;
+			if (!renew)
+				Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 {2} 가격={3:N2}", Time[0], Instrument.FullName, DirText(pick.Dir), pick.StopPrice));
+		}
+
+		// 걸어 둔 E3 스탑을 취소한다 (다른 경로로 시장가 진입할 때)
+		private void CancelE3Stop(string why)
+		{
+			if (e3StopDir == 0)
+				return;
+			foreach (Order o in e3StopOrders.ToArray())
+				if (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted)
+					CancelOrder(o);
+			Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 취소 → {2}{3}", Time[0], Instrument.FullName, why,
+				e3StopOrders.Count == 0 ? "" : " (반대 방향 진입은 취소가 끝나기 전이면 NinjaTrader가 무시할 수 있음)"));
+			ForgetE3Stop();
+		}
+
+		private void ForgetE3Stop()
+		{
+			e3StopDir		= 0;
+			e3StopPrefix	= "";
+			e3StopOrders.Clear();
+		}
+
 		// 분할 진입. 조각 수량 = 진입 계약 × % 내림, 마지막 조각이 나머지 (4-8)
 		private void Enter(Pos p, int d, string entryPath, double qtyPercent, bool fallback, double rr)
 		{
+			bool stopEntry	= !double.IsNaN(e3StopPx);
+			double refPx	= stopEntry ? e3StopPx : Close[0];	// 손절·수량·익절 기준가: 스탑 진입이면 스탑 가격
 			ResetTradeState();
 			pos				= p;
 			dir				= d;
@@ -1247,14 +1267,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			stopSwing	= d > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];	// 신호 봉 포함 최근 SwingBars봉
 			if (entryPath == "E5")
 				stopSwing = OpenRangeMid();										// spec 4-10: E5 손절 기준 = 개장 범위 중간
-			initialStop	= CalcStop(Close[0]);
+			initialStop	= CalcStop(refPx);
 			stopPrice	= initialStop;
 			// 위험 금액 수량 (UseRiskSizing, 사용자 결정 2026-10-15): 계약 = 위험 한도 × 구간 % ÷ (예상 손절 거리 × 계약당 가치).
 			// 최대는 지금 수량(EntryQuantity × 구간 %). 손절 한 번의 손실이 거의 일정해진다
 			string riskNote = "";
 			if (UseRiskSizing)
 			{
-				double distPts	= Math.Abs(Close[0] - initialStop);
+				double distPts	= Math.Abs(refPx - initialStop);
 				double pv		= Instrument.MasterInstrument.PointValue;
 				if (distPts > 0 && pv > 0)
 				{
@@ -1267,7 +1287,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// v5·v6 147건: 중심선 거리 높은 ⅓(≥ 1.7 ATR)이 두 버전 모두 손실. 막으면 진입이 줄어 수량으로 (사용자: 진입 횟수를 줄이지 않기)
 			if (IsTrendPos() && entryPath != "E5" && ExtendedEntryAtr > 0 && atr[0] > 0)
 			{
-				double ext = d * (Close[0] - channels.Mid[0]) / atr[0];
+				double ext = d * (refPx - channels.Mid[0]) / atr[0];
 				if (ext > ExtendedEntryAtr)
 				{
 					int before = qty;
@@ -1281,14 +1301,23 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// 시그널명은 거래마다 새로: TL7.1 = 7번째 진입의 1차 조각. NinjaTrader는 같은 시그널명에 걸었던 Set 익절·손절 값을 다음 진입에도 쓰고
 			// 지우는 메서드가 없어서(NT8 문서 SetProfitTarget), 이름을 재사용하면 익절을 걸지 않는 조각에 지난 거래의 익절가가 남는다
 			// (7/27 22:33: 트레일링으로 보낸 TS1·TS2가 21:35 거래의 익절가로 진입가 28522에 바로 체결). 멀리 거는 방법은 차트 가격 축이 늘어나서 뺐다
-			signalSeq++;
-			string prefix = p.ToString() + signalSeq + ".";
+			// E3 스탑을 같은 방향으로 다시 걸면 같은 이름 (NinjaTrader가 걸어 둔 주문을 고침)
+			string prefix;
+			if (stopEntry && e3StopDir == d && e3StopPrefix.Length > 0)
+				prefix = e3StopPrefix;
+			else
+			{
+				signalSeq++;
+				prefix = p.ToString() + signalSeq + ".";
+			}
+			if (stopEntry)
+				e3StopPrefix = prefix;
 			string split;
 			if (entryPath == "E5")
 			{
 				// spec 4-10: 한 조각, 익절 = 진입가 ± E5TargetR × 손절 거리 (체결되면 체결가 기준으로 다시 검)
 				double risk = Math.Abs(Close[0] - initialStop);
-				SubmitChunk(prefix + "1", qty, 1, NoBand, Close[0] + d * E5TargetR * risk);
+				SubmitChunk(prefix + "1", qty, 1, Close[0] + d * E5TargetR * risk);
 				split = qty + " (익절 " + E5TargetR.ToString("F1") + "R, " + E5BreakevenR.ToString("F1") + "R 뒤 본전·트레일링, 개장 범위 "
 					+ orLow.ToString("N2") + "~" + orHigh.ToString("N2") + ")";
 			}
@@ -1296,56 +1325,28 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			{
 				int q1 = (qty * TrendTp1Percent) / 100;
 				int q2 = (qty * TrendTp2Percent) / 100;
-				if (TrendTpMode == 2)
-				{
-					// spec 4-4 v6: 1·2차 익절 = 진입가 ± TrendTp1R / TrendTp2R × 손절 거리 (체결되면 체결가 기준으로 다시 검)
-					double risk = Math.Abs(Close[0] - initialStop);
-					bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;	// spec 4-4-2: 개장 직후 진입은 1차 익절점에서 전량
-					SubmitChunk(prefix + "1", q1, 1, NoBand, Close[0] + d * TrendTp1R * risk);
-					SubmitChunk(prefix + "2", q2, 2, NoBand, Close[0] + d * (allAtTp1 ? TrendTp1R : TrendTp2R) * risk);
-					SubmitChunk(prefix + "3", qty - q1 - q2, 3, NoBand, allAtTp1 ? Close[0] + d * TrendTp1R * risk : double.NaN);
-					split = q1 + "/" + q2 + "/" + (qty - q1 - q2) + (allAtTp1 ? " (개장 직후: 전량 " + TrendTp1R.ToString("F2") + "R)"
-						: " (익절 " + TrendTp1R.ToString("F2") + "R / " + TrendTp2R.ToString("F2") + "R)")
-						+ (earlyEntry && EarlyStopMult > 1 ? " 개장 직후 손절 ×" + EarlyStopMult.ToString("F1") : "");
-				}
-				else
-				{
-					// 신호 봉 종가가 익절 밴드를 이미 지나 있으면 (E2·E3, 사용자 결정 2026-10-15): 진입하자마자 진입가에 익절되지 않게
-					// 1차 밴드를 넘었으면 1차 조각도 2차 밴드로, 2차 밴드까지 넘었으면 두 조각 모두 마지막 조각처럼 트레일링·기준선으로 내보낸다
-					// 밴드까지 남은 거리가 예상 손절 거리 × TrendTpMinR보다 짧은 것도 지난 것으로 본다 (7/27 22:39: 1차까지 5pt, 손절 69pt. 사용자 결정 2026-10-15)
-					int b1 = TrendTp1Band, b2 = TrendTp2Band;
-					string passNote = "";
-					double minRoom = TrendTpMinR * Math.Abs(Close[0] - initialStop);
-					double room1 = d * (Band(d, TrendTp1Band) - Close[0]);
-					double room2 = d * (Band(d, TrendTp2Band) - Close[0]);
-					if (room2 <= 0 || room2 < minRoom)
-					{
-						b1 = NoBand;
-						b2 = NoBand;
-						tp2Done = true;	// 2차 뒤와 같이: 트레일링 시작, 마지막 조각 기준선 청산
-						passNote = string.Format(" | 2차 밴드({0} {1:N2})까지 {2:F1}pt (최소 {3:F1}pt) → 1·2차 조각도 트레일링으로", BandText(d, TrendTp2Band), Band(d, TrendTp2Band), room2, minRoom);
-					}
-					else if (room1 <= 0 || room1 < minRoom)
-					{
-						b1 = TrendTp2Band;
-						passNote = string.Format(" | 1차 밴드({0} {1:N2})까지 {2:F1}pt (최소 {3:F1}pt) → 1차 조각도 2차 밴드로", BandText(d, TrendTp1Band), Band(d, TrendTp1Band), room1, minRoom);
-					}
-					SubmitChunk(prefix + "1", q1, 1, b1, double.NaN);
-					SubmitChunk(prefix + "2", q2, 2, b2, double.NaN);
-					SubmitChunk(prefix + "3", qty - q1 - q2, 3, NoBand, double.NaN);
-					split = q1 + "/" + q2 + "/" + (qty - q1 - q2) + passNote;
-				}
+				// spec 4-4 v6: 1·2차 익절 = 진입가 ± TrendTp1R / TrendTp2R × 손절 거리 (체결되면 체결가 기준으로 다시 검)
+				double risk = Math.Abs(refPx - initialStop);
+				bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;	// spec 4-4-2: 개장 직후 진입은 1차 익절점에서 전량
+				SubmitChunk(prefix + "1", q1, 1, refPx + d * TrendTp1R * risk);
+				SubmitChunk(prefix + "2", q2, 2, refPx + d * (allAtTp1 ? TrendTp1R : TrendTp2R) * risk);
+				SubmitChunk(prefix + "3", qty - q1 - q2, 3, allAtTp1 ? refPx + d * TrendTp1R * risk : double.NaN);
+				split = q1 + "/" + q2 + "/" + (qty - q1 - q2) + (allAtTp1 ? " (개장 직후: 전량 " + TrendTp1R.ToString("F2") + "R)"
+					: " (익절 " + TrendTp1R.ToString("F2") + "R / " + TrendTp2R.ToString("F2") + "R)")
+					+ (earlyEntry && EarlyStopMult > 1 ? " 개장 직후 손절 ×" + EarlyStopMult.ToString("F1") : "");
 			}
 			else
 			{
 				int q1 = (qty * SideTp1Percent) / 100;
-				SubmitChunk(prefix + "1", q1, 1, NoBand, Close[0] + d * SideTp1Atr * stopAtr);	// 진입 때 ATR로 고정. 체결되면 체결가 기준으로 다시 건다
-				SubmitChunk(prefix + "2", qty - q1, 3, NoBand, double.NaN);
+				SubmitChunk(prefix + "1", q1, 1, Close[0] + d * SideTp1Atr * stopAtr);	// 진입 때 ATR로 고정. 체결되면 체결가 기준으로 다시 건다
+				SubmitChunk(prefix + "2", qty - q1, 3, double.NaN);
 				split = q1 + "/" + (qty - q1);
 			}
 
+			if (stopEntry && e3StopDir == d)
+				return;	// 같은 스탑 주문을 다시 건 것: 진입 줄은 처음 걸 때만
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2} {3} 경로={4} 구간={5}{6} 수량={7} ({8}) 손절={9:F2} 손익비={10} 추세={11} S={12} F={13}",
-				Time[0], Instrument.FullName, PosName(p), DirText(d), entryPath, session, fallback ? " 최소진입보장" : "",
+				Time[0], Instrument.FullName, PosName(p), DirText(d), entryPath + (stopEntry ? " 스탑 주문 " + refPx.ToString("N2") : ""), session, fallback ? " 최소진입보장" : "",
 				qty, split + riskNote, stopPrice, double.IsNaN(rr) ? "-" : rr.ToString("F2"), RegimeState(), Signed(SlowNow()), Signed(FastNow())));
 		}
 
@@ -1353,7 +1354,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 넣기 전에 전체 손절을 평단 이상으로. 추가 조각은 마지막 조각처럼(익절 지정가 없음) 트레일링·기준선·의심·손절로 나감
 		private void TryAddOn()
 		{
-			if (!UseAddOn || RegimeMode != 2 || !contReady || !IsTrendPos() || path == "E5" || pos == Pos.None || !tp1Done || addSig.Length > 0)
+			if (!UseAddOn || !contReady || !IsTrendPos() || path == "E5" || pos == Pos.None || !tp1Done || addSig.Length > 0)
 				return;
 			if (Position.MarketPosition == MarketPosition.Flat || entryFillQty <= 0)
 				return;
@@ -1365,22 +1366,28 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			addSig = pos.ToString() + signalSeq + ".4";
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 추가 진입 {2} {3}계약: 1차 익절 뒤 점수 속도 {4:F3} (기준 {5}) 손절={6:F2}",
 				Time[0], Instrument.FullName, DirText(dir), q, contVel, AddOnMinVel, stopPrice));
-			SubmitChunk(addSig, q, 3, NoBand, double.NaN);
+			SubmitChunk(addSig, q, 3, double.NaN);
 		}
 
 		// 진입 조각 하나: 손절과 익절 지정가를 먼저 걸고 진입한다 (SetStopLoss는 진입 전에, NT8 공식 문서)
-		private void SubmitChunk(string sig, int qty, int stage, int band, double fixedPrice)
+		private void SubmitChunk(string sig, int qty, int stage, double fixedPrice)
 		{
 			if (qty <= 0)
 				return;
 			chunkQty[sig]	= qty;
 			chunkStage[sig]	= stage;
-			chunkBand[sig]	= band;
 			chunkFixed[sig]	= fixedPrice;
 			chunkOrder.Add(sig);
 			liveSignals.Add(sig);
-			SetStopLoss(sig, CalculationMode.Price, OrderSafeStop(stopPrice, Close[0]), false);
+			SetStopLoss(sig, CalculationMode.Price, OrderSafeStop(stopPrice, double.IsNaN(e3StopPx) ? Close[0] : e3StopPx), false);
 			SetTarget(sig);
+			if (!double.IsNaN(e3StopPx))
+			{
+				// spec 4-2 v6: E3 스탑 진입 (관리형 주문, 다시 걸지 않으면 봉 끝에 취소)
+				if (dir > 0)	EnterLongStopMarket(qty, e3StopPx, sig);
+				else			EnterShortStopMarket(qty, e3StopPx, sig);
+				return;
+			}
 			if (dir > 0)	EnterLong(qty, sig);
 			else			EnterShort(qty, sig);
 		}
@@ -1534,7 +1541,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			SetStopForLive(s);
 
 			// R 익절(TrendTpMode 2)은 체결가 ± R × (체결가 − 손절) (spec 4-4)
-			if (IsTrendPos() && path != "E5" && TrendTpMode == 2)
+			if (IsTrendPos() && path != "E5")
 				foreach (string sig in liveSignals)
 				{
 					bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;
@@ -1603,35 +1610,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				e5Trail = true;
 		}
 
-		// 개장 보호 (ProtectBeforeOpen): 개장 직전 봉(OpenTime − 1분) 마감에 이익이 ATR × ProtectAtr 이상이면 손절을 평단으로
-		private void ProtectBeforeOpenCheck()
-		{
-			if (!ProtectBeforeOpen || entryFillQty <= 0)
-				return;
-			if (ToTime(Time[0]) != MinOfDayToHhmmss(MinOfDay(OpenTime) - 1))
-				return;
-			double avg = AvgPrice();
-			if (dir * (Close[0] - avg) >= ProtectAtr * atr[0])
-				MoveStopTo(avg, "개장 전 보호", Time[0]);
-		}
 		#endregion
 
-		#region 익절 지정가 (봉 진행 중, IntrabarTakeProfit)
-		// 조각의 익절 가격: 밴드 익절은 방금 마감된 봉의 밴드 값, 횡보 1단계는 고정 가격. 없으면 NaN
+		#region 익절 지정가 (봉 진행 중)
+		// 조각의 익절 가격 (진입가 ± R, 횡보 1단계 ± ATR, 체결가 기준으로 다시 계산한 고정 가격). 없으면 NaN
 		private double TargetPrice(string sig)
 		{
 			double fixedPrice;
-			if (chunkFixed.TryGetValue(sig, out fixedPrice) && !double.IsNaN(fixedPrice))
-				return fixedPrice;
-			int band;
-			if (!chunkBand.TryGetValue(sig, out band) || band == NoBand)
-				return double.NaN;
-			return Band(dir, band);
+			return chunkFixed.TryGetValue(sig, out fixedPrice) ? fixedPrice : double.NaN;
 		}
 
 		private void SetTarget(string sig)
 		{
-			double price = !IntrabarTakeProfit || UseTestEntry ? double.NaN : TargetPrice(sig);
+			double price = TargetPrice(sig);
 			if (double.IsNaN(price))
 				return;	// 익절이 없는 조각. 시그널명이 거래마다 새것이라(Enter의 signalSeq) 지난 거래의 익절 값이 남아 있지 않다
 			SetProfitTarget(sig, CalculationMode.Price, Instrument.MasterInstrument.RoundToTickSize(price));
@@ -1640,22 +1631,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 봉 마감마다 밴드 익절 지정가를 새 밴드 값으로 옮긴다. 체결 콜백이 liveSignals를 바꿀 수 있어 복사본으로 돈다
 		private void UpdateTargets()
 		{
-			if (IntrabarTakeProfit && !UseTestEntry)
-			{
-				foreach (string sig in liveSignals.ToArray())
-					SetTarget(sig);
-				return;
-			}
-			// IntrabarTakeProfit 끔: 봉 마감 종가로 판단해 시장가
 			foreach (string sig in liveSignals.ToArray())
-			{
-				double price = TargetPrice(sig);
-				if (!double.IsNaN(price) && dir * (Close[0] - price) >= 0)
-				{
-					pendingBandExit.Add("x" + sig);
-					ExitChunk(sig, chunkStage[sig] == 1 ? "TP1" : "TP2", "익절(봉 마감)");
-				}
-			}
+				SetTarget(sig);
 		}
 
 		private void OnTargetFill(string sig, double price, DateTime time)
@@ -1749,7 +1726,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (path == "E5")
 				return;	// spec 4-10: 손절·익절 지정가·본전·트레일링·종료 청산만 (공통 처리)
 			int st = RegimeState();
-			int xs = ExitState();	// spec 3-3: 추세 청산은 청산용 판정으로 (RegimeMode 1이면 st와 같음)
+			int xs = ExitState();	// spec 3-3: 추세 청산은 청산용 판정으로
 			if (xs == dir)
 				sawOwnTrend = true;
 
@@ -1764,7 +1741,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// 추세 종료(횡보) → 전량 청산 (TrendExitOnEnd). 보유 중 그 방향 추세였던 적이 있을 때만 (E3로 횡보 중 들어간 경우를 위해)
 			if (TrendExitOnEnd && xs == 0 && sawOwnTrend)
 			{
-				FlattenRemaining("TREND_END", RegimeMode == 2 ? "추세 종료 (점수 C ≤ " + ScoreExitOff.ToString("F2") + ")" : "추세 종료 (S ≤ " + TrendEndSlow + ")");
+				FlattenRemaining("TREND_END", "추세 종료 (점수 C ≤ " + ScoreExitOff.ToString("F2") + ")");
 				return;
 			}
 
@@ -1990,7 +1967,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				sent += q;
 			}
 			liveSignals.Clear();
-			pendingBandExit.Clear();
 			pos = Pos.None;
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 전량 청산 {2} ({3}) 수량={4}", Time[0], Instrument.FullName, code, why, sent));
 			if (sent == 0)
@@ -2049,14 +2025,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			suspectEventsSeen	= 0;
 			suspectAction	= "";
 			rrExpected		= double.NaN;
-			testHoldBars	= 0;
 			liveSignals.Clear();
 			chunkOrder.Clear();
 			chunkQty.Clear();
 			chunkStage.Clear();
-			chunkBand.Clear();
 			chunkFixed.Clear();
-			pendingBandExit.Clear();
 			chunkLeft.Clear();
 			stageFilled.Clear();
 			exitSent.Clear();
@@ -2071,6 +2044,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			if (order == null)
 				return;
+			// E3 스탑 진입 주문 추적 (취소용)
+			if (order.OrderType == OrderType.StopMarket && e3StopPrefix.Length > 0 && order.Name.StartsWith(e3StopPrefix))
+			{
+				if (orderState == OrderState.Filled || orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
+					e3StopOrders.Remove(order);
+				else if (!e3StopOrders.Contains(order))
+					e3StopOrders.Add(order);
+			}
 			bool rejected = orderState == OrderState.Rejected;
 			if (!rejected && error == ErrorCode.NoError)
 				return;
@@ -2078,8 +2059,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string name = order.Name;
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 주문 오류 이름={2} 상태={3} 오류={4} 내용={5} 스탑가={6} 수량={7}",
 				time, Instrument.FullName, name, orderState, error, comment, order.StopPrice, quantity));
-			if (!HandleOrderErrors)
-				return;
 
 			if (name == "Stop loss")
 			{
@@ -2143,12 +2122,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			{
 				if (name == "Profit target")
 					OnTargetFill(execution.Order.FromEntrySignal, price, time);
-				else if (pendingBandExit.Remove(name))
-				{
-					string sig = name.Substring(1);
-					if (chunkStage.ContainsKey(sig) && stageFilled.Add(sig))
-						OnStageFill(sig, price, time);
-				}
 				else if (name == "Stop loss")
 					OnStopLossFill(price, time);
 
@@ -2410,43 +2383,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string hold = Position.MarketPosition == MarketPosition.Flat ? "없음"
 				: string.Format("{0} {1}계약 손절={2:F2}{3}{4}", PosName(pos), Position.Quantity, stopPrice,
 					suspectWaitLeft > 0 ? " 의심확인대기=" + suspectWaitLeft : "", tp2Done ? " 2차뒤" : tp1Done ? " 1차뒤" : "");
-			string cont = RegimeMode == 2 ? string.Format(" 점수C={0:F6} 속도={1:F6} 연속S={2:F6} 연속F={3:F6}", contScore, contVel, contSlow, contFast) : "";
+			string cont = string.Format(" 점수C={0:F6} 속도={1:F6} 연속S={2:F6} 연속F={3:F6}", contScore, contVel, contSlow, contFast);
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 추세={2} S={3} F={4} ({5}){14} 의심={6} 구간={7} 후보 {8} 보유={9} 시고저종={10}/{11}/{12}/{13}",
 				Time[0], Instrument.FullName, RegimeState(), Signed(SlowNow()), Signed(FastNow()), regime.ScoreText,
 				SuspectActiveNow() < 0 ? "하락의심" : SuspectActiveNow() > 0 ? "상승의심" : "-",
 				ZoneText(ZoneNow()), cand.Length > 0 ? cand : "-", hold, Open[0], High[0], Low[0], Close[0], cont));
-		}
-		#endregion
-
-		#region 검증 — 임시 진입 (UseTestEntry)
-		// 진입 시간대에 미보유면 추세 매수로 들어가 2봉째 1차, 3봉째 2차, 4봉째 전량 청산 (익절 지정가는 걸지 않음)
-		private void RouteTestEntry()
-		{
-			Enter(Pos.TL, 1, "TEST", 100, false, double.NaN);
-		}
-
-		private void ManageTestExits()
-		{
-			if (testHoldBars == TestTp1Bar)
-			{
-				foreach (string sig in liveSignals.ToArray())
-					if (chunkStage[sig] == 1)
-					{
-						pendingBandExit.Add("x" + sig);
-						ExitChunk(sig, "TP1", "TEST 1차");
-					}
-			}
-			else if (testHoldBars == TestTp2Bar)
-			{
-				foreach (string sig in liveSignals.ToArray())
-					if (chunkStage[sig] == 2)
-					{
-						pendingBandExit.Add("x" + sig);
-						ExitChunk(sig, "TP2", "TEST 2차");
-					}
-			}
-			else if (testHoldBars >= TestExitBar)
-				FlattenRemaining("FLATTEN_TIME", "TEST 최종 청산");
 		}
 		#endregion
 
@@ -2536,11 +2477,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// ── 현재 상태 ──
 			sb.Section("현재 상태", StateTone(st, sus), true);
 			sb.AppendFormat("{0}{1}   {2:HH:mm}\n", StateText(st), sus < 0 ? " · 하락의심" : sus > 0 ? " · 상승의심" : "", Times[0][0]);
-			if (RegimeMode == 2)
-				sb.AppendFormat("점수 C {0:+0.000;-0.000} · 속도 {1:+0.000;-0.000} · 연속 S {2:+0.00;-0.00} (→{3}) · F {4:+0.00;-0.00} (→{5})\n",
-					contScore, contVel, contSlow, Signed(S), contFast, Signed(F));
-			else
-				sb.AppendFormat("{0}분봉: S {1} · F {2} ({3})\n", RegimeBarMinutes, Signed(S), Signed(F), regime.ScoreText);
+			sb.AppendFormat("점수 C {0:+0.000;-0.000} · 속도 {1:+0.000;-0.000} · 연속 S {2:+0.00;-0.00} (→{3}) · F {4:+0.00;-0.00} (→{5})\n",
+				contScore, contVel, contSlow, Signed(S), contFast, Signed(F));
 			if (suspectWaitLeft > 0)
 			{
 				double swingPrev = dir > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];
@@ -2565,9 +2503,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				RemoveDrawObject("TQ_StopLine");
 				RemoveDrawObject("TQ_AvgLine");
 				sb.Section("진입 조건", ToneEntry);
-				if (UseTestEntry)
-					sb.Append("TEST: 진입 시간대에 다음 봉 검증용 매수\n");
-				else if (cands != null)
+				if (cands != null)
 				{
 					// 그 추세에서 할 수 있는 방향을 먼저, 경로 순서대로
 					for (int k = 0; k < 2; k++)
@@ -2630,7 +2566,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 							dir > 0 ? "▼" : "▲", dir > 0 ? "데드" : "골든", SideOscExitAfterTp1 && !tp1Done ? " (MACD·크로스는 1단계 뒤)" : "");
 					continue;
 				}
-				string label = IsTrendPos() ? (stage == 1 ? "1차 " : "2차 ") + BandText(dir, chunkBand[sig]) : "1단계 진입가" + (dir > 0 ? "+" : "−") + SideTp1Atr + "ATR";
+				string label = path == "E5" ? "익절 " + E5TargetR.ToString("F1") + "R" : IsTrendPos() ? (stage == 1 ? "1차 " + TrendTp1R.ToString("F2") + "R" : "2차 " + TrendTp2R.ToString("F2") + "R")
+					: "1단계 진입가" + (dir > 0 ? "+" : "−") + SideTp1Atr + "ATR";
 				if (!live)
 					sb.AppendFormat("● {0} ({1}계약 체결)\n", label, chunkQty[sig]);
 				else
@@ -2844,545 +2781,206 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 태그: [설계] 설계안의 동작과 값 · [선택] 고민사항 스위치 · [안전] 주문 거부 대비 · [표시] 화면·기록
 
 		// ── 01. 추세 판단 (추세 봉) ──
-		[NinjaScriptProperty]
-		[Range(3, 10)]
-		[Display(Name = "[설계] 추세 봉 분: 3 / 10 (RegimeBarMinutes)", Description = "추세를 판단하는 봉. 기본 3(3분봉). 10이면 10분봉(이때 이동평균은 6/18/36 권장). 3과 10만 쓸 수 있고 다른 값은 3으로 봄. 이 묶음의 봉 수는 모두 이 봉 기준", GroupName = "01. 추세 판단 (추세 봉)", Order = 0)]
-		public int RegimeBarMinutes { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 2)]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 추세 판정 방식: 1 v3 / 2 연속 점수+속도 (RegimeMode)", Description = "기본 2(v6). 1 = TQ_Regime v3(정수 S·F, 추세 봉 마감). 2 = 항목 11개를 −1~+1 연속값으로 만들어 1분마다 현재가로 다시 계산하고 점수 수준과 변화 속도로 판정. 진입·청산 기준의 S·F도 연속 S(4항목 합)·F(2항목 합)를 기준 배율로 환산. 7·10월 18일 시뮬레이션(E1+E3): v3 +13.0R / −2.1R → +16.2R / +6.2R", GroupName = "01. 추세 판단 (추세 봉)", Order = 20)]
-		public int RegimeMode { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.1, 2.0)]
-		[Display(Name = "[선택] 점수 판정: S·F 기준 배율 (ScoreScale)", Description = "기본 0.9. 정수 기준 k(예: E2 S ≥ 2)를 연속 점수 ≥ 이 값 × k로 봄(S ≥ 1.8). 0.8 / 1.0도 시뮬레이션에서 비슷", GroupName = "01. 추세 판단 (추세 봉)", Order = 21)]
-		public double ScoreScale { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.0, 1.0)]
-		[Display(Name = "[선택] 점수 판정: 추세 시작 점수 (ScoreTrendOn)", Description = "기본 0.2. 점수 C(항목 11개 평균, −1~+1) ≥ 이 값이면 상승추세 시작(하락은 ≤ −값)", GroupName = "01. 추세 판단 (추세 봉)", Order = 22)]
+		[Display(Name = "[선택] 점수 판정: 추세 시작 점수 (ScoreTrendOn)", Description = "기본 0.2. 점수 C(항목 11개 평균, −1~+1) ≥ 이 값이면 상승추세 시작(하락은 ≤ −값)", GroupName = "02. 추세 판정", Order = 0)]
 		public double ScoreTrendOn { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(-1.0, 1.0)]
-		[Display(Name = "[선택] 점수 판정: 추세 종료 점수 (ScoreTrendOff)", Description = "기본 0. 상승추세는 C ≤ 이 값이면 횡보(하락은 ≥ −값)", GroupName = "01. 추세 판단 (추세 봉)", Order = 23)]
-		public double ScoreTrendOff { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 60)]
-		[Display(Name = "[선택] 점수 판정: 속도 봉 수 (ScoreVelBars)", Description = "기본 6(1분봉 6개). 속도 = 지금 C − 이 봉 수 전 C", GroupName = "01. 추세 판단 (추세 봉)", Order = 24)]
-		public int ScoreVelBars { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.0, 2.0)]
-		[Display(Name = "[선택] 점수 판정: 빠른 시작 속도 (ScoreVelMin)", Description = "기본 0.25. C ≥ 0이면서 속도 ≥ 이 값이면 시작 점수 전이라도 상승추세 시작(하락은 거울상). 큰 움직임 잡는 지연 7.4 → 4.5분(7월). 0.15 / 0.35도 비슷", GroupName = "01. 추세 판단 (추세 봉)", Order = 25)]
+		[Display(Name = "[선택] 점수 판정: 빠른 시작 속도 (ScoreVelMin)", Description = "기본 0.25. C ≥ 0이면서 속도 ≥ 이 값이면 시작 점수 전이라도 상승추세 시작(하락은 거울상). 큰 움직임 잡는 지연 7.4 → 4.5분(7월). 0.15 / 0.35도 비슷", GroupName = "02. 추세 판정", Order = 1)]
 		public double ScoreVelMin { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(-1.0, 1.0)]
-		[Display(Name = "[선택] 점수 판정: 청산용 판정 종료 점수 (ScoreExitOff)", Description = "기본 −0.1. 보유 포지션의 TREND_END·OPP_TREND는 따로 계산한 청산용 판정을 봄: 속도로 시작하지 않고(C ≥ 시작 점수일 때만), 상승은 C ≤ 이 값이면 끝(하락은 ≥ −값). 진입 판정은 빠르게, 청산은 흔들림에 둔하게. 18일 시뮬레이션 10월 −4.6R → −3.1R, 7월 같음", GroupName = "01. 추세 판단 (추세 봉)", Order = 26)]
+		[Display(Name = "[선택] 점수 판정: 청산용 판정 종료 점수 (ScoreExitOff)", Description = "기본 −0.1. 보유 포지션의 TREND_END·OPP_TREND는 따로 계산한 청산용 판정을 봄: 속도로 시작하지 않고(C ≥ 시작 점수일 때만), 상승은 C ≤ 이 값이면 끝(하락은 ≥ −값). 진입 판정은 빠르게, 청산은 흔들림에 둔하게. 18일 시뮬레이션 10월 −4.6R → −3.1R, 7월 같음", GroupName = "02. 추세 판정", Order = 2)]
 		public double ScoreExitOff { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 이동평균 단기 (RegimeFast)", Description = "기본 6. F1(종가 > 단기선 AND 단기선 상승)과 마지막 조각 기준선 2에 씀. 줄이면 빠른 점수가 빨리 바뀜", GroupName = "01. 추세 판단 (추세 봉)", Order = 1)]
-		public int RegimeFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 이동평균 중기 (RegimeMid)", Description = "기본 20. S1(종가 vs 중기선), S2 방식 1(중기 > 장기), 마지막 조각 기준선 1에 씀", GroupName = "01. 추세 판단 (추세 봉)", Order = 2)]
-		public int RegimeMid { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 이동평균 장기 (RegimeSlow)", Description = "기본 60. S2(구조)에 씀. 늘리면 추세가 늦게 바뀌고 데이터가 더 필요함", GroupName = "01. 추세 판단 (추세 봉)", Order = 3)]
-		public int RegimeSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 2)]
-		[Display(Name = "[설계] 추세 시작: 빠른 점수 F 기준 (TrendStartFast)", Description = "기본 1(2026-10-15 사용자 결정, 그 전 2). F ≥ 이 값 AND S ≥ 느린 점수 기준이면 상승추세 시작(하락은 거울상). 내리면 추세 인정이 빠르지만 잦아짐", GroupName = "01. 추세 판단 (추세 봉)", Order = 4)]
-		public int TrendStartFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[설계] 추세 시작: 느린 점수 S 기준 (TrendStartSlow)", Description = "기본 1(2026-10-15 사용자 결정, 그 전 2). 추세 시작에 필요한 S. 올리면 추세 인정이 느리지만 확실해짐. E1 재가속(E1R)은 이 값과 따로 F ±2·S ±2", GroupName = "01. 추세 판단 (추세 봉)", Order = 5)]
-		public int TrendStartSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(-4, 4)]
-		[Display(Name = "[설계] 추세 종료: S가 이 값 이하 (TrendEndSlow)", Description = "기본 0. 상승추세는 S ≤ 이 값이면 횡보로(하락추세는 S ≥ −값). 시작 기준(2)과의 차이가 흔들림을 막음. 올리면 추세가 빨리 끝남", GroupName = "01. 추세 판단 (추세 봉)", Order = 6)]
-		public int TrendEndSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] MACD선 기울기 연속 봉 수 (RegimeMacdSlopeBars)", Description = "기본 2. F2: MACD선이 이 봉 수만큼 연속 커지면 +1, 작아지면 −1. 늘리면 F2가 늦고 덜 흔들림", GroupName = "01. 추세 판단 (추세 봉)", Order = 7)]
-		public int RegimeMacdSlopeBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 2)]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] S2 방식: 1 중기>장기 / 2 장기선 기울기 (RegimeS2Mode)", Description = "기본 1(중기선 > 장기선이면 +1). 2면 장기선이 아래 봉 수 전보다 높으면 +1. 장기선을 배열로 볼지 기울기로 볼지", GroupName = "01. 추세 판단 (추세 봉)", Order = 10)]
-		public int RegimeS2Mode { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[선택] S2 방식 2: 기울기 봉 수 (RegimeSlopeBars)", Description = "기본 5. S2 방식 2에서 장기선을 몇 봉 전과 비교할지. S2 방식이 1이면 쓰지 않음", GroupName = "01. 추세 판단 (추세 봉)", Order = 11)]
-		public int RegimeSlopeBars { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] RSI 항목 사용 (RegimeUseRsi)", Description = "기본 켬. S4: RSI ≥ 50 + 폭이면 +1, ≤ 50 − 폭이면 −1. 끄면 S는 −3 ~ +3. RSI 수준이 지연을 만드는지 비교용", GroupName = "01. 추세 판단 (추세 봉)", Order = 12)]
-		public bool RegimeUseRsi { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 50)]
-		[Display(Name = "[선택] RSI 항목 폭 (RegimeRsiBand)", Description = "기본 5(55 이상 / 45 이하). RSI 항목을 끄면 쓰지 않음", GroupName = "01. 추세 판단 (추세 봉)", Order = 13)]
-		public double RegimeRsiBand { get; set; }
 
 		// ── 02. 의심 이벤트 ──
-		[NinjaScriptProperty]
-		[Range(1, 2)]
-		[Display(Name = "[설계] 의심: 빠른 점수가 반대로 이 값 (SuspectFast)", Description = "기본 2. 상승추세 중 F ≤ −2가 된 첫 봉에 하락의심 이벤트(하락추세는 거울상). F가 0 이상으로 돌아오면 해제되고 다시 생길 수 있음. 1이면 자주 뜸", GroupName = "02. 의심 이벤트", Order = 0)]
-		public int SuspectFast { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] 의심: 가격 확인 필요 (SuspectNeedPrice)", Description = "기본 켬. 의심 이벤트 뒤 아래 봉 수 안에 진입 봉 종가가 직전 손절 봉 수(06 묶음)의 저점 아래로 마감해야(매도는 고점 위) 일부청산. 끄면 이벤트 즉시 실행", GroupName = "02. 의심 이벤트", Order = 1)]
-		public bool SuspectNeedPrice { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 의심: 가격 확인 대기 봉 수 (SuspectConfirmBars)", Description = "기본 5(진입 봉). 이 안에 가격 확인이 없거나 의심이 해제되면 아무것도 안 함. 가격 확인을 끄면 쓰지 않음", GroupName = "02. 의심 이벤트", Order = 2)]
-		public int SuspectConfirmBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[선택] 의심 일부청산 % (SuspectExitPercent)", Description = "기본 50. 확인되면 남은 수량의 이 %를 시장가 청산(먼 조각부터 조각 단위로, 가장 가까운 수량). 33 / 50 / 100 비교용", GroupName = "02. 의심 이벤트", Order = 10)]
-		public int SuspectExitPercent { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(-4, 4)]
-		[Display(Name = "[선택] 강한 의심: 느린 점수 기준 (SuspectStrongSlow)", Description = "기본 1. 확인 때 S ≤ 이 값이면(매도는 S ≥ −값) 위 % 대신 아래 강한 의심 %로 청산", GroupName = "02. 의심 이벤트", Order = 11)]
-		public int SuspectStrongSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[선택] 강한 의심 때 청산 % (SuspectStrongExitPercent)", Description = "기본 100(전량)", GroupName = "02. 의심 이벤트", Order = 12)]
-		public int SuspectStrongExitPercent { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 의심 중 추세 방향 신규 진입 금지 (BlockEntryWhileSuspect)", Description = "기본 켬. 상승추세 중 하락의심이 살아 있으면 매수 E1·E2·E3을 하지 않음(하락은 거울상). 역진입은 원래 없음", GroupName = "02. 의심 이벤트", Order = 13)]
-		public bool BlockEntryWhileSuspect { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 추세 진입은 빠른 점수가 반대면 안 함 (TrendEntryNeedFast)", Description = "기본 켬(2026-10-15 사용자 결정). 매수 E1·E2·E3는 F ≥ 0, 매도는 F ≤ 0일 때만. 추세 판정은 늦어서 반전 초입에는 판정은 옛 방향인데 F는 이미 반대(21일: 반대 의심 중 E2 8건 −$9,997)", GroupName = "02. 의심 이벤트", Order = 15)]
-		public bool TrendEntryNeedFast { get; set; }
 
 		// ── 03. 진입 — 추세 ──
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] E1 추세 시작 봉 진입 (UseEntryTrendStart)", Description = "기본 켬. 추세 봉의 추세 시작을 처음 본 진입 봉 마감에 그 방향으로 진입. 종가가 이미 1차 익절 밴드를 넘었거나 손익비가 모자라면 안 함. 반대 추세 시작으로 청산한 뒤에는 다음 2봉 안에도 허용", GroupName = "03. 진입 — 추세", Order = 0)]
+		[Display(Name = "[설계] E1 추세 시작 봉 진입 (UseEntryTrendStart)", Description = "기본 켬. 추세 봉의 추세 시작을 처음 본 진입 봉 마감에 그 방향으로 진입. 종가가 이미 1차 익절 밴드를 넘었거나 손익비가 모자라면 안 함. 반대 추세 시작으로 청산한 뒤에는 다음 2봉 안에도 허용", GroupName = "01. 진입 경로", Order = 0)]
 		public bool UseEntryTrendStart { get; set; }
 
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] E2 추세 눌림 진입 (UseEntryPullback)", Description = "기본 켬. 추세 중 저가가 아래 밴드에 닿은 뒤(매도는 고가가 위 밴드) 대기 봉 수 안에 [MACD 상승 전환 OR 골든크로스]가 나오면 진입", GroupName = "03. 진입 — 추세", Order = 1)]
+		[Display(Name = "[설계] E2 추세 눌림 진입 (UseEntryPullback)", Description = "기본 켬. 추세 중 저가가 아래 밴드에 닿은 뒤(매도는 고가가 위 밴드) 대기 봉 수 안에 [MACD 상승 전환 OR 골든크로스]가 나오면 진입", GroupName = "01. 진입 경로", Order = 1)]
 		public bool UseEntryPullback { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 3)]
-		[Display(Name = "[설계] E2 눌림 밴드 (TrendPullbackBand)", Description = "기본 0 = 중심선(2026-10-15 사용자 결정, 그 전 1 = 매수 −1배·매도 +1배). 올리면 깊은 눌림만 받음", GroupName = "03. 진입 — 추세", Order = 2)]
-		public int TrendPullbackBand { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[선택] E2 최소 느린 점수 (PullbackMinSlow)", Description = "기본 2(2026-10-15 사용자 결정). 매수 E2는 S ≥ 이 값, 매도는 S ≤ −값일 때만. 추세 끝물(S ±1)의 눌림을 거름. 0 = 안 봄", GroupName = "03. 진입 — 추세", Order = 13)]
-		public int PullbackMinSlow { get; set; }
 
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] E3 장전 박스 돌파 진입 (UseEntryOrb)", Description = "기본 켬. 장후에 아래 마감 시각 전, 진입 봉 종가가 장전 박스(21:30~22:30 최고가) 위로 마감하고 S·F가 아래 기준 이상이면 추세 매수(매도는 박스 최저가 아래). 장후 방향별 한 번", GroupName = "03. 진입 — 추세", Order = 3)]
+		[Display(Name = "[설계] E3 장전 박스 돌파 진입 (UseEntryOrb)", Description = "기본 켬. 장후에 아래 마감 시각 전, 진입 봉 종가가 장전 박스(21:30~22:30 최고가) 위로 마감하고 S·F가 아래 기준 이상이면 추세 매수(매도는 박스 최저가 아래). 장후 방향별 한 번", GroupName = "01. 진입 경로", Order = 2)]
 		public bool UseEntryOrb { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(0, 235959)]
-		[Display(Name = "[설계] E3 마감 시각 (OrbEndTime)", Description = "HHmmss, 기본 230000. 이 시각 전의 신호만 E3로 받음", GroupName = "03. 진입 — 추세", Order = 4)]
-		public int OrbEndTime { get; set; }
+		[Display(Name = "[선택] E3 스탑 주문으로 진입 (E3StopEntry)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 봉 마감까지 기다리지 않고, E3 조건(S·F·횟수·시간)이 맞으면 박스 고가 + 1틱(매도는 저가 − 1틱)에 스탑 진입 주문을 걸어 닿는 순간 진입. 다른 경로가 시장가로 들어가면 먼저 취소. 18일 시뮬레이션: 7월 +14.2 → +15.0R, 10월 +1.9 → +4.4R(약 +$5,000). B1은 가짜 돌파가 많아 봉 마감 그대로", GroupName = "01. 진입 경로", Order = 3)]
+		public bool E3StopEntry { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[설계] E3 최소 느린 점수 (OrbMinSlow)", Description = "기본 1. 매수는 S ≥ 1, 매도는 S ≤ −1", GroupName = "03. 진입 — 추세", Order = 5)]
-		public int OrbMinSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 2)]
-		[Display(Name = "[설계] E3 최소 빠른 점수 (OrbMinFast)", Description = "기본 1. 매수는 F ≥ 1, 매도는 F ≤ −1", GroupName = "03. 진입 — 추세", Order = 6)]
-		public int OrbMinFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 10)]
-		[Display(Name = "[선택] E3 방향별 최대 횟수 (OrbMaxEntries)", Description = "기본 2(2026-10-15 사용자 결정, 그 전에는 1). 한 번 쓰면 진입 봉 종가가 박스 안(매수는 박스 고가 이하, 매도는 저가 이상)으로 돌아온 뒤에야 다시 돌파를 받음. 1 = 지시서 원래 규칙", GroupName = "03. 진입 — 추세", Order = 7)]
-		public int OrbMaxEntries { get; set; }
+
 
 		// ── E5 개장 범위 돌파 (v6, 4-10) ──
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] E5 개장 범위 돌파 진입 (UseEntryOpenRange)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 개장 시각(OpenTime) 봉부터 N분 동안의 고가·저가를 범위로 잡고, 그 뒤 진입 봉 종가가 범위를 벗어나면 그 방향으로 진입. 방향별 하루 한 번. 손절 = 범위 중간, 익절 = 목표 R, 본전 R에 닿으면 본전 → 트레일링. 추세 판정·S·F는 보지 않음. 28일(7~10월) 시뮬레이션 38건 +10.5R, 하루 최악 −2R", GroupName = "03. 진입 — 추세", Order = 30)]
+		[Display(Name = "[설계] E5 개장 범위 돌파 진입 (UseEntryOpenRange)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 개장 시각(OpenTime) 봉부터 N분 동안의 고가·저가를 범위로 잡고, 그 뒤 진입 봉 종가가 범위를 벗어나면 그 방향으로 진입. 방향별 하루 한 번. 손절 = 범위 중간, 익절 = 목표 R, 본전 R에 닿으면 본전 → 트레일링. 추세 판정·S·F는 보지 않음. 28일(7~10월) 시뮬레이션 38건 +10.5R, 하루 최악 −2R", GroupName = "01. 진입 경로", Order = 4)]
 		public bool UseEntryOpenRange { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, 30)]
-		[Display(Name = "[선택] E5 개장 범위 분 수 (E5RangeMinutes)", Description = "기본 5(22:30~22:34 봉). 시뮬레이션: 5·7분 +10.5·+10.5R(목표 2R), 3분 +5.9R, 10분 +4.6R, 15분 −0.5R", GroupName = "03. 진입 — 추세", Order = 31)]
+		[Display(Name = "[선택] E5 개장 범위 분 수 (E5RangeMinutes)", Description = "기본 5(22:30~22:34 봉). 시뮬레이션: 5·7분 +10.5·+10.5R(목표 2R), 3분 +5.9R, 10분 +4.6R, 15분 −0.5R", GroupName = "03. 익절·손절", Order = 3)]
 		public int E5RangeMinutes { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.5, 10.0)]
-		[Display(Name = "[선택] E5 익절 목표 R (E5TargetR)", Description = "기본 2. 익절 지정가 = 진입가 ± 이 값 × 손절 거리. 5분 범위에서 1.5 / 2 / 2.5 / 3R = +8.1 / +10.5 / +10.1 / +7.9R", GroupName = "03. 진입 — 추세", Order = 32)]
+		[Display(Name = "[선택] E5 익절 목표 R (E5TargetR)", Description = "기본 2. 익절 지정가 = 진입가 ± 이 값 × 손절 거리. 5분 범위에서 1.5 / 2 / 2.5 / 3R = +8.1 / +10.5 / +10.1 / +7.9R", GroupName = "03. 익절·손절", Order = 4)]
 		public double E5TargetR { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.1, 10.0)]
-		[Display(Name = "[선택] E5 본전 이동 R (E5BreakevenR)", Description = "기본 1. 진입 뒤 최대 이익이 손절 거리 × 이 값에 닿으면 손절을 평단으로 옮기고, 그 뒤 진입 뒤 최고가(매도는 최저가) − 트레일링 ATR 배수(TrailAtr) × ATR로 따라감", GroupName = "03. 진입 — 추세", Order = 33)]
-		public double E5BreakevenR { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.1, 10.0)]
-		[Display(Name = "[설계] E5 손절 ATR 최소 (E5StopMinAtr)", Description = "기본 1. 범위 중간까지 거리가 신호 봉 ATR × 이 값보다 짧으면 벌림", GroupName = "03. 진입 — 추세", Order = 34)]
-		public double E5StopMinAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.1, 10.0)]
-		[Display(Name = "[설계] E5 손절 ATR 최대 (E5StopMaxAtr)", Description = "기본 4. 범위 중간까지 거리가 신호 봉 ATR × 이 값보다 길면 줄임", GroupName = "03. 진입 — 추세", Order = 35)]
-		public double E5StopMaxAtr { get; set; }
 
 		// ── B1 돌파 (v4, 4-9) ── 03 묶음 맨 위쪽 순서(Order 20~)로 둔다
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] B1 박스 돌파 진입 (UseBreakoutEntry)", Description = "기본 켬(v6). 직전 구간이 박스(효율비가 아래 값 이하)일 때 돌파로 진입. 7·10월 18일 시뮬레이션: v5 중립 돌파보다 진입 22→29건(7월)·21→29건(10월), R +11.0→+13.0 / −3.4→−2.1. 진입 봉 종가가 직전 N봉 고가 위(매도는 저가 아래)로 마감하고 빠른 점수 F가 그 방향으로 기준 이상이면 추세 포지션 진입. 추세 판정(상승·횡보·하락)은 보지 않음", GroupName = "03. 진입 — 추세", Order = 20)]
+		[Display(Name = "[선택] B1 박스 돌파 진입 (UseBreakoutEntry)", Description = "기본 켬(v6). 직전 구간이 박스(효율비가 아래 값 이하)일 때 돌파로 진입. 7·10월 18일 시뮬레이션: v5 중립 돌파보다 진입 22→29건(7월)·21→29건(10월), R +11.0→+13.0 / −3.4→−2.1. 진입 봉 종가가 직전 N봉 고가 위(매도는 저가 아래)로 마감하고 빠른 점수 F가 그 방향으로 기준 이상이면 추세 포지션 진입. 추세 판정(상승·횡보·하락)은 보지 않음", GroupName = "01. 진입 경로", Order = 5)]
 		public bool UseBreakoutEntry { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(2, 120)]
-		[Display(Name = "[설계] B1 돌파 범위 봉 수 (BreakoutBars)", Description = "기본 15(1분봉 15개). 지금 봉을 뺀 직전 N봉의 최고가·최저가를 넘어야 돌파. 21일 비교: 10 / 15 / 20 비슷, 30은 나빠짐", GroupName = "03. 진입 — 추세", Order = 21)]
-		public int BreakoutBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 2)]
-		[Display(Name = "[설계] B1 최소 빠른 점수 (BreakoutMinFast)", Description = "기본 2. 매수는 F ≥ 이 값, 매도는 F ≤ −값. 21일 비교: 1이면 8·9월 손실(−$7,642), 2면 이익(+$7,690)", GroupName = "03. 진입 — 추세", Order = 22)]
-		public int BreakoutMinFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[선택] B1 느린 점수 중립 범위 (BreakoutMaxAbsSlow)", Description = "기본 4 = 안 봄(v6). |S| ≤ 이 값일 때만 B1 진입. 1 = v5 중립 돌파", GroupName = "03. 진입 — 추세", Order = 23)]
-		public int BreakoutMaxAbsSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(5, 200)]
-		[Display(Name = "[설계] B1 박스 판단 봉 수 (BreakoutBoxBars)", Description = "기본 30(1분봉 30개). 지금 봉을 뺀 직전 N봉 종가로 효율비를 계산", GroupName = "03. 진입 — 추세", Order = 25)]
-		public int BreakoutBoxBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 1)]
-		[Display(Name = "[선택] B1 박스 효율비 최대 (BreakoutMaxEr)", Description = "기본 0.25. 효율비 = |N봉 순변화| ÷ 봉마다 변화의 합. 0 = 완전히 왔다갔다(박스), 1 = 한 방향. 이 값 이하일 때만 B1 진입. 1 = 안 봄. 최소 진입 보장 진입에는 적용 안 함", GroupName = "03. 진입 — 추세", Order = 26)]
-		public double BreakoutMaxEr { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[설계] B1 반대 돌파 시 전량 청산 (BreakoutExitOnOpposite)", Description = "기본 켬. 보유 중 종가가 직전 N봉의 반대쪽 끝을 넘고 F가 그 방향으로 기준 이상이면 전량 청산(OPP_BREAKOUT). 같은 봉에 반대 진입은 하지 않음", GroupName = "03. 진입 — 추세", Order = 24)]
-		public bool BreakoutExitOnOpposite { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] E1·E2 최소 손익비 (EntryMinRR)", Description = "기본 1.0. E1·E2는 (2차 익절 밴드 − 종가) ≥ 예상 손절 거리 × 이 값일 때만(E2는 2026-10-15부터). 0 = 안 봄. 0 / 1 / 1.5 비교용", GroupName = "03. 진입 — 추세", Order = 10)]
-		public double EntryMinRR { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] E1 추세 재가속 진입 (E1Reaccel)", Description = "기본 켬(2026-10-15 사용자 결정). 추세가 이어지는 중에 F가 0 이하로 내려갔다가(매도는 0 이상) 다시 추세 시작 조건(F, S)을 채운 추세 봉을 처음 본 진입 봉에서 E1과 같은 필터로 진입. 경로 이름 E1R", GroupName = "03. 진입 — 추세", Order = 11)]
-		public bool E1Reaccel { get; set; }
 
 		// ── 04. 진입 — 횡보 ──
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] E4 횡보 진입 (UseEntrySide)", Description = "기본 켬. 횡보 중 저가가 아래 밴드에 닿은 뒤 대기 봉 수 안에 [MACD 상승 전환 OR 골든크로스]면 횡보 매수(매도는 거울상)", GroupName = "04. 진입 — 횡보", Order = 0)]
+		[Display(Name = "[설계] E4 횡보 진입 (UseEntrySide)", Description = "기본 켬. 횡보 중 저가가 아래 밴드에 닿은 뒤 대기 봉 수 안에 [MACD 상승 전환 OR 골든크로스]면 횡보 매수(매도는 거울상)", GroupName = "01. 진입 경로", Order = 6)]
 		public bool UseEntrySide { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 3)]
-		[Display(Name = "[설계] E4 횡보 밴드 (SideBand)", Description = "기본 2(매수 −2배, 매도 +2배)", GroupName = "04. 진입 — 횡보", Order = 1)]
-		public int SideBand { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[설계] 밴드 없이 T2로도 횡보 진입 (SideT2Entry)", Description = "기본 켬. MACD 전환 AND 크로스(같은 봉 또는 이웃 봉)만으로도 횡보 진입. 끄면 밴드 조건 뒤의 신호만", GroupName = "04. 진입 — 횡보", Order = 2)]
-		public bool SideT2Entry { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 6)]
-		[Display(Name = "[설계] 횡보 방향 필터 점수 (SideBlockScore)", Description = "기본 3. S+F ≥ 3이면 횡보 매도를, ≤ −3이면 횡보 매수를 하지 않음. 0이면 막지 않음", GroupName = "04. 진입 — 횡보", Order = 3)]
-		public int SideBlockScore { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 손실 손절 뒤 같은 방향 횡보 재진입 금지 (BlockSideAfterStop)", Description = "기본 켬. 횡보 포지션이 본절 전 손실 손절로 끝나면 그 대회 구간에서 같은 방향 횡보 진입을 하지 않음. 추세 포지션은 제한 없음", GroupName = "04. 진입 — 횡보", Order = 10)]
-		public bool BlockSideAfterStop { get; set; }
 
 		// ── 05. 진입 — 공통 ──
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 반전 신호 대기 봉 수 (T1Window)", Description = "기본 5. 밴드 조건 뒤 반전 신호를 기다리는 봉 수. 실제로는 + (MACD 확인 봉 수 − 1) = 6봉", GroupName = "05. 진입 — 공통", Order = 0)]
-		public int T1Window { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] MACD 전환 확인 봉 수 (MacdConfirmBars)", Description = "기본 2. 진입 봉 MACD 히스토그램이 이 봉 수 연속 커져야(작아져야) 전환. 전환은 처음 확인된 봉 하나에서만 참", GroupName = "05. 진입 — 공통", Order = 1)]
-		public int MacdConfirmBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[설계] T2에서 MACD 꺾인 봉의 크로스 인정 (T2CountConfirmBars)", Description = "기본 켬. MACD 전환이 확인된 봉에서 확인 봉 수만큼 앞의 크로스도 같이 나온 것으로 봄", GroupName = "05. 진입 — 공통", Order = 2)]
-		public bool T2CountConfirmBars { get; set; }
 
 		// ── 06. 손절 ──
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 구조 손절 봉 수 (SwingBars)", Description = "기본 5. 손절 = 신호 봉 포함 최근 이 봉 수의 저가 − 1틱(매도는 고가 + 1틱). 의심 가격 확인에도 씀(그 봉 제외)", GroupName = "06. 손절", Order = 0)]
-		public int SwingBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 추세 손절 ATR 최소 (TrendStopMinAtr)", Description = "기본 1.5. 추세 포지션 손절 거리를 신호 봉 1분 ATR(14) × 이 값 이상으로", GroupName = "06. 손절", Order = 1)]
-		public double TrendStopMinAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 추세 손절 ATR 최대 (TrendStopMaxAtr)", Description = "기본 3.0. 추세 포지션 손절 거리를 ATR × 이 값 이하로", GroupName = "06. 손절", Order = 2)]
-		public double TrendStopMaxAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 횡보 손절 ATR 최소 (SideStopMinAtr)", Description = "기본 1.0", GroupName = "06. 손절", Order = 3)]
-		public double SideStopMinAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 횡보 손절 ATR 최대 (SideStopMaxAtr)", Description = "기본 2.0", GroupName = "06. 손절", Order = 4)]
-		public double SideStopMaxAtr { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, int.MaxValue)]
-		[Display(Name = "[안전] 최소 손절 틱 (StopMinTicks)", Description = "기본 32틱(MNQ 8pt). 손절 거리가 이보다 짧으면 이만큼 벌림. 장전 ATR이 절반이라 손절이 너무 좁아지는 것 방지", GroupName = "06. 손절", Order = 10)]
+		[Display(Name = "[안전] 최소 손절 틱 (StopMinTicks)", Description = "기본 32틱(MNQ 8pt). 손절 거리가 이보다 짧으면 이만큼 벌림. 장전 ATR이 절반이라 손절이 너무 좁아지는 것 방지", GroupName = "03. 익절·손절", Order = 5)]
 		public int StopMinTicks { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[안전] 손절 이동 안전 거리 틱 (BreakevenBufferTicks)", Description = "기본 8. 손절을 옮길 때 현재 호가가 옮길 가격에서 이 틱 수 이상 떨어져 있어야 옮김. 가까우면 미뤘다가 봉 마감마다 다시 시도(주문 거부 방지)", GroupName = "06. 손절", Order = 11)]
-		public int BreakevenBufferTicks { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[안전] 주문 오류를 전략이 직접 처리 (HandleOrderErrors)", Description = "기본 켬. 손절 변경 거부는 기존 손절 유지 후 재시도, 손절 주문 거부는 즉시 전량 청산. 끄면 NinjaTrader가 포지션을 닫고 전략을 끔", GroupName = "06. 손절", Order = 12)]
-		public bool HandleOrderErrors { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] 1차 뒤 본절에 필요한 이익 (BreakevenMinR)", Description = "기본 0.5(2026-10-15 사용자 결정). 1차 익절 이익이 처음 손절 거리 × 이 값 이상이면 손절을 평단으로. 모자라면 아래 ATR 배수 방식. 0 = 항상 평단(그 전 동작)", GroupName = "06. 손절", Order = 5)]
-		public double BreakevenMinR { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] 본절 이익이 모자랄 때 손절 = 1차 체결가 ∓ ATR × (BreakevenFallbackAtr)", Description = "기본 1.5. 매수는 1차 체결가 − 이 값 × 1분 ATR, 매도는 +. 지금 손절보다 유리할 때만 옮김. 0 = 손절 유지", GroupName = "06. 손절", Order = 6)]
-		public double BreakevenFallbackAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] 이익 보호 본절: 최대 이익이 손절 거리 × (BreakevenAtR)", Description = "기본 0.8(2026-10-15 사용자 결정, v2와 같은 방식). 1차 익절 전이라도 진입 뒤 최대 유리폭이 처음 손절 거리 × 이 값에 닿으면 진입 봉 마감에 손절을 평단으로. 4가지 포지션 모두. 0 = 끔", GroupName = "06. 손절", Order = 7)]
-		public double BreakevenAtR { get; set; }
 
 		// ── 07. 청산 — 추세 ──
-		[NinjaScriptProperty]
-		[Range(0, 3)]
-		[Display(Name = "[설계] 1차 익절 밴드 (TrendTp1Band)", Description = "기본 2(매수 +2배, 매도 −2배). 가격이 닿는 즉시 지정가. 체결되면 손절을 평단으로", GroupName = "07. 청산 — 추세", Order = 0)]
-		public int TrendTp1Band { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 3)]
-		[Display(Name = "[설계] 2차 익절 밴드 (TrendTp2Band)", Description = "기본 3. 체결되면 트레일링 시작. E1 손익비도 이 밴드까지로 계산", GroupName = "07. 청산 — 추세", Order = 1)]
-		public int TrendTp2Band { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[설계] 1차 익절 % (TrendTp1Percent)", Description = "기본 33. 진입 계약 × % 내림", GroupName = "07. 청산 — 추세", Order = 2)]
-		public int TrendTp1Percent { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[설계] 2차 익절 % (TrendTp2Percent)", Description = "기본 33. 나머지가 마지막 조각", GroupName = "07. 청산 — 추세", Order = 3)]
-		public int TrendTp2Percent { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 2차 뒤 트레일링 ATR 배수 (TrailAtr)", Description = "기본 2.5. 2차 익절 뒤 진입 봉 마감마다 손절을 진입 뒤 최고가 − 1분 ATR × 이 값으로(매도는 최저가 + …). 0 = 안 씀. 2 / 2.5 / 3 비교용", GroupName = "07. 청산 — 추세", Order = 4)]
+		[Display(Name = "[설계] 2차 뒤 트레일링 ATR 배수 (TrailAtr)", Description = "기본 2.5. 2차 익절 뒤 진입 봉 마감마다 손절을 진입 뒤 최고가 − 1분 ATR × 이 값으로(매도는 최저가 + …). 0 = 안 씀. 2 / 2.5 / 3 비교용", GroupName = "03. 익절·손절", Order = 2)]
 		public double TrailAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 2)]
-		[Display(Name = "[설계] 마지막 조각 기준선: 0 끔 / 1 중기 / 2 단기 (TrendLastExitMa)", Description = "기본 1. 2차 익절 뒤에만, 추세 봉 종가가 이 이동평균 반대편으로 마감하면(매수: 종가 < 선) 나머지 전량. 0이면 트레일링 손절로만 나감", GroupName = "07. 청산 — 추세", Order = 5)]
-		public int TrendLastExitMa { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 추세 종료 시 전량 청산 (TrendExitOnEnd)", Description = "기본 켬. 추세가 횡보로 바뀌면(S ≤ 종료 기준) 전량. 보유 중 추세가 포지션 방향이었던 적이 있을 때만(E3로 횡보 중 들어간 경우). 반대 추세 시작은 이 설정과 상관없이 항상 전량", GroupName = "07. 청산 — 추세", Order = 10)]
-		public bool TrendExitOnEnd { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 추세 유지 중에도 1분 T2 반대 신호로 청산 (TrendExitOnEntryT2)", Description = "기본 끔. 끄면 진입 봉의 MACD 반대 전환 AND 반대 크로스는 추세가 포지션 방향인 동안 무시하고, 아닐 때만 전량 청산 조건으로 씀", GroupName = "07. 청산 — 추세", Order = 11)]
-		public bool TrendExitOnEntryT2 { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] 익절 밴드 최소 거리 (TrendTpMinR)", Description = "기본 0.5(2026-10-15 사용자 결정). 진입 때 익절 밴드까지 남은 거리가 예상 손절 거리 × 이 값보다 짧으면 지난 밴드로 봄: 1차면 1차 조각도 2차 밴드로, 2차면 1·2차 조각을 트레일링으로. 0 = 이미 넘은 경우만", GroupName = "07. 청산 — 추세", Order = 6)]
-		public double TrendTpMinR { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 2)]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 추세 익절 방식: 1 밴드 / 2 손절 거리 R (TrendTpMode)", Description = "기본 2(v6). 1 = 1·2차 익절을 ±2·±3배 밴드에(v5까지). 2 = 진입가 ± 1차 R / 2차 R × 손절 거리. 밴드는 손절 거리와 상관없이 정해져 손절이 넓은 날 1차가 0.5R 안쪽이 됐음. 18일 시뮬레이션: 밴드 7월 +11.8R / 10월 −3.1R, 1R/2.5R +17.7R / +0.2R", GroupName = "07. 청산 — 추세", Order = 20)]
-		public int TrendTpMode { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.1, 10.0)]
-		[Display(Name = "[선택] 추세 1차 익절 R (TrendTp1R)", Description = "기본 1. 익절 방식 2에서 1차 익절 = 진입가 ± 이 값 × 손절 거리", GroupName = "07. 청산 — 추세", Order = 21)]
+		[Display(Name = "[선택] 추세 1차 익절 R (TrendTp1R)", Description = "기본 1. 익절 방식 2에서 1차 익절 = 진입가 ± 이 값 × 손절 거리", GroupName = "03. 익절·손절", Order = 0)]
 		public double TrendTp1R { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.1, 10.0)]
-		[Display(Name = "[선택] 추세 2차 익절 R (TrendTp2R)", Description = "기본 2.5. 익절 방식 2에서 2차 익절. 2 / 2.5 / 3에서 2.5가 두 달 모두 가장 고름", GroupName = "07. 청산 — 추세", Order = 22)]
+		[Display(Name = "[선택] 추세 2차 익절 R (TrendTp2R)", Description = "기본 2.5. 익절 방식 2에서 2차 익절. 2 / 2.5 / 3에서 2.5가 두 달 모두 가장 고름", GroupName = "03. 익절·손절", Order = 1)]
 		public double TrendTp2R { get; set; }
 
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 추가 진입 (UseAddOn)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 추세 포지션(E5 제외)이 1차 익절한 뒤 점수 속도가 포지션 방향으로 기준 이상이면 처음 수량 × %를 한 번 더 진입. 넣기 전에 전체 손절을 평단 이상으로. 추가분은 익절 지정가 없이 트레일링·기준선·의심·손절로 나감. 추세 판정 방식 2에서만. 1R/2.5R과 같이: 7월 +17.7 → +20.4R, 10월 +0.2 → +2.5R. '1차가 빨리 나면 추가'는 10월에 −4.9 ~ −7.1R로 나빠서 안 씀", GroupName = "07. 청산 — 추세", Order = 23)]
+		[Display(Name = "[선택] 추가 진입 (UseAddOn)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 추세 포지션(E5 제외)이 1차 익절한 뒤 점수 속도가 포지션 방향으로 기준 이상이면 처음 수량 × %를 한 번 더 진입. 넣기 전에 전체 손절을 평단 이상으로. 추가분은 익절 지정가 없이 트레일링·기준선·의심·손절로 나감. 추세 판정 방식 2에서만. 1R/2.5R과 같이: 7월 +17.7 → +20.4R, 10월 +0.2 → +2.5R. '1차가 빨리 나면 추가'는 10월에 −4.9 ~ −7.1R로 나빠서 안 씀", GroupName = "03. 익절·손절", Order = 6)]
 		public bool UseAddOn { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.0, 2.0)]
-		[Display(Name = "[선택] 추가 진입 최소 속도 (AddOnMinVel)", Description = "기본 0.3. 점수 속도(6분 변화)가 포지션 방향으로 이 값 이상일 때 추가", GroupName = "07. 청산 — 추세", Order = 24)]
-		public double AddOnMinVel { get; set; }
+
+
 
 		[NinjaScriptProperty]
-		[Range(1, 200)]
-		[Display(Name = "[선택] 추가 진입 수량 % (AddOnPercent)", Description = "기본 50. 처음 진입 계약 수 × 이 %", GroupName = "07. 청산 — 추세", Order = 25)]
-		public int AddOnPercent { get; set; }
-
-		[NinjaScriptProperty]
-		[Range(1, 60)]
-		[Display(Name = "[선택] 개장 직후 진입: 분 수 (EarlyWindowMinutes)", Description = "기본 5. 개장 시각(OpenTime) 뒤 이 분 수 안에 신호 봉이 마감된 추세 진입(E5 제외)에 아래 두 옵션을 적용", GroupName = "07. 청산 — 추세", Order = 29)]
-		public int EarlyWindowMinutes { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 개장 직후 진입: 1차 익절점에서 전량 (EarlyFullExitAtTp1)", Description = "기본 끔. 켜면 개장 직후 진입은 세 조각 모두 1차 익절(1R)에 지정가. 익절 방식 2에서만. 18일 시뮬레이션: 5분 +0.3R +$75(거의 같음), 3·8·10분은 나빠짐. 10월 개장 직후 진입은 모두 1R 전에 손절돼 영향 없음", GroupName = "07. 청산 — 추세", Order = 30)]
+		[Display(Name = "[선택] 개장 직후 진입: 1차 익절점에서 전량 (EarlyFullExitAtTp1)", Description = "기본 끔. 켜면 개장 직후 진입은 세 조각 모두 1차 익절(1R)에 지정가. 익절 방식 2에서만. 18일 시뮬레이션: 5분 +0.3R +$75(거의 같음), 3·8·10분은 나빠짐. 10월 개장 직후 진입은 모두 1R 전에 손절돼 영향 없음", GroupName = "03. 익절·손절", Order = 7)]
 		public bool EarlyFullExitAtTp1 { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1.0, 5.0)]
-		[Display(Name = "[선택] 개장 직후 진입: 손절 배율 (EarlyStopMult)", Description = "기본 1(끔). 1.5면 개장 직후 진입의 손절 거리를 1.5배로 넓히고, 위험 금액 수량이라 계약이 줄어 1회 위험은 같음. 익절 R도 넓어진 거리 기준. 18일 시뮬레이션 1.5: 7월 +20.4 → +20.9R, 10월 +2.5 → +3.7R, 진입 61 → 56건(오래 들고 있어 다음 신호를 못 받음)", GroupName = "07. 청산 — 추세", Order = 31)]
+		[Display(Name = "[선택] 개장 직후 진입: 손절 배율 (EarlyStopMult)", Description = "기본 1(끔). 1.5면 개장 직후 진입의 손절 거리를 1.5배로 넓히고, 위험 금액 수량이라 계약이 줄어 1회 위험은 같음. 익절 R도 넓어진 거리 기준. 18일 시뮬레이션 1.5: 7월 +20.4 → +20.9R, 10월 +2.5 → +3.7R, 진입 61 → 56건(오래 들고 있어 다음 신호를 못 받음)", GroupName = "03. 익절·손절", Order = 8)]
 		public double EarlyStopMult { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0.0, 10.0)]
-		[Display(Name = "[선택] 달린 뒤 진입 기준 ATR (ExtendedEntryAtr)", Description = "기본 2. 추세 진입(E5 제외) 신호 봉 종가가 밴드 중심선(EMA26)에서 진입 방향으로 이 값 × 1분 ATR보다 멀면 수량을 아래 %로 줄임. 진입은 그대로. 0 = 안 봄. v5·v6 147건에서 중심선 거리 높은 ⅓이 두 버전 모두 손실(−2.3R, −5.3R). 18일 시뮬레이션: 7월 $34,852 → $34,289, 10월 $732 → $3,431", GroupName = "07. 청산 — 추세", Order = 27)]
-		public double ExtendedEntryAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 100)]
-		[Display(Name = "[선택] 달린 뒤 진입 수량 % (ExtendedQtyPercent)", Description = "기본 50", GroupName = "07. 청산 — 추세", Order = 28)]
-		public int ExtendedQtyPercent { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 추가 진입 마감 시각 (AddOnEndTime)", Description = "기본 231000. 이 시각 봉부터는 추가하지 않음", GroupName = "07. 청산 — 추세", Order = 26)]
-		public int AddOnEndTime { get; set; }
 
 		// ── 08. 청산 — 횡보 ──
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 횡보 1단계 ATR 배수 (SideTp1Atr)", Description = "기본 2. 1단계 익절 = 진입가 + 2 × 신호 봉 1분 ATR(매도는 −). 채널 밴드가 아님. 진입 때 고정", GroupName = "08. 청산 — 횡보", Order = 0)]
-		public double SideTp1Atr { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[설계] 횡보 1단계 % (SideTp1Percent)", Description = "기본 33. 체결되면 손절을 평단으로", GroupName = "08. 청산 — 횡보", Order = 1)]
-		public int SideTp1Percent { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 3)]
-		[Display(Name = "[설계] 횡보 전량 청산 밴드 (SideRestBand)", Description = "기본 3. 진입 봉 종가가 +3배(매도 −3배)에 닿으면 나머지 전량", GroupName = "08. 청산 — 횡보", Order = 2)]
-		public int SideRestBand { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] MACD·크로스 청산은 1단계 뒤에만 (SideOscExitAfterTp1)", Description = "기본 켬. MACD 반대 전환·반대 크로스 청산은 1단계 체결 뒤에만 봄. 그 전에는 손절·±3배·반대 추세로만 나감", GroupName = "08. 청산 — 횡보", Order = 10)]
-		public bool SideOscExitAfterTp1 { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 반대 추세 시작 시 전량 청산 (SideExitOnOppTrend)", Description = "기본 켬. 횡보 매수 보유 중 하락추세가 시작되면 전량(매도는 거울상). 같은 방향 추세는 그대로 들고 감", GroupName = "08. 청산 — 횡보", Order = 11)]
-		public bool SideExitOnOppTrend { get; set; }
 
 		// ── 09. 시간대 ──
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[설계] 개장 시각 (OpenTime)", Description = "HHmmss, 기본 223000(미국 정규장 개장, KST 서머타임). 장전·장후와 장전 박스의 기준. 골드는 종목 차트마다 따로 정함", GroupName = "09. 시간대", Order = 0)]
+		[Display(Name = "[설계] 개장 시각 (OpenTime)", Description = "HHmmss, 기본 223000(미국 정규장 개장, KST 서머타임). 장전·장후와 장전 박스의 기준. 골드는 종목 차트마다 따로 정함", GroupName = "10. 수량·대회 시간", Order = 4)]
 		public int OpenTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 120)]
-		[Display(Name = "[설계] 지표 발표 진입 금지 분 (NewsBlockMinutes)", Description = "기본 5. 대회 시작부터 이 분 동안 신규 진입 안 함(08:30 ET 지표 발표). 대회 날 일정을 보고 정함", GroupName = "09. 시간대", Order = 1)]
+		[Display(Name = "[설계] 지표 발표 진입 금지 분 (NewsBlockMinutes)", Description = "기본 5. 대회 시작부터 이 분 동안 신규 진입 안 함(08:30 ET 지표 발표). 대회 날 일정을 보고 정함", GroupName = "10. 수량·대회 시간", Order = 5)]
 		public int NewsBlockMinutes { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 60)]
-		[Display(Name = "[설계] 개장 전 진입 금지 분 (OpenBlockBefore)", Description = "기본 5. 개장 5분 전부터 신규 진입 안 함", GroupName = "09. 시간대", Order = 2)]
-		public int OpenBlockBefore { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 60)]
-		[Display(Name = "[설계] 개장 후 진입 금지 분 (OpenBlockAfter)", Description = "기본 3. 개장 뒤 3분까지 신규 진입 안 함. 그 뒤가 장후", GroupName = "09. 시간대", Order = 3)]
-		public int OpenBlockAfter { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 100)]
-		[Display(Name = "[선택] 장전 수량 % (PreOpenQtyPercent)", Description = "기본 50. 장전 진입은 진입 계약 × 이 %", GroupName = "09. 시간대", Order = 10)]
-		public int PreOpenQtyPercent { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 4)]
-		[Display(Name = "[선택] 장전 추세 진입 최소 S (PreOpenTrendMinSlow)", Description = "기본 2(2026-10-15 사용자 결정, 그 전 3). 장전 E1·E2는 S ≥ 이 값(매도 ≤ −값)일 때만", GroupName = "09. 시간대", Order = 11)]
-		public int PreOpenTrendMinSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[선택] 장전 횡보 진입 허용 (PreOpenAllowSide)", Description = "기본 켬. 끄면 장전에는 E4를 하지 않음", GroupName = "09. 시간대", Order = 12)]
-		public bool PreOpenAllowSide { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 개장 전 본절 보호 (ProtectBeforeOpen)", Description = "기본 끔. 켜면 개장 1분 전 봉(22:29) 마감에 보유 중이고 이익이 1분 ATR × 아래 배수 이상이면 손절을 평단으로", GroupName = "09. 시간대", Order = 13)]
-		public bool ProtectBeforeOpen { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[선택] 개장 전 보호 ATR 배수 (ProtectAtr)", Description = "기본 1", GroupName = "09. 시간대", Order = 14)]
-		public double ProtectAtr { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[선택] 최소 진입 보장 (MinEntryFallback)", Description = "기본 켬. 아래 시각 이후 이 종목 진입 횟수가 최소 진입 목표보다 적으면, 장전 제한·횡보 방향 필터 없이 다음 유효 신호를 수량 × 아래 %로 받음", GroupName = "09. 시간대", Order = 15)]
-		public bool MinEntryFallback { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 235959)]
-		[Display(Name = "[선택] 최소 진입 보장 시각 (MinEntryFallbackTime)", Description = "HHmmss, 기본 230000", GroupName = "09. 시간대", Order = 16)]
-		public int MinEntryFallbackTime { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, 100)]
-		[Display(Name = "[선택] 최소 진입 보장 수량 % (MinEntryQtyPercent)", Description = "기본 30", GroupName = "09. 시간대", Order = 17)]
-		public int MinEntryQtyPercent { get; set; }
 
 		// ── 10. 수량·대회 시간 ──
 		[NinjaScriptProperty]
@@ -3390,20 +2988,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Display(Name = "[설계] 최대 계약 수 (EntryQuantity)", Description = "기본 30. 위험 금액 수량을 켜면 이 값이 최대(장전·최소 진입 보장은 × %). 단계 수량은 × % 내림, 마지막 조각이 나머지", GroupName = "10. 수량·대회 시간", Order = 0)]
 		public int EntryQuantity { get; set; }
 
-		[NinjaScriptProperty]
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[설계] 위험 금액으로 계약 수 정하기 (UseRiskSizing)", Description = "기본 켬(2026-10-15 사용자 결정). 계약 = 1회 위험 한도 ÷ (예상 손절 거리 × 계약당 가치), 최대 계약 수 이하. 끄면 항상 최대 계약 수(장전 50%)", GroupName = "10. 수량·대회 시간", Order = 2)]
-		public bool UseRiskSizing { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, double.MaxValue)]
-		[Display(Name = "[설계] 1회 위험 한도 $ (RiskPerTrade)", Description = "기본 2000. 손절 한 번에 잃는 금액의 목표(장전은 × 장전 수량 %). 21일 시뮬레이션: $2,000이면 최대 1회 손실 −$4,564 → −$2,009, 합계는 줄어듦", GroupName = "10. 수량·대회 시간", Order = 3)]
+		[Display(Name = "[설계] 1회 위험 한도 $ (RiskPerTrade)", Description = "기본 2000. 손절 한 번에 잃는 금액의 목표(장전은 × 장전 수량 %). 21일 시뮬레이션: $2,000이면 최대 1회 손실 −$4,564 → −$2,009, 합계는 줄어듦", GroupName = "10. 수량·대회 시간", Order = 1)]
 		public double RiskPerTrade { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 대회 한도 계약 수 (MaxQuantity)", Description = "기본 40. 진입 계약 수가 이보다 크면 시작할 때 경고만", GroupName = "10. 수량·대회 시간", Order = 1)]
-		public int MaxQuantity { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, int.MaxValue)]
@@ -3417,89 +3007,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[설계] 진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 기본 231500 = 23:15. 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "10. 수량·대회 시간", Order = 4)]
+		[Display(Name = "[설계] 진입 마감 시각 (EntryEndTime)", Description = "HHmmss, 기본 231500 = 23:15. 이 시각 뒤의 신호로는 진입하지 않음", GroupName = "10. 수량·대회 시간", Order = 6)]
 		public int EntryEndTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "[설계] 전량 청산 시각 (FlattenTime)", Description = "HHmmss, 기본 232700 = 23:27. 이 봉이 마감되면 남은 수량을 전량 시장가", GroupName = "10. 수량·대회 시간", Order = 5)]
+		[Display(Name = "[설계] 전량 청산 시각 (FlattenTime)", Description = "HHmmss, 기본 232700 = 23:27. 이 봉이 마감되면 남은 수량을 전량 시장가", GroupName = "10. 수량·대회 시간", Order = 7)]
 		public int FlattenTime { get; set; }
 
 		// ── 11. 지표 계산값 ──
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 밴드 중심선 EMA 기간 (BandMidPeriod)", Description = "기본 26", GroupName = "11. 지표 계산값", Order = 0)]
-		public int BandMidPeriod { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 밴드·손절 ATR 기간 (BandAtrPeriod)", Description = "기본 14. 밴드, 손절 거리, 횡보 1단계, 트레일링에 같이 씀", GroupName = "11. 지표 계산값", Order = 1)]
-		public int BandAtrPeriod { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 1배 밴드 ATR 배수 (BandMult1)", Description = "기본 1", GroupName = "11. 지표 계산값", Order = 2)]
-		public double BandMult1 { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 2배 밴드 ATR 배수 (BandMult2)", Description = "기본 2", GroupName = "11. 지표 계산값", Order = 3)]
-		public double BandMult2 { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, double.MaxValue)]
-		[Display(Name = "[설계] 3배 밴드 ATR 배수 (BandMult3)", Description = "기본 3", GroupName = "11. 지표 계산값", Order = 4)]
-		public double BandMult3 { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] MACD 단기 (MacdFast)", Description = "기본 12. 진입 봉과 추세 봉에 같이 씀", GroupName = "11. 지표 계산값", Order = 5)]
-		public int MacdFast { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] MACD 장기 (MacdSlow)", Description = "기본 26", GroupName = "11. 지표 계산값", Order = 6)]
-		public int MacdSlow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] MACD 시그널 (MacdSmooth)", Description = "기본 9", GroupName = "11. 지표 계산값", Order = 7)]
-		public int MacdSmooth { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 스토캐스틱 %K 길이 (StochPeriodK)", Description = "기본 10", GroupName = "11. 지표 계산값", Order = 8)]
-		public int StochPeriodK { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 스토캐스틱 %K 스무딩 (StochSmooth)", Description = "기본 5", GroupName = "11. 지표 계산값", Order = 9)]
-		public int StochSmooth { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 스토캐스틱 %D 스무딩 (StochPeriodD)", Description = "기본 5", GroupName = "11. 지표 계산값", Order = 10)]
-		public int StochPeriodD { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[설계] 골든크로스 과매도 기준 (CrossLow)", Description = "기본 20. 최근 크로스 필터 봉 수 안에 %K가 이 값 아래였어야 골든크로스", GroupName = "11. 지표 계산값", Order = 11)]
-		public double CrossLow { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(0, 100)]
-		[Display(Name = "[설계] 데드크로스 과매수 기준 (CrossHigh)", Description = "기본 80", GroupName = "11. 지표 계산값", Order = 12)]
-		public double CrossHigh { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] 크로스 필터 봉 수 (CrossFilterBars)", Description = "기본 5", GroupName = "11. 지표 계산값", Order = 13)]
-		public int CrossFilterBars { get; set; }
 
-		[NinjaScriptProperty]
-		[Range(1, int.MaxValue)]
-		[Display(Name = "[설계] RSI 기간 (RsiPeriod)", Description = "기본 14. 진입 봉과 추세 봉(S4)에 같이 씀", GroupName = "11. 지표 계산값", Order = 14)]
-		public int RsiPeriod { get; set; }
 
 		// ── 12. 화면·기록 ──
 		[NinjaScriptProperty]
@@ -3519,21 +3049,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Display(Name = "[표시] 학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 TQ_ml_v6_종목.csv(v6 브랜치)에 한 줄(신호 봉 특징값 + 결과). 백테스트에서도 저장. 최적화 때는 끔", GroupName = "12. 화면·기록", Order = 3)]
 		public bool MlLogToFile { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[표시] 주문 테스트용 가짜 진입 (UseTestEntry)", Description = "실제 신호를 무시하고 진입 시간대에 미보유면 추세 매수로 들어가 2봉째 1차, 3봉째 2차, 4봉째 전량 청산. 주문 흐름 확인용. 평소와 대회 때는 반드시 끔", GroupName = "12. 화면·기록", Order = 4)]
-		public bool UseTestEntry { get; set; }
 
-		[NinjaScriptProperty]
-		[Display(Name = "[설계] 익절을 봉 진행 중에 바로 (IntrabarTakeProfit)", Description = "기본 켬. 밴드·ATR 익절은 가격이 닿는 즉시 지정가로 체결(가격은 방금 마감된 봉의 값으로 봉마다 옮김). 끄면 봉 마감 종가로 판단해 시장가", GroupName = "12. 화면·기록", Order = 5)]
-		public bool IntrabarTakeProfit { get; set; }
 
 		// ── 00. 설정 세트 ──
 		// "버튼": 설정창에는 버튼이 없어 체크 상자로 만든다. 체크하면 한 번 실행하고 스스로 풀린다.
 		// 값을 저장하지 않으므로 [NinjaScriptProperty]를 붙이지 않고 XML에도 쓰지 않는다
 		// 표시 전용: 끄면 설정창에 핵심 설정만 보인다 (TQ_StrategyConverter). 값과 동작은 숨겨도 그대로
-		[RefreshProperties(RefreshProperties.All)]
-		[Display(Name = "[표시] 고급 설정 보기 (ShowAdvanced)", Description = "기본 끔. 켜면 모든 설정이 보임. 끄면 진입 경로 켜고 끄기, 수량·위험 한도, 대회 시간, 화면만 보임", GroupName = "00. 설정 세트", Order = 5)]
-		public bool ShowAdvanced { get; set; }
 
 		[XmlIgnore]
 		[RefreshProperties(RefreshProperties.All)]
@@ -3644,72 +3165,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
-		// 고급 설정 보기를 끄면 보이는 핵심 설정 (spec 7장). 나머지는 숨겨도 값과 동작은 그대로
-		internal static readonly HashSet<string> CoreSettings = new HashSet<string>
-		{
-			"PresetApplyDefaults", "PresetStatus", "ShowAdvanced",
-			"UseEntryTrendStart", "UseEntryPullback", "UseEntryOrb", "UseEntrySide", "UseBreakoutEntry", "UseEntryOpenRange",
-			"EntryQuantity", "UseRiskSizing", "RiskPerTrade", "MinEntries", "ContestStartTime", "EntryEndTime", "FlattenTime",
-			"ShowStatus"
-		};
-
-		// 설정창에서 숨길 설정: 고급 보기가 꺼져 있고, 이 전략이 만든 설정이며, 핵심이 아님 (NinjaTrader 기본 속성은 숨기지 않음)
-		internal bool HideSetting(string name)
-		{
-			if (ShowAdvanced || CoreSettings.Contains(name))
-				return false;
-			System.Reflection.PropertyInfo pi = typeof(TQ_Strategy).GetProperty(name,
-				System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
-			return pi != null && pi.GetCustomAttributes(typeof(DisplayAttribute), false).Length > 0;
-		}
-
 		// 지금 설정에서 쓰이지 않는 설정 (설정창에서 회색 잠금, 5-1). 매매 동작에는 영향 없음
 		internal HashSet<string> LockedSettings()
 		{
 			HashSet<string> locked = new HashSet<string>();
-			if (RegimeS2Mode != 2)		locked.Add("RegimeSlopeBars");
-			if (RegimeMode != 2)
-				foreach (string name in new[] { "ScoreScale", "ScoreTrendOn", "ScoreTrendOff", "ScoreVelBars", "ScoreVelMin", "ScoreExitOff" })
-					locked.Add(name);
-			else
-				foreach (string name in new[] { "TrendStartFast", "TrendStartSlow", "TrendEndSlow" })
-					locked.Add(name);
-			if (!RegimeUseRsi)			locked.Add("RegimeRsiBand");
-			if (!SuspectNeedPrice)		locked.Add("SuspectConfirmBars");
-			if (!UseEntryTrendStart && !UseEntryPullback)	locked.Add("EntryMinRR");
-			if (!UseEntryTrendStart)
-				locked.Add("E1Reaccel");
-			if (BreakevenMinR <= 0)			locked.Add("BreakevenFallbackAtr");
-			if (!UseRiskSizing)				locked.Add("RiskPerTrade");
-			if (TrendTpMode == 2)
-				foreach (string name in new[] { "TrendTp1Band", "TrendTp2Band", "TrendTpMinR" })
-					locked.Add(name);
-			else
-				foreach (string name in new[] { "TrendTp1R", "TrendTp2R" })
-					locked.Add(name);
-			if (!UseAddOn || RegimeMode != 2)
-				foreach (string name in new[] { "AddOnMinVel", "AddOnPercent", "AddOnEndTime" })
-					locked.Add(name);
 			if (!UseEntryOpenRange)
-				foreach (string name in new[] { "E5RangeMinutes", "E5TargetR", "E5BreakevenR", "E5StopMinAtr", "E5StopMaxAtr" })
-					locked.Add(name);
-			if (!UseBreakoutEntry)
-				foreach (string name in new[] { "BreakoutBars", "BreakoutMinFast", "BreakoutMaxAbsSlow", "BreakoutExitOnOpposite", "BreakoutBoxBars", "BreakoutMaxEr" })
-					locked.Add(name);
-			else if (BreakoutMaxEr >= 1)	locked.Add("BreakoutBoxBars");
-			if (!UseEntryPullback)
-				foreach (string name in new[] { "TrendPullbackBand", "PullbackMinSlow" })
+				foreach (string name in new[] { "E5RangeMinutes", "E5TargetR" })
 					locked.Add(name);
 			if (!UseEntryOrb)
-				foreach (string name in new[] { "OrbEndTime", "OrbMinSlow", "OrbMinFast", "OrbMaxEntries" })
-					locked.Add(name);
-			if (!UseEntrySide)
-				foreach (string name in new[] { "SideBand", "SideT2Entry", "SideBlockScore", "BlockSideAfterStop", "PreOpenAllowSide" })
-					locked.Add(name);
-			if (!ProtectBeforeOpen)		locked.Add("ProtectAtr");
-			if (!MinEntryFallback)
-				foreach (string name in new[] { "MinEntryFallbackTime", "MinEntryQtyPercent" })
-					locked.Add(name);
+				locked.Add("E3StopEntry");
 			return locked;
 		}
 		#endregion
@@ -3744,15 +3208,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return props;
 			}
 
-			// 고급 설정 보기가 꺼져 있으면 핵심이 아닌 설정은 빼고(숨김), 쓰이지 않는 설정은 회색 잠금
+			// 쓰이지 않는 설정은 회색 잠금
 			PropertyDescriptorCollection adjusted = new PropertyDescriptorCollection(null);
 			foreach (PropertyDescriptor descriptor in props)
 			{
-				bool hide;
-				try { hide = strategy.HideSetting(descriptor.Name); }
-				catch (Exception) { hide = false; }
-				if (hide)
-					continue;
 				adjusted.Add(locked.Contains(descriptor.Name) ? new TQ_ReadOnlyDescriptor(descriptor) : descriptor);
 			}
 			return adjusted;

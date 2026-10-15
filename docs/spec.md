@@ -120,10 +120,12 @@ TQ_Regime의 정수 점수는 대회 구간의 60%가 |S| = 4로 꽉 차서 강�
 | **E1 추세 시작** | TL | 추세 봉 `TrendStart = +1`을 처음 본 진입 봉 마감에 매수. 필터 ① 종가 < Band(+1, `TrendTp1Band`) ② (Band(+1, `TrendTp2Band`) − 종가) ≥ 예상 손절 거리 × `EntryMinRR` | `UseEntryTrendStart` |
 | E1 추세 재가속 (`E1R`) | TL | 상승추세 중 F가 0 이하로 내려갔다가 다시 F ≥ 2 AND S ≥ 2가 된 추세 봉(추세 시작 기준과 따로 고정)을 처음 본 진입 봉 마감. 필터 ①② 같음 (2026-10-15 사용자 결정) | `E1Reaccel` |
 | **E2 추세 눌림** | TL | 추세 = 상승 AND `EntryUpLong`(저가 ≤ Band(−, `TrendPullbackBand`) → T1 [MACD 상승 전환 OR 골든]). 필터: E1의 ②(손익비 `EntryMinRR`), S ≥ `PullbackMinSlow`(2) (둘 다 2026-10-15 추가). 기본 밴드는 중심선(`TrendPullbackBand` 0, 10/15에 1에서 바꿈) | `UseEntryPullback` |
-| **E3 장전 박스 돌파** | TL | 장후(4-7) AND `OrbEndTime` 전 AND 진입 봉 종가 > 장전 박스 고가 AND S ≥ `OrbMinSlow` AND F ≥ `OrbMinFast`. 방향별 `OrbMaxEntries`(2)번까지: 한 번 쓰면 진입 봉 종가가 박스 안(고가 이하)으로 돌아온 뒤에야 다시 돌파를 받음 (2026-10-15 사용자 결정, 지시서 원래 규칙은 방향별 한 번 = 1) | `UseEntryOrb` |
+| **E3 장전 박스 돌파** | TL | 장후(4-7) AND `OrbEndTime` 전 AND 진입 봉 종가 > 장전 박스 고가 AND S ≥ `OrbMinSlow` AND F ≥ `OrbMinFast`. 방향별 `OrbMaxEntries`(2)번까지: 한 번 쓰면 진입 봉 종가가 박스 안(고가 이하)으로 돌아온 뒤에야 다시 돌파를 받음 (2026-10-15 사용자 결정, 지시서 원래 규칙은 방향별 한 번 = 1) | `UseEntryOrb`. v6: 조건이 맞고 종가만 아직 박스 안이면 박스 밖 1틱에 스탑 진입 주문 (`E3StopEntry`, 기본 켬, 4-2-1) |
 | B1 박스 돌파 (4-9) | TL | 진입 봉 종가 > 직전 `BreakoutBars`봉 최고가 AND F ≥ `BreakoutMinFast` AND 직전 `BreakoutBoxBars`(30)봉 효율비 ≤ `BreakoutMaxEr`(0.25). 추세 판정·느린 점수는 보지 않음(`BreakoutMaxAbsSlow` 4) | `UseBreakoutEntry` (v6 기본 켬) |
 | **E5 개장 범위 돌파 (4-10)** | TL | 개장 범위(`OpenTime` 봉부터 `E5RangeMinutes`(5)개 진입 봉의 최고가·최저가)가 완성된 뒤 진입 봉 종가 > 범위 고가. 방향별 하루 한 번. 추세 판정·S·F·의심은 보지 않음 | `UseEntryOpenRange` (v6 기본 켬) |
 | **E4 횡보** | SL | 추세 = 횡보 AND `EntrySideLong`(저가 ≤ Band(−, `SideBand`) → T1, 또는 `SideT2Entry`면 T2Bull) | `UseEntrySide` |
+
+**4-2-1 E3 스탑 주문 진입 (v6, `E3StopEntry`, 2026-10-15 사용자 결정):** 진입 봉 마감에 시장가로 들어갈 경로가 없고, E3의 다른 조건(장후, `OrbEndTime` 전, 횟수, 다시 열림, S·F, 의심·F 반대 금지)은 맞는데 종가만 아직 박스 안이면, 박스 고가 + 1틱(매도는 저가 − 1틱)에 스탑 진입 주문을 걸어 닿는 순간 진입. 손절·수량·익절은 스탑 가격 기준으로 계산하고 체결되면 체결가로 다시 계산. 다음 봉에도 조건이 맞으면 같은 시그널명으로 다시 걸어 주문을 고치고(두 번 체결 방지), 안 걸면 NinjaTrader가 봉 끝에 취소. 한 방향만(관리형 주문은 미보유 때 한 방향 진입 주문이 살아 있으면 반대 진입을 무시, NT8 Managed Approach 문서), 둘 다면 종가에 가까운 쪽. 다른 경로가 시장가로 들어가면 먼저 취소. E3 횟수는 체결됐을 때 셈. 근거(고친 시뮬레이터 18일): 봉 마감 7월 +14.2R / 10월 +1.9R → 스탑 +15.0R / +4.4R. B1은 스탑으로 하면 7월이 나빠져(가짜 돌파) 봉 마감 그대로. 18일 동안 E3 스탑이 걸린 봉 16개 중 반대 방향 신호가 나온 봉 0개.
 
 공통 필터 (막히면 상태 상자·로그에 사유를 수치와 함께 남김):
 - 진입 시간(4-7)과 장전 제한.
@@ -292,11 +294,21 @@ TQ_Regime의 정수 점수는 대회 구간의 60%가 |S| = 4로 꽉 차서 강�
 
 - 이름: `[태그] 한국어 설명 (CodeName)`. 태그: **[설계]** 설계안의 동작과 값 · **[선택]** 고민사항 스위치 · **[안전]** 주문 거부 대비 · **[표시]** 화면·기록.
 - 묶음은 판단 순서, 한 묶음 안에서 [설계] 위 [선택] 아래. 쓰이지 않는 설정은 회색 잠금.
-- 00 묶음: "설계안 기본값으로 되돌리기" 버튼(10 수량·대회 시간, 12 화면·기록 묶음은 건드리지 않음), "마지막 동작" 표시, **고급 설정 보기 (`ShowAdvanced`, 기본 끔, v5)**.
-- **v5 설정창:** 고급 설정 보기를 끄면 핵심 16개만 보임 — 설정 세트 3개(되돌리기·마지막 동작·고급 보기), 진입 경로 5개(`UseEntryTrendStart`·`UseEntryPullback`·`UseEntryOrb`·`UseEntrySide`·`UseBreakoutEntry`), 수량 3개(`EntryQuantity`·`UseRiskSizing`·`RiskPerTrade`), 대회 4개(`MinEntries`·`ContestStartTime`·`EntryEndTime`·`FlattenTime`), 화면 1개(`ShowStatus`). 숨긴 설정도 값과 동작은 그대로임.
+- 00 묶음: "설계안 기본값으로 되돌리기" 버튼(10 수량·대회 시간, 12 화면·기록 묶음은 건드리지 않음), "마지막 동작" 표시.
+- **v6 정리 (2026-10-15 사용자 결정: 정말 조절할 값만 설정창에):** 설정창 32개 —
+  - 01 진입 경로: `UseEntryTrendStart`, `UseEntryPullback`, `UseEntryOrb`, `E3StopEntry`, `UseEntryOpenRange`, `UseBreakoutEntry`, `UseEntrySide`
+  - 02 추세 판정: `ScoreTrendOn`, `ScoreVelMin`, `ScoreExitOff`
+  - 03 익절·손절: `TrendTp1R`, `TrendTp2R`, `TrailAtr`, `E5RangeMinutes`, `E5TargetR`, `StopMinTicks`(종목별), `UseAddOn`, `EarlyFullExitAtTp1`, `EarlyStopMult`
+  - 10 수량·대회 시간: `EntryQuantity`, `RiskPerTrade`, `MinEntries`, `ContestStartTime`, `OpenTime`(골드는 다를 수 있음), `NewsBlockMinutes`(대회 날 지표 일정), `EntryEndTime`, `FlattenTime`
+  - 12 화면·기록: `ShowStatus`, `StatusPanelScale`, `LogToFile`, `MlLogToFile`
+  - 나머지 105개는 코드의 고정값(`#region 고정값`, 값은 아래 8장 기본값 그대로). 동작은 바뀌지 않음.
+  - 함께 지운 기능(꺼 두고 쓰지 않던 것): v3 정수 점수 판정(`RegimeMode` 1, TQ_Regime 원값은 3분봉 마감 줄·채점기용으로 계속 기록), 밴드 익절(`TrendTpMode` 1, `TrendTpMinR`), 봉 마감 시장가 익절(`IntrabarTakeProfit` 끔), 검증용 임시 진입(`UseTestEntry`), 개장 전 본절 보호(`ProtectBeforeOpen`), 10분 추세 봉(`RegimeBarMinutes` 10, 추세 봉은 이제 `BarsArray[1]` 3분봉), 고급 설정 숨김(`ShowAdvanced`), B1 느린 점수 중립(`BreakoutMaxAbsSlow`).
+- (v5 설정창, v6에서 지움) 고급 설정 보기를 끄면 핵심 16개만 보임 — 설정 세트 3개(되돌리기·마지막 동작·고급 보기), 진입 경로 5개(`UseEntryTrendStart`·`UseEntryPullback`·`UseEntryOrb`·`UseEntrySide`·`UseBreakoutEntry`), 수량 3개(`EntryQuantity`·`UseRiskSizing`·`RiskPerTrade`), 대회 4개(`MinEntries`·`ContestStartTime`·`EntryEndTime`·`FlattenTime`), 화면 1개(`ShowStatus`). 숨긴 설정도 값과 동작은 그대로임.
 - 설정값은 113개 (v5: 3개 지우고 위험 수량 2개·고급 보기 1개 추가. v4 B1 5개 추가. 10/15 진입 늘리기 4개, 1차 뒤 손절·밴드 거리 3개, 이익 보호 본절 1개, E2 최소 S 1개, F 반대 진입 금지·바로 반전 2개 추가. 원래 97개, 지시서 5-1은 50개 안쪽이 원칙이나, 5-2 표 그대로 두기로 2026-10-15 사용자 결정).
 
 ## 8. 설정값
+
+> v6 정리 뒤에는 7장의 32개만 설정창에 있고, 나머지는 아래 기본값이 코드 고정값이다(지운 기능의 줄은 참고용).
 
 | 묶음 | 설정 (CodeName) | 기본 | 태그 |
 | --- | --- | --- | --- |
