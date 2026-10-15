@@ -108,6 +108,18 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private const int		ReaccelFast		= 2;
 		private const int		ReaccelSlow		= 2;
 
+		// ── 연속 점수 추세 판정 (RegimeMode 2, spec 3-3) ── 항목마다 −1~+1 연속값(소수 6자리), 1분봉마다 현재가로 다시 계산
+		private ATR				regimeAtr;						// 추세 봉 ATR(14): 항목을 ATR 단위로 나눌 때
+		private Series<double>	contHist;						// 1분봉마다 점수 C (속도 = C − ScoreVelBars봉 전 C)
+		private double			contScore;						// C = 항목 11개 평균 (−1~+1)
+		private double			contVel;						// 속도
+		private double			contSlow;						// 연속 S = S1~S4 연속값 합 (−4~+4)
+		private double			contFast;						// 연속 F = F1·F2 연속값 합 (−2~+2)
+		private int				contState;						// +1 / 0 / −1
+		private int				contSuspect;					// 의심 중 방향 (−1 하락의심, +1 상승의심)
+		private int				contFPrev;						// 직전 1분봉의 F(정수 환산)
+		private bool			contReady;
+
 		// ── v4 돌파 구조 (docs/spec.md 4-9) ── 진입 방향은 가격 돌파 + 빠른 점수, 느린 점수는 강한 반대만 거른다
 		private MAX				rangeHigh;						// 진입 봉 고가의 BreakoutBars봉 최고 ([1] = 직전 봉까지, 지금 봉 제외)
 		private MIN				rangeLow;
@@ -176,6 +188,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 기본값 = v3 지시서 5-2 (설계안)
 				// 01 추세 판단
 				RegimeBarMinutes		= 3;
+				// spec 3-3 연속 점수 + 속도 판정 (v6 기본, 사용자 제안 2026-10-15). 1 = v3 TQ_Regime 판정
+				RegimeMode				= 2;
+				ScoreScale				= 0.9;
+				ScoreTrendOn			= 0.2;
+				ScoreTrendOff			= 0.0;
+				ScoreVelBars			= 6;
+				ScoreVelMin				= 0.25;
 				RegimeFast				= 6;
 				RegimeMid				= 20;
 				RegimeSlow				= 60;
@@ -210,7 +229,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// B1 박스 돌파 (4-9) — v6 기본 켬. 직전 BreakoutBoxBars봉 효율비 ≤ BreakoutMaxEr(박스)일 때 돌파 진입, 느린 점수는 안 봄(4)
 				UseBreakoutEntry		= true;
 				BreakoutBars			= 15;
-				BreakoutMinFast			= 2;
+				BreakoutMinFast			= 1;	// v6: 연속 F 기준(×0.9)에서 2 = 1.8은 대회 구간 6%만 넘어 B1이 사라짐 → 1(0.9)
 				BreakoutMaxAbsSlow		= 4;
 				BreakoutBoxBars			= 30;
 				BreakoutMaxEr			= 0.25;
@@ -322,6 +341,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				regime		= TQ_Regime(BarsArray[regimeBip], RegimeFast, RegimeMid, RegimeSlow, false, MacdFast, MacdSlow, MacdSmooth, RsiPeriod,
 								RegimeS2Mode, RegimeSlopeBars, RegimeUseRsi, RegimeRsiBand, RegimeMacdSlopeBars,
 								TrendStartFast, TrendStartSlow, TrendEndSlow, SuspectFast, false);	// DirectReverse: v5에서 설정을 뺐고 항상 끔
+				regimeAtr	= ATR(BarsArray[regimeBip], 14);
+				contHist	= new Series<double>(this);
 				// v3는 EntryUpLong / EntryDnShort(추세 눌림, 밴드 = TrendPullbackBand), EntrySideLong / EntrySideShort(횡보, 밴드 = SideBand)만 쓴다.
 				// 쓰지 않는 밴드 인자(의심 진입 4개, 역추세 매수)에는 main 기본값을 넘긴다: 2 / 1 / 3 / 30 / 1 / 2. 마지막 조각 이동평균은 쓰지 않아 main 기본 18
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, SwingBars,
@@ -380,6 +401,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
 			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v6"
+				+ " | 판정=" + (RegimeMode == 2 ? "점수(기준x" + ScoreScale.ToString(inv) + " 켬" + ScoreTrendOn.ToString(inv) + " 끔" + ScoreTrendOff.ToString(inv)
+					+ " 속도" + ScoreVelBars + "봉≥" + ScoreVelMin.ToString(inv) + ")" : "v3")
 				+ " | 추세봉=" + RegimeBarMinutes + "분 MA=" + RegimeFast + "/" + RegimeMid + "/" + RegimeSlow
 				+ " S2방식=" + RegimeS2Mode + " 기울기봉=" + RegimeSlopeBars + " RSI항목=" + RegimeUseRsi + " RSI폭=" + RegimeRsiBand.ToString(inv)
 				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow
@@ -516,12 +539,127 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 직전에 마감된 추세 봉의 추세: +1 상승, 0 횡보, −1 하락
 		private int RegimeState()
 		{
+			if (RegimeMode == 2)
+				return contReady ? contState : 0;
+			return RawRegimeState();
+		}
+
+		// TQ_Regime(v3)의 판정 그대로 (추세 봉 마감 줄과 채점기 --validate는 항상 이 값)
+		private int RawRegimeState()
+		{
 			double v = regime.Regime[0];
 			return double.IsNaN(v) ? 0 : (int)v;
 		}
 
-		private int SlowNow()	{ return (int)regime.SlowScore[0]; }
-		private int FastNow()	{ return (int)regime.FastScore[0]; }
+		// 진입·청산 기준이 보는 S·F. RegimeMode 2면 연속 S·F를 정수로 환산: "S ≥ k" ⇔ "연속 S ≥ ScoreScale × k" (기준 코드는 그대로)
+		private int SlowNow()	{ return RegimeMode == 2 ? ScoreLevel(contSlow, RegimeUseRsi ? 4 : 3) : (int)regime.SlowScore[0]; }
+		private int FastNow()	{ return RegimeMode == 2 ? ScoreLevel(contFast, 2) : (int)regime.FastScore[0]; }
+
+		private int ScoreLevel(double x, int top)
+		{
+			if (!contReady || ScoreScale <= 0)
+				return 0;
+			int n = Math.Min(top, (int)Math.Floor(Math.Abs(x) / ScoreScale + 1e-9));
+			return x > 0 ? n : -n;
+		}
+
+		private int SuspectActiveNow()	{ return RegimeMode == 2 ? contSuspect : regime.SuspectActive[0]; }
+
+		private static double R6(double x)	{ return Math.Round(x, 6); }
+
+		// spec 3-3 연속 점수: 직전에 마감된 추세 봉의 이평·MACD·RSI·ATR과 지금 1분봉 종가로 항목 11개를 −1~+1로 만든다.
+		// 가격 항목은 1분마다 바뀌고 이평 항목은 추세 봉마다 바뀜. 연구 스크립트(spec 3-3 근거)와 같은 식
+		private void UpdateContScore()
+		{
+			int rb = regimeBip;
+			contReady = CurrentBars[rb] >= 70 && CurrentBars[0] > ScoreVelBars;
+			if (!contReady)
+			{
+				contHist[0] = 0;
+				return;
+			}
+			double a	= Math.Max(regimeAtr[0], TickSize);
+			double c	= Close[0];
+			double sm	= regime.SmaMid[0], sf = regime.SmaFast[0], ss = regime.SmaSlow[0], m = regime.MacdLine[0];
+			// 가격 항목 6개
+			double pxMid	= R6(Math.Tanh((c - sm) / (1.5 * a)));
+			double pxFast	= R6(Math.Tanh((c - sf) / (0.75 * a)));
+			double roc5		= R6(Math.Tanh((c - Closes[rb][5]) / (2.0 * a)));
+			double hh = c, ll = c;
+			for (int k = 0; k < 20; k++)
+			{
+				hh = Math.Max(hh, Highs[rb][k]);
+				ll = Math.Min(ll, Lows[rb][k]);
+			}
+			double don20	= R6(hh > ll ? 2 * (c - ll) / (hh - ll) - 1 : 0);
+			const int n = 10;
+			double[] ys = new double[n];
+			for (int k = 0; k < n - 1; k++)
+				ys[k] = Closes[rb][n - 1 - k];			// 추세 봉 [9]..[1]
+			ys[n - 1] = c;								// 마지막 점 = 지금 가격
+			double xm = (n - 1) / 2.0, ym = 0, num = 0, den = 0, path = Math.Abs(ys[0] - Closes[rb][n]);
+			for (int k = 0; k < n; k++)
+				ym += ys[k];
+			ym /= n;
+			for (int k = 0; k < n; k++)
+			{
+				num += (k - xm) * (ys[k] - ym);
+				den += (k - xm) * (k - xm);
+				if (k > 0)
+					path += Math.Abs(ys[k] - ys[k - 1]);
+			}
+			double lrs10	= R6(Math.Tanh(num / den / (0.25 * a)));
+			double er10		= R6(path > 0 ? (c - Closes[rb][n]) / path : 0);
+			// 구조 2개, 모멘텀 3개
+			double structS	= R6(Math.Tanh((sm - ss) / (2.0 * a)));
+			double slope60	= R6(Math.Tanh((ss - regime.SmaSlow[5]) / (0.5 * a)));
+			double macd		= R6(Math.Tanh(m / a));
+			double macdSl	= R6(Math.Tanh((m - regime.MacdLine[2]) / (0.3 * a)));
+			double rsi		= R6(Math.Max(-1.0, Math.Min(1.0, (regime.Rsi[0] - 50) / 20)));
+			contScore	= R6((pxMid + pxFast + roc5 + don20 + lrs10 + er10 + structS + slope60 + macd + macdSl + rsi) / 11.0);
+			contSlow	= R6(pxMid + structS + macd + (RegimeUseRsi ? rsi : 0));	// S1 종가−중기선, S2 중기−장기선, S3 MACD선, S4 RSI
+			contFast	= R6(pxFast + macdSl);										// F1 종가−단기선, F2 MACD선 기울기
+			contHist[0]	= contScore;
+			contVel		= R6(contScore - contHist[ScoreVelBars]);
+		}
+
+		// spec 3-3 판정 (1분봉마다): 상승 시작 = C ≥ ScoreTrendOn, 또는 C ≥ 0이면서 속도 ≥ ScoreVelMin. 상승 끝 = C ≤ ScoreTrendOff.
+		// 상승 중 하락 시작 조건이면 바로 하락. 하락은 거울상. 의심 = F(정수 환산)가 추세 반대로 SuspectFast에 처음 닿은 1분봉
+		private void ObserveCont()
+		{
+			int prev = contState;
+			if (contReady)
+			{
+				bool upGo = contScore >= ScoreTrendOn || (contScore >= 0 && contVel >= ScoreVelMin);
+				bool dnGo = contScore <= -ScoreTrendOn || (contScore <= 0 && contVel <= -ScoreVelMin);
+				if (contState == 1)			contState = dnGo ? -1 : contScore <= ScoreTrendOff ? 0 : 1;
+				else if (contState == -1)	contState = upGo ? 1 : contScore >= -ScoreTrendOff ? 0 : -1;
+				else						contState = upGo ? 1 : dnGo ? -1 : 0;
+			}
+			if (contState != prev)
+				contSuspect = 0;
+			if (contState != 0 && contState != prev)
+			{
+				trendStartNow		= contState;
+				lastTrendStartTime	= Time[0];
+				lastTrendStartDir	= contState;
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 추세 판정(점수) {2} → {3}  C={4:F3} 속도={5:F3} 연속S={6:F2} 연속F={7:F2}",
+					Time[0], Instrument.FullName, StateText(prev), StateText(contState), contScore, contVel, contSlow, contFast));
+			}
+			else if (contState == 0 && prev != 0)
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 추세 판정(점수) {2} → 횡보  C={3:F3} 속도={4:F3}", Time[0], Instrument.FullName, StateText(prev), contScore, contVel));
+			int f = FastNow();
+			if (f <= -SuspectFast && contFPrev > -SuspectFast)		fastCrossNow = -1;
+			else if (f >= SuspectFast && contFPrev < SuspectFast)	fastCrossNow = 1;
+			if (contState != 0 && fastCrossNow == -contState)
+			{
+				suspectEventNow	= -contState;
+				contSuspect		= -contState;
+			}
+			else if (contSuspect != 0 && contState * f >= 0)
+				contSuspect = 0;
+			contFPrev = f;
+		}
 
 		// 진입 봉에서 새 추세 봉 값을 처음 볼 때 그 봉의 추세 시작·의심 이벤트를 꺼낸다 (그 진입 봉에서만 0이 아님)
 		private void ObserveRegime()
@@ -530,6 +668,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			suspectEventNow	= 0;
 			reaccelNow		= 0;
 			fastCrossNow	= 0;
+			if (RegimeMode == 2)
+			{
+				UpdateContScore();
+				ObserveCont();
+				ObserveReaccel();		// 판정이 1분마다 바뀌므로 재가속도 1분마다 본다
+				return;
+			}
 			int rb = CurrentBars[regimeBip];
 			if (rb == lastRegimeBar)
 				return;
@@ -765,7 +910,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Zone z		= ZoneNow();
 			bool fallback = MinEntryFallback && z == Zone.Post && entryCount < MinEntries
 							&& RelMinutes(ToTime(Time[0])) >= RelMinutes(MinEntryFallbackTime);
-			int suspectActive = regime.SuspectActive[0];
+			int suspectActive = SuspectActiveNow();
 
 			for (int k = 0; k < 2; k++)
 			{
@@ -1492,7 +1637,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return false;
 
 			// 의심이 풀렸거나 추세가 바뀌었으면 아무것도 안 함
-			bool released = breakoutPos ? dir * FastNow() >= 0 : regime.SuspectActive[0] != -dir || st != dir;
+			bool released = breakoutPos ? dir * FastNow() >= 0 : SuspectActiveNow() != -dir || st != dir;
 			if (released)
 			{
 				Out(string.Format("[{0}][{1}][TQ_Strategy] 의심 해제 → 일부청산 안 함", Time[0], Instrument.FullName));
@@ -2035,11 +2180,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 추세 봉 마감 줄 (채점기 --validate가 읽는 형식: "N분봉 마감 추세=… S=… F=… (…) … 종가=… 이평=… MACD선=… RSI=…")
 		private void LogRegimeBar()
 		{
-			int st = RegimeState();
+			int st = RawRegimeState();
 			int ev = regime.SuspectEvent[0];
 			int ts = regime.TrendStart[0];
 			Out(string.Format("[{0}][{1}][TQ_Strategy] {2}분봉 마감 추세={3} S={4} F={5} ({6}) 추세시작={7} 의심={8} 종가={9} 이평={10:F2}/{11:F2}/{12:F2} MACD선={13:F2} RSI={14:F2}",
-				Time[0], Instrument.FullName, RegimeBarMinutes, StateText(st), Signed(SlowNow()), Signed(FastNow()), regime.ScoreText,
+				Time[0], Instrument.FullName, RegimeBarMinutes, StateText(st), Signed((int)regime.SlowScore[0]), Signed((int)regime.FastScore[0]), regime.ScoreText,
 				ts == 0 ? "-" : (ts > 0 ? "상승" : "하락"),
 				ev != 0 ? (ev < 0 ? "하락의심 이벤트" : "상승의심 이벤트") : regime.SuspectActive[0] != 0 ? "의심 중" : "-",
 				Closes[regimeBip][0], regime.SmaFast[0], regime.SmaMid[0], regime.SmaSlow[0], regime.MacdLine[0], regime.Rsi[0]));
@@ -2055,10 +2200,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string hold = Position.MarketPosition == MarketPosition.Flat ? "없음"
 				: string.Format("{0} {1}계약 손절={2:F2}{3}{4}", PosName(pos), Position.Quantity, stopPrice,
 					suspectWaitLeft > 0 ? " 의심확인대기=" + suspectWaitLeft : "", tp2Done ? " 2차뒤" : tp1Done ? " 1차뒤" : "");
-			Out(string.Format("[{0}][{1}][TQ_Strategy] 추세={2} S={3} F={4} ({5}) 의심={6} 구간={7} 후보 {8} 보유={9} 시고저종={10}/{11}/{12}/{13}",
+			string cont = RegimeMode == 2 ? string.Format(" 점수C={0:F6} 속도={1:F6} 연속S={2:F6} 연속F={3:F6}", contScore, contVel, contSlow, contFast) : "";
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 추세={2} S={3} F={4} ({5}){14} 의심={6} 구간={7} 후보 {8} 보유={9} 시고저종={10}/{11}/{12}/{13}",
 				Time[0], Instrument.FullName, RegimeState(), Signed(SlowNow()), Signed(FastNow()), regime.ScoreText,
-				regime.SuspectActive[0] < 0 ? "하락의심" : regime.SuspectActive[0] > 0 ? "상승의심" : "-",
-				ZoneText(ZoneNow()), cand.Length > 0 ? cand : "-", hold, Open[0], High[0], Low[0], Close[0]));
+				SuspectActiveNow() < 0 ? "하락의심" : SuspectActiveNow() > 0 ? "상승의심" : "-",
+				ZoneText(ZoneNow()), cand.Length > 0 ? cand : "-", hold, Open[0], High[0], Low[0], Close[0], cont));
 		}
 		#endregion
 
@@ -2101,7 +2247,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (!ShowStatus || ChartControl == null)
 				return;
 			int st = RegimeState();
-			int sus = regime.SuspectActive[0];
+			int sus = SuspectActiveNow();
 			BackBrush = st == 1 ? (sus != 0 ? upSuspectBrush : upBackBrush) : st == -1 ? (sus != 0 ? downSuspectBrush : downBackBrush) : null;
 
 			if (BoxReady())
@@ -2172,7 +2318,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			StatusPanelBuilder sb = new StatusPanelBuilder();
 			int st	= RegimeState();
-			int sus	= regime.SuspectActive[0];
+			int sus	= SuspectActiveNow();
 			int S	= SlowNow();
 			int F	= FastNow();
 			Zone z	= ZoneNow();
@@ -2180,7 +2326,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// ── 현재 상태 ──
 			sb.Section("현재 상태", StateTone(st, sus), true);
 			sb.AppendFormat("{0}{1}   {2:HH:mm}\n", StateText(st), sus < 0 ? " · 하락의심" : sus > 0 ? " · 상승의심" : "", Times[0][0]);
-			sb.AppendFormat("{0}분봉: S {1} · F {2} ({3})\n", RegimeBarMinutes, Signed(S), Signed(F), regime.ScoreText);
+			if (RegimeMode == 2)
+				sb.AppendFormat("점수 C {0:+0.000;-0.000} · 속도 {1:+0.000;-0.000} · 연속 S {2:+0.00;-0.00} (→{3}) · F {4:+0.00;-0.00} (→{5})\n",
+					contScore, contVel, contSlow, Signed(S), contFast, Signed(F));
+			else
+				sb.AppendFormat("{0}분봉: S {1} · F {2} ({3})\n", RegimeBarMinutes, Signed(S), Signed(F), regime.ScoreText);
 			if (suspectWaitLeft > 0)
 			{
 				double swingPrev = dir > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];
@@ -2481,6 +2631,37 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(3, 10)]
 		[Display(Name = "[설계] 추세 봉 분: 3 / 10 (RegimeBarMinutes)", Description = "추세를 판단하는 봉. 기본 3(3분봉). 10이면 10분봉(이때 이동평균은 6/18/36 권장). 3과 10만 쓸 수 있고 다른 값은 3으로 봄. 이 묶음의 봉 수는 모두 이 봉 기준", GroupName = "01. 추세 판단 (추세 봉)", Order = 0)]
 		public int RegimeBarMinutes { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 2)]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[선택] 추세 판정 방식: 1 v3 / 2 연속 점수+속도 (RegimeMode)", Description = "기본 2(v6). 1 = TQ_Regime v3(정수 S·F, 추세 봉 마감). 2 = 항목 11개를 −1~+1 연속값으로 만들어 1분마다 현재가로 다시 계산하고 점수 수준과 변화 속도로 판정. 진입·청산 기준의 S·F도 연속 S(4항목 합)·F(2항목 합)를 기준 배율로 환산. 7·10월 18일 시뮬레이션(E1+E3): v3 +13.0R / −2.1R → +16.2R / +6.2R", GroupName = "01. 추세 판단 (추세 봉)", Order = 20)]
+		public int RegimeMode { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, 2.0)]
+		[Display(Name = "[선택] 점수 판정: S·F 기준 배율 (ScoreScale)", Description = "기본 0.9. 정수 기준 k(예: E2 S ≥ 2)를 연속 점수 ≥ 이 값 × k로 봄(S ≥ 1.8). 0.8 / 1.0도 시뮬레이션에서 비슷", GroupName = "01. 추세 판단 (추세 봉)", Order = 21)]
+		public double ScoreScale { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.0, 1.0)]
+		[Display(Name = "[선택] 점수 판정: 추세 시작 점수 (ScoreTrendOn)", Description = "기본 0.2. 점수 C(항목 11개 평균, −1~+1) ≥ 이 값이면 상승추세 시작(하락은 ≤ −값)", GroupName = "01. 추세 판단 (추세 봉)", Order = 22)]
+		public double ScoreTrendOn { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(-1.0, 1.0)]
+		[Display(Name = "[선택] 점수 판정: 추세 종료 점수 (ScoreTrendOff)", Description = "기본 0. 상승추세는 C ≤ 이 값이면 횡보(하락은 ≥ −값)", GroupName = "01. 추세 판단 (추세 봉)", Order = 23)]
+		public double ScoreTrendOff { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 60)]
+		[Display(Name = "[선택] 점수 판정: 속도 봉 수 (ScoreVelBars)", Description = "기본 6(1분봉 6개). 속도 = 지금 C − 이 봉 수 전 C", GroupName = "01. 추세 판단 (추세 봉)", Order = 24)]
+		public int ScoreVelBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.0, 2.0)]
+		[Display(Name = "[선택] 점수 판정: 빠른 시작 속도 (ScoreVelMin)", Description = "기본 0.25. C ≥ 0이면서 속도 ≥ 이 값이면 시작 점수 전이라도 상승추세 시작(하락은 거울상). 큰 움직임 잡는 지연 7.4 → 4.5분(7월). 0.15 / 0.35도 비슷", GroupName = "01. 추세 판단 (추세 봉)", Order = 25)]
+		public double ScoreVelMin { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
@@ -3175,6 +3356,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			HashSet<string> locked = new HashSet<string>();
 			if (RegimeS2Mode != 2)		locked.Add("RegimeSlopeBars");
+			if (RegimeMode != 2)
+				foreach (string name in new[] { "ScoreScale", "ScoreTrendOn", "ScoreTrendOff", "ScoreVelBars", "ScoreVelMin" })
+					locked.Add(name);
+			else
+				foreach (string name in new[] { "TrendStartFast", "TrendStartSlow", "TrendEndSlow" })
+					locked.Add(name);
 			if (!RegimeUseRsi)			locked.Add("RegimeRsiBand");
 			if (!SuspectNeedPrice)		locked.Add("SuspectConfirmBars");
 			if (!UseEntryTrendStart && !UseEntryPullback)	locked.Add("EntryMinRR");
