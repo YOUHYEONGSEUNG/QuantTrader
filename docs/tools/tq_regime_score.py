@@ -743,7 +743,7 @@ def header_params_v3(h):
 
 
 def header_params(h):
-    if re.search(r"버전=v[345]", h):
+    if re.search(r"버전=v[3-6]", h):
         return header_params_v3(h)
     if "추세방식=" not in h:
         return None
