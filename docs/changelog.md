@@ -3,6 +3,19 @@
 명세·인터페이스·매매 로직이 바뀔 때마다 여기에 적는다. 최신이 위.
 형식: 무엇을, 왜, 근거(백테스트 등), 영향받는 파일.
 
+## 2026-10-15 — v4 돌파 구조 (브랜치 `v4-breakout`, `v3-integrated` 261a826에서)
+
+### 진입 방향을 가격 돌파 + 빠른 점수로 (F5·Playback 확인 전)
+- **왜:** 사용자 지시("새 추세 판정 구조로 구현, 구조적으로·전략적으로 비는 부분 없도록"). 근거는 아래 v3 항목의 21일 분석과 `docs/v4-design-draft.md`.
+- **검증 (`docs/tools/tq_entry_sim.py`, 새로 추가):** 같은 청산 엔진으로 진입 규칙만 비교. 21일: v3 E1+E3 +9.1R $35,218(8·9월 −$3,450) → 돌파 15봉 F≥2 S≤−3 금지 +13.2R $46,747(8·9월 +$7,850), 10·20봉도 +12.2~12.8R. **10/5~8 검증에서는 돌파 −$2,561(승률 20%) vs v3 +$7,941로 뒤집힘** — 4일뿐이라 Playback 비교가 필요.
+- **바꾼 것 (TQ_Strategy):**
+  - B1 돌파 진입(spec 4-9): 종가가 직전 `BreakoutBars`(15)봉 최고가 위 AND F ≥ `BreakoutMinFast`(2) AND S > −`BreakoutBlockSlow`(3). 추세 판정은 보지 않음. 경로 우선순위 E1 > E3 > B1 > E2 > E4.
+  - B1 포지션 청산: 반대 돌파(`OPP_BREAKOUT`, `BreakoutExitOnOpposite`), 의심은 F가 포지션 반대로 ±`SuspectFast`를 처음 넘은 추세 봉(추세 판정과 무관, F가 0 이상이면 해제), 마지막 조각 `LAST_MA`. 추세 종료·반대 추세·1분 T2 청산은 B1에 쓰지 않음. 손절·익절 단계·트레일링·이익 보호 본절은 추세 포지션 그대로.
+  - 기본값: B1 켬, E1·E2·E3·E4 끔(설정으로 켜면 v3 동작).
+  - 상태 상자: 현재 상태에 돌파 범위와 마지막 돌파, 진입 조건에 B1 줄, 청산 구역에 B1 청산 조건.
+  - 기록: `TQ_log_v4_종목.txt`, `TQ_ml_v4_종목.csv`, 머리줄 `버전=v4`(채점기 `--validate`가 v3·v4 둘 다 읽음).
+- **설정값:** 113개(B1 5개). **파일:** `TQ_Strategy.cs`, `docs/spec.md`(4-9 추가), `docs/interface.md`, `docs/backtest-guide.md`, `docs/tools/tq_entry_sim.py`, `docs/tools/README.md`, `docs/tools/tq_regime_score.py`(머리줄 v4 인식), `.claude/rules/strategy.md`, `docs/v4-design-draft.md`.
+
 ## 2026-10-15 — v3 (브랜치 `v3-integrated`, main은 그대로)
 
 ### 반전 구간 분석 → 의심 중 진입 금지 되돌림, F 반대 진입 금지, 바로 반전 스위치 (F5·Playback 확인 전)

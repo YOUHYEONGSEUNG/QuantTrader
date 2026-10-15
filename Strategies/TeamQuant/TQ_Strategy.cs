@@ -110,6 +110,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private bool			sessionOpenUsed;				// 이번 대회 구간의 첫 진입 가능 봉이 지났는지 (E1AtSessionStart)
 		private bool			suspectPriceBroken;				// 지금 의심 중에 가격 확인(직전 저점 이탈)이 있었는지 (SuspectBlockNeedPrice)
 
+		// ── v4 돌파 구조 (docs/spec.md 4-9) ── 진입 방향은 가격 돌파 + 빠른 점수, 느린 점수는 강한 반대만 거른다
+		private MAX				rangeHigh;						// 진입 봉 고가의 BreakoutBars봉 최고 ([1] = 직전 봉까지, 지금 봉 제외)
+		private MIN				rangeLow;
+		private int				fastPrevObserved;				// 직전 추세 봉의 F (F가 반대로 ±SuspectFast를 처음 넘는 봉을 잡는다)
+		private int				fastCrossNow;					// 이 진입 봉에서 처음 본 추세 봉에서 F가 −SuspectFast 아래로(−1) / 위로(+1) 넘어감
+		private int				lastBreakoutDir;				// 표시용: 마지막 돌파 신호 방향과 시각
+		private DateTime		lastBreakoutTime;
+
 		// ── 대회 구간 ──
 		private double			boxHigh			= double.NaN;	// 장전 박스 (21:30~22:30 진입 봉 최고가·최저가)
 		private double			boxLow			= double.NaN;
@@ -161,7 +169,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			if (State == State.SetDefaults)
 			{
-				Description			= "팀 퀀트 대회 전략 v3 (docs/spec.md v3)";
+				Description			= "팀 퀀트 대회 전략 v4 돌파 구조 (docs/spec.md 4-9, 브랜치 v4-breakout)";
 				Name				= "TQ_Strategy";
 				Calculate			= Calculate.OnBarClose;			// 4-1 원칙 1: 봉 마감 뒤 판단
 				EntriesPerDirection	= 1;
@@ -193,20 +201,27 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				TrendEntryNeedFast		= true;
 				RegimeDirectReverse		= false;
 				// 03 진입 — 추세
-				UseEntryTrendStart		= true;
-				UseEntryPullback		= true;
+				// v4: 진입 방향은 B1 돌파가 정한다. v3의 추세 판정 진입(E1·E2), 장전 박스(E3), 횡보(E4)는 기본 끔 (켜면 v3와 같이 동작)
+				UseEntryTrendStart		= false;
+				UseEntryPullback		= false;
 				TrendPullbackBand		= 0;	// 2026-10-15 사용자 결정 1(−1배) → 0(중심선)
 				PullbackMinSlow			= 2;
-				UseEntryOrb				= true;
+				UseEntryOrb				= false;
 				OrbEndTime				= 230000;
 				OrbMinSlow				= 1;
 				OrbMinFast				= 1;
 				OrbMaxEntries			= 2;
+				// B1 돌파 (v4, 4-9) — 21일 진입 규칙 비교(docs/tools/tq_entry_sim.py)에서 고른 값
+				UseBreakoutEntry		= true;
+				BreakoutBars			= 15;
+				BreakoutMinFast			= 2;
+				BreakoutBlockSlow		= 3;
+				BreakoutExitOnOpposite	= true;
 				EntryMinRR				= 1.0;
 				E1Reaccel				= true;
 				E1AtSessionStart		= false;	// 2026-10-15 사용자 결정 켬 → 끔 (21일 10건 3승, −$2,792)
 				// 04 진입 — 횡보
-				UseEntrySide			= true;
+				UseEntrySide			= false;
 				SideBand				= 2;
 				SideT2Entry				= true;
 				SideBlockScore			= 3;
@@ -317,12 +332,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								0, 0, 0, T2CountConfirmBars, false);
 				atr			= ATR(BandAtrPeriod);
 
-				minBars0	= Math.Max(Math.Max(BandMidPeriod, MacdSlow + MacdSmooth), Math.Max(BandAtrPeriod, SwingBars)) + 5;
+				minBars0	= Math.Max(Math.Max(Math.Max(BandMidPeriod, MacdSlow + MacdSmooth), Math.Max(BandAtrPeriod, SwingBars)), BreakoutBars + 1) + 5;
+				rangeHigh	= MAX(Highs[0], BreakoutBars);
+				rangeLow	= MIN(Lows[0], BreakoutBars);
 
+				// v4 브랜치(돌파 구조)는 TQ_log_v4_종목.txt, TQ_ml_v4_종목.csv로 따로 쓴다 (v3 기록과 섞이지 않게)
 				// 기록 파일: 내 문서\NinjaTrader 8\TQ_log_v3_종목.txt, TQ_ml_v3_종목.csv (v2 기록과 섞이지 않게 따로, 사용자 결정 2026-10-15)
 				string docs	= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NinjaTrader 8");
-				logPath		= System.IO.Path.Combine(docs, "TQ_log_v3_" + Instrument.MasterInstrument.Name + ".txt");
-				mlPath		= System.IO.Path.Combine(docs, "TQ_ml_v3_" + Instrument.MasterInstrument.Name + ".csv");
+				logPath		= System.IO.Path.Combine(docs, "TQ_log_v4_" + Instrument.MasterInstrument.Name + ".txt");
+				mlPath		= System.IO.Path.Combine(docs, "TQ_ml_v4_" + Instrument.MasterInstrument.Name + ".csv");
 				mlRunId		= DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
 				string summary	= SettingsSummary();
 				int cut			= summary.IndexOf("] ");
@@ -357,11 +375,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			get { return "TQ_Strategy"; }
 		}
 
-		// 실행·설정 구분용 한 줄. 채점기(docs/tools/tq_regime_score.py --validate)가 "버전=v3"와 추세 판단 값을 읽는다
+		// 실행·설정 구분용 한 줄. 채점기(docs/tools/tq_regime_score.py --validate)가 "버전=v3"·"버전=v4"와 추세 판단 값을 읽는다
 		private string SettingsSummary()
 		{
 			System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
-			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v3"
+			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v4"
 				+ " | 추세봉=" + RegimeBarMinutes + "분 MA=" + RegimeFast + "/" + RegimeMid + "/" + RegimeSlow
 				+ " S2방식=" + RegimeS2Mode + " 기울기봉=" + RegimeSlopeBars + " RSI항목=" + RegimeUseRsi + " RSI폭=" + RegimeRsiBand.ToString(inv)
 				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow + " 바로반전=" + RegimeDirectReverse
@@ -369,6 +387,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ " 강한의심S=" + SuspectStrongSlow + "(" + SuspectStrongExitPercent + "%) 의심중진입금지=" + BlockEntryWhileSuspect + "(가격확인때만=" + SuspectBlockNeedPrice + ") 추세진입F필요=" + TrendEntryNeedFast
 				+ " | E1=" + UseEntryTrendStart + "(재가속=" + E1Reaccel + " 구간첫봉=" + E1AtSessionStart + ") E2=" + UseEntryPullback + "(밴드" + TrendPullbackBand + " S" + PullbackMinSlow + ") E3=" + UseEntryOrb
 				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
+				+ " | B1돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast + " S거르기" + BreakoutBlockSlow + " 반대청산=" + BreakoutExitOnOpposite + ")"
 				+ " | E4=" + UseEntrySide + "(밴드" + SideBand + " T2=" + SideT2Entry + ") 횡보필터=" + SideBlockScore + " 횡보재진입금지=" + BlockSideAfterStop
 				+ " | 대기=" + T1Window + " MACD확인=" + MacdConfirmBars + " T2앞봉인정=" + T2CountConfirmBars
 				+ " | 손절봉=" + SwingBars + " 추세손절ATR=" + TrendStopMinAtr.ToString(inv) + "~" + TrendStopMaxAtr.ToString(inv)
@@ -515,10 +534,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			trendStartNow	= 0;
 			suspectEventNow	= 0;
 			reaccelNow		= 0;
+			fastCrossNow	= 0;
 			int rb = CurrentBars[regimeBip];
 			if (rb == lastRegimeBar)
 				return;
 			lastRegimeBar	= rb;
+			// v4 의심(돌파 포지션용): 추세 판정과 상관없이 F가 −SuspectFast 아래로 / +SuspectFast 위로 처음 넘어간 추세 봉
+			int fNow = FastNow();
+			if (fNow <= -SuspectFast && fastPrevObserved > -SuspectFast)	fastCrossNow = -1;
+			else if (fNow >= SuspectFast && fastPrevObserved < SuspectFast)	fastCrossNow = 1;
+			fastPrevObserved = fNow;
 			trendStartNow	= regime.TrendStart[0];
 			suspectEventNow	= regime.SuspectEvent[0];
 			if (trendStartNow != 0)
@@ -594,7 +619,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		private string PathName(string p)
 		{
-			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p;
+			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "B1" ? "B1 돌파" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p;
 		}
 
 		private string StateText(int st)
@@ -735,7 +760,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 경로 우선순위: E1 > E3 > E2 > E4 (4-2)
 		private static int PathRank(string p)
 		{
-			return p == "E1" ? 0 : p == "E3" ? 1 : p == "E2" ? 2 : 3;
+			return p == "E1" ? 0 : p == "E3" ? 1 : p == "B1" ? 2 : p == "E2" ? 3 : 4;	// B1(v4)은 E3 다음
 		}
 
 		// 진입 경로 4개 × 방향 2개의 후보와 막힌 사유를 만든다. 미보유일 때 매 진입 봉 마감마다
@@ -865,6 +890,25 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					list.Add(c);
 				}
 
+				// ── B1 돌파 (v4, 4-9) ── 진입 봉 종가가 직전 BreakoutBars봉 고가 위(매도는 저가 아래) AND F ≥ BreakoutMinFast
+				// AND 느린 점수가 강한 반대가 아님(S > −BreakoutBlockSlow). 추세 판정(+1/0/−1)은 보지 않는다
+				{
+					Candidate c = new Candidate { Path = "B1", Dir = d, QtyPercent = qtyPct, Fallback = fallback };
+					double edge	= d > 0 ? rangeHigh[1] : rangeLow[1];
+					string rangeTxt = string.Format("{0}분 {1} {2:N2}", BreakoutBars, d > 0 ? "고가" : "저가", edge);
+					string block = !UseBreakoutEntry ? "꺼짐" : timeBlock;
+					if (block == null && !fallback && BreakoutBlockSlow > 0 && d * S <= -BreakoutBlockSlow)
+						block = string.Format("느린 점수가 강한 반대 (S {0}, {1} {2}이면 막음)", Signed(S), d > 0 ? "≤" : "≥", Signed(-d * BreakoutBlockSlow));
+					bool beyond	= d * (Close[0] - edge) > 0;
+					bool fastOk	= d * F >= BreakoutMinFast;
+					if (!UseBreakoutEntry)			{ c.Line = "× B1 돌파: 꺼짐"; c.Code = "off"; }
+					else if (block != null)			{ c.Line = "× B1 돌파: " + block; c.Code = "blk"; }
+					else if (beyond && fastOk)		{ c.Ready = true; c.Line = "● B1 돌파: 지금 진입 (종가 " + Close[0].ToString("N2") + (d > 0 ? " > " : " < ") + rangeTxt + ")"; c.Code = "go"; }
+					else if (beyond)				{ c.Line = string.Format("× B1 돌파: 종가는 {0} 밖이지만 F {1} (필요 {2})", rangeTxt, Signed(F), Signed(d * BreakoutMinFast)); c.Code = "fast"; }
+					else							{ c.Line = string.Format("○ B1 돌파: 종가 {0} {1}{2}", d > 0 ? ">" : "<", rangeTxt, fastOk ? "" : string.Format(" · F {0} (필요 {1})", Signed(F), Signed(d * BreakoutMinFast))); c.Code = "wait"; }
+					list.Add(c);
+				}
+
 				// ── E4 횡보 ── 횡보 AND 저가 ≤ Band(−, SideBand) → T1 (또는 SideT2Entry면 T2)
 				{
 					Candidate c = new Candidate { Path = "E4", Dir = d, QtyPercent = qtyPct, Fallback = fallback };
@@ -943,6 +987,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			if (best.Path == "E1")
 				e1AfterExitDir = 0;
+			if (best.Path == "B1")
+			{
+				lastBreakoutDir		= best.Dir;
+				lastBreakoutTime	= Time[0];
+			}
 		}
 
 		// 분할 진입. 조각 수량 = 진입 계약 × % 내림, 마지막 조각이 나머지 (4-8)
@@ -1351,6 +1400,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 보유 중 진입 봉 마감마다 (순서: 반대 추세 → 추세 종료 → 의심 → 진입 봉 T2 반대 신호 → 마지막 조각)
 		private void ManageTrendExits()
 		{
+			if (path == "B1")
+			{
+				ManageBreakoutExits();
+				return;
+			}
 			int st = RegimeState();
 			if (st == dir)
 				sawOwnTrend = true;
@@ -1388,11 +1442,41 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					dir > 0 ? "<" : ">", TrendLastExitMa == 1 ? "중기선" : "단기선", ma));
 		}
 
+		// B1 돌파 포지션 청산 (4-9): 추세 판정을 보지 않는다. 순서: 반대 돌파 → 의심(F 기준) → 마지막 조각.
+		// 익절 단계·손절·트레일링·이익 보호·종료 청산은 추세 포지션과 같다 (OnBarUpdate의 공통 처리)
+		private void ManageBreakoutExits()
+		{
+			// 반대 돌파: 종가가 직전 BreakoutBars봉의 반대쪽 끝을 넘고 F가 그 방향으로 BreakoutMinFast 이상 → 전량. 같은 봉 반대 진입은 없고 다음 봉에 B1로 다시 판단
+			if (BreakoutExitOnOpposite && OppositeBreakout())
+			{
+				double edge = dir > 0 ? rangeLow[1] : rangeHigh[1];
+				FlattenRemaining("OPP_BREAKOUT", string.Format("반대 돌파: 종가 {0:N2} {1} {2}분 {3} {4:N2}, F {5}", Close[0], dir > 0 ? "<" : ">",
+					BreakoutBars, dir > 0 ? "저가" : "고가", edge, Signed(FastNow())));
+				return;
+			}
+			if (HandleSuspect(RegimeState()))
+				return;
+			double ma = LastExitMa();
+			if (tp2Done && !double.IsNaN(ma) && dir * (Closes[regimeBip][0] - ma) < 0)
+				FlattenRemaining("LAST_MA", string.Format("마지막 조각: {0}분봉 종가 {1:N2} {2} {3} {4:N2}", RegimeBarMinutes, Closes[regimeBip][0],
+					dir > 0 ? "<" : ">", TrendLastExitMa == 1 ? "중기선" : "단기선", ma));
+		}
+
+		// 보유 방향의 반대 돌파 (B1과 같은 식, 느린 점수 거르기는 안 봄)
+		private bool OppositeBreakout()
+		{
+			double edge = dir > 0 ? rangeLow[1] : rangeHigh[1];
+			return -dir * (Close[0] - edge) > 0 && -dir * FastNow() >= BreakoutMinFast;
+		}
+
 		// 4-5 의심 이벤트: 포지션 반대 방향 의심이 뜨면 SuspectConfirmBars봉 동안 가격 확인(종가가 직전 SwingBars봉 저점 아래)을 기다렸다가
 		// 남은 수량의 SuspectExitPercent(%)를 청산한다. S ≤ SuspectStrongSlow면 SuspectStrongExitPercent. 의심 하나당 한 번. 청산했으면 true
 		private bool HandleSuspect(int st)
 		{
-			if (suspectEventNow == -dir && st == dir && lastRegimeBar != suspectDoneBar)
+			// B1 돌파 포지션은 추세 판정과 상관없이 F가 포지션 반대로 ±SuspectFast를 처음 넘은 추세 봉을 의심으로 본다 (4-9)
+			bool breakoutPos	= path == "B1";
+			bool trigger		= breakoutPos ? fastCrossNow == -dir : suspectEventNow == -dir && st == dir;
+			if (trigger && lastRegimeBar != suspectDoneBar)
 			{
 				suspectEventsSeen++;
 				suspectEventBar		= lastRegimeBar;
@@ -1405,7 +1489,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return false;
 
 			// 의심이 풀렸거나 추세가 바뀌었으면 아무것도 안 함
-			if (regime.SuspectActive[0] != -dir || st != dir)
+			bool released = breakoutPos ? dir * FastNow() >= 0 : regime.SuspectActive[0] != -dir || st != dir;
+			if (released)
 			{
 				Out(string.Format("[{0}][{1}][TQ_Strategy] 의심 해제 → 일부청산 안 함", Time[0], Instrument.FullName));
 				EndSuspectWait("CANCEL");
@@ -2103,6 +2188,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				sb.Append("  의심 중 (" + (sus < 0 ? "하락의심" : "상승의심") + ")\n");
 			string box = double.IsNaN(boxHigh) ? "" : string.Format(" · 장전 박스 {0:N2} ~ {1:N2}{2}", boxLow, boxHigh, BoxReady() ? "" : " (기록 중)");
 			sb.Append(ZoneText(z) + (z == Zone.Pre ? " (수량 " + PreOpenQtyPercent + "%)" : "") + box + "\n");
+			if (UseBreakoutEntry)
+				sb.AppendFormat("돌파 범위 ({0}분): {1:N2} ~ {2:N2}{3}\n", BreakoutBars, rangeLow[1], rangeHigh[1],
+					lastBreakoutDir == 0 ? "" : string.Format(" · 마지막 돌파 {0} {1:HH:mm}", lastBreakoutDir > 0 ? "▲" : "▼", lastBreakoutTime));
 			sb.AppendFormat("{0}분봉: MACD {1}  %K {2:F0} / %D {3:F0}  RSI {4:F0}  ATR {5:F1}\n", BarsPeriod.Value,
 				signals.MacdUp[0] ? "▲ 전환" : signals.MacdDown[0] ? "▼ 전환" : signals.MacdRising[0] ? "▲" : signals.MacdFalling[0] ? "▼" : "−",
 				signals.K[0], signals.D[0], signals.Rsi[0], atr[0]);
@@ -2123,7 +2211,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 						bool any = false;
 						foreach (Candidate c in cands)
 						{
-							if (c.Dir != d)
+							if (c.Dir != d || c.Code == "off")	// 꺼진 경로는 상자에 안 그림 (로그에는 남음). v4는 E1~E4가 기본 끔
 								continue;
 							if (!any)
 							{
@@ -2199,6 +2287,18 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			sb.Section("청산", ToneExit);
 			if (pos == Pos.None)
 				sb.Append("● 청산 주문 냄, 체결 대기\n");
+			else if (path == "B1")
+			{
+				if (BreakoutExitOnOpposite)
+					sb.AppendFormat("○ 반대 돌파: 종가 {0} {1}분 {2} {3:N2} AND F {4} {5}\n", dir > 0 ? "<" : ">", BreakoutBars, dir > 0 ? "저가" : "고가",
+						dir > 0 ? rangeLow[1] : rangeHigh[1], dir > 0 ? "≤" : "≥", Signed(-dir * BreakoutMinFast));
+				string sName = "F " + (dir > 0 ? "≤ " : "≥ ") + Signed(-dir * SuspectFast);
+				if (suspectWaitLeft > 0)
+					sb.AppendFormat("● 의심({0}): 가격 확인 대기 중 (확인되면 {1}%, S {2} 이하면 {3}%)\n", sName, SuspectExitPercent, Signed(dir * SuspectStrongSlow), SuspectStrongExitPercent);
+				else
+					sb.AppendFormat("○ 의심({0}) 뒤 가격 확인 시 {1}% (S {2} 이하면 {3}%)\n", sName, SuspectExitPercent, Signed(dir * SuspectStrongSlow), SuspectStrongExitPercent);
+				sb.Append("  추세 판정(상승·횡보·하락)으로는 청산하지 않음\n");
+			}
 			else if (IsTrendPos())
 			{
 				string sName = dir > 0 ? "하락의심" : "상승의심";
@@ -2528,6 +2628,31 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, 10)]
 		[Display(Name = "[선택] E3 방향별 최대 횟수 (OrbMaxEntries)", Description = "기본 2(2026-10-15 사용자 결정, 그 전에는 1). 한 번 쓰면 진입 봉 종가가 박스 안(매수는 박스 고가 이하, 매도는 저가 이상)으로 돌아온 뒤에야 다시 돌파를 받음. 1 = 지시서 원래 규칙", GroupName = "03. 진입 — 추세", Order = 7)]
 		public int OrbMaxEntries { get; set; }
+
+		// ── B1 돌파 (v4, 4-9) ── 03 묶음 맨 위쪽 순서(Order 20~)로 둔다
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[설계] B1 돌파 진입 (UseBreakoutEntry)", Description = "기본 켬(v4). 진입 봉 종가가 직전 N봉 고가 위(매도는 저가 아래)로 마감하고 빠른 점수 F가 그 방향으로 기준 이상이면 추세 포지션 진입. 추세 판정(상승·횡보·하락)은 보지 않음", GroupName = "03. 진입 — 추세", Order = 20)]
+		public bool UseBreakoutEntry { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(2, 120)]
+		[Display(Name = "[설계] B1 돌파 범위 봉 수 (BreakoutBars)", Description = "기본 15(1분봉 15개). 지금 봉을 뺀 직전 N봉의 최고가·최저가를 넘어야 돌파. 21일 비교: 10 / 15 / 20 비슷, 30은 나빠짐", GroupName = "03. 진입 — 추세", Order = 21)]
+		public int BreakoutBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 2)]
+		[Display(Name = "[설계] B1 최소 빠른 점수 (BreakoutMinFast)", Description = "기본 2. 매수는 F ≥ 이 값, 매도는 F ≤ −값. 21일 비교: 1이면 8·9월 손실(−$7,642), 2면 이익(+$7,690)", GroupName = "03. 진입 — 추세", Order = 22)]
+		public int BreakoutMinFast { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 4)]
+		[Display(Name = "[설계] B1 느린 점수 거르기 (BreakoutBlockSlow)", Description = "기본 3. 매수는 S ≤ −이 값이면, 매도는 S ≥ +이 값이면 막음(강한 반대 구조에서만). 0 = 안 봄. 21일 비교: 2 / 3 / 0 차이가 작음", GroupName = "03. 진입 — 추세", Order = 23)]
+		public int BreakoutBlockSlow { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[설계] B1 반대 돌파 시 전량 청산 (BreakoutExitOnOpposite)", Description = "기본 켬. 보유 중 종가가 직전 N봉의 반대쪽 끝을 넘고 F가 그 방향으로 기준 이상이면 전량 청산(OPP_BREAKOUT). 같은 봉에 반대 진입은 하지 않음", GroupName = "03. 진입 — 추세", Order = 24)]
+		public bool BreakoutExitOnOpposite { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, double.MaxValue)]
@@ -2883,11 +3008,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public int StatusPanelScale { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[표시] 로그를 파일로 저장 (LogToFile)", Description = "실시간·Playback 로그를 내 문서\\NinjaTrader 8\\TQ_log_v3_종목.txt에 저장. 진입 봉·추세 봉 마감마다, 사건마다 한 줄", GroupName = "12. 화면·기록", Order = 2)]
+		[Display(Name = "[표시] 로그를 파일로 저장 (LogToFile)", Description = "실시간·Playback 로그를 내 문서\\NinjaTrader 8\\TQ_log_v4_종목.txt에 저장 (v4 브랜치). 진입 봉·추세 봉 마감마다, 사건마다 한 줄", GroupName = "12. 화면·기록", Order = 2)]
 		public bool LogToFile { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[표시] 학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 TQ_ml_v3_종목.csv에 한 줄(신호 봉 특징값 + 결과). 백테스트에서도 저장. 최적화 때는 끔", GroupName = "12. 화면·기록", Order = 3)]
+		[Display(Name = "[표시] 학습 데이터를 파일로 저장 (MlLogToFile)", Description = "거래 1건마다 TQ_ml_v4_종목.csv(v4 브랜치)에 한 줄(신호 봉 특징값 + 결과). 백테스트에서도 저장. 최적화 때는 끔", GroupName = "12. 화면·기록", Order = 3)]
 		public bool MlLogToFile { get; set; }
 
 		[NinjaScriptProperty]
@@ -3023,6 +3148,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					locked.Add(name);
 			if (!BlockEntryWhileSuspect)	locked.Add("SuspectBlockNeedPrice");
 			if (BreakevenMinR <= 0)			locked.Add("BreakevenFallbackAtr");
+			if (!UseBreakoutEntry)
+				foreach (string name in new[] { "BreakoutBars", "BreakoutMinFast", "BreakoutBlockSlow", "BreakoutExitOnOpposite" })
+					locked.Add(name);
 			if (!UseEntryPullback)
 				foreach (string name in new[] { "TrendPullbackBand", "PullbackMinSlow" })
 					locked.Add(name);

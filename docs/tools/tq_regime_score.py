@@ -743,7 +743,7 @@ def header_params_v3(h):
 
 
 def header_params(h):
-    if "버전=v3" in h:
+    if "버전=v3" in h or "버전=v4" in h:
         return header_params_v3(h)
     if "추세방식=" not in h:
         return None

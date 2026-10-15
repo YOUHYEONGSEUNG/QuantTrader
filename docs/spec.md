@@ -1,4 +1,6 @@
-# 대회 전략 명세 v3 (코딩용)
+# 대회 전략 명세 v3 + v4 돌파 구조 (코딩용)
+
+> **브랜치 `v4-breakout` (2026-10-15):** 진입 방향을 추세 판정 대신 가격 돌파와 빠른 점수가 정하는 구조(4-9)를 넣고 기본으로 켰다. v3의 진입 경로 E1~E4는 설정으로 남아 있고 이 브랜치에서는 기본 끔이다. v3 그대로의 명세는 브랜치 `v3-integrated`.
 
 2026-10-15 · 브랜치 `v3-integrated` · 기준 문서: v3 통합 설계 지시서(`v3-build-order.md`, 10/15). v2(회의 문서 규칙 + 유기 모드)는 태그 없이 `main`(`d05a041`)과 `organic-defaults-1014` 브랜치에 그대로 있음.
 
@@ -76,6 +78,7 @@
 | E1 구간 첫 봉 추세 (`E1S`) | TL | 대회 구간 첫 진입 가능 봉(기본 21:35)에 추세 = 상승. 필터 ①② 같음, 장전 규칙 적용 (2026-10-15 사용자 결정, 같은 날 기본 끔: 21일 10건 3승 −$2,792) | `E1AtSessionStart` |
 | **E2 추세 눌림** | TL | 추세 = 상승 AND `EntryUpLong`(저가 ≤ Band(−, `TrendPullbackBand`) → T1 [MACD 상승 전환 OR 골든]). 필터: E1의 ②(손익비 `EntryMinRR`), S ≥ `PullbackMinSlow`(2) (둘 다 2026-10-15 추가). 기본 밴드는 중심선(`TrendPullbackBand` 0, 10/15에 1에서 바꿈) | `UseEntryPullback` |
 | **E3 장전 박스 돌파** | TL | 장후(4-7) AND `OrbEndTime` 전 AND 진입 봉 종가 > 장전 박스 고가 AND S ≥ `OrbMinSlow` AND F ≥ `OrbMinFast`. 방향별 `OrbMaxEntries`(2)번까지: 한 번 쓰면 진입 봉 종가가 박스 안(고가 이하)으로 돌아온 뒤에야 다시 돌파를 받음 (2026-10-15 사용자 결정, 지시서 원래 규칙은 방향별 한 번 = 1) | `UseEntryOrb` |
+| **B1 돌파 (v4, 4-9)** | TL | 진입 봉 종가 > 직전 `BreakoutBars`봉 최고가 AND F ≥ `BreakoutMinFast` AND S > −`BreakoutBlockSlow`. 추세 판정은 보지 않음 | `UseBreakoutEntry` (v4 기본 켬) |
 | **E4 횡보** | SL | 추세 = 횡보 AND `EntrySideLong`(저가 ≤ Band(−, `SideBand`) → T1, 또는 `SideT2Entry`면 T2Bull) | `UseEntrySide` |
 
 공통 필터 (막히면 상태 상자·로그에 사유를 수치와 함께 남김):
@@ -84,7 +87,8 @@
 - **추세 진입은 빠른 점수가 반대면 안 함 (`TrendEntryNeedFast`, 기본 켬, 2026-10-15 사용자 결정):** E1·E2·E3 매수는 F ≥ 0, 매도는 F ≤ 0일 때만. 추세 판정은 늦어서(큰 움직임 시간의 약 28%를 반대 추세로 판정) 반전 초입에는 판정은 옛 방향인데 F는 이미 반대임.
 - 횡보 방향 필터: S+F ≥ `SideBlockScore`(3)이면 SS 금지, ≤ −3이면 SL 금지.
 - 재진입 제한: 횡보 포지션이 본절 전 손실 손절로 끝나면 그 대회 구간에서 같은 방향 횡보 진입 금지(`BlockSideAfterStop`). 추세 포지션은 제한하지 않음.
-- 같은 봉에 여러 경로가 충족되면 E1 > E3 > E2 > E4, 진입은 1회. 같은 경로에 두 방향이 같이 충족되면 매수 먼저(구현 선택).
+- **v4 브랜치 기본값:** B1만 켬. E1·E2·E3·E4(`UseEntryTrendStart`·`UseEntryPullback`·`UseEntryOrb`·`UseEntrySide`)는 끔. 켜면 v3와 같이 동작함.
+- 같은 봉에 여러 경로가 충족되면 E1 > E3 > B1 > E2 > E4, 진입은 1회. 같은 경로에 두 방향이 같이 충족되면 매수 먼저(구현 선택).
 - 밴드 조건 없이 1분 T2만으로 추세 진입하는 경로는 없음.
 - `SideT2Entry`를 끄면: `TQ_Signals.EntrySideLong`이 밴드 경로와 T2를 하나로 내므로, 직전 봉까지 밴드 대기가 없었는데 T2가 같이 나온 봉은 T2만의 신호로 보고 뺌.
 
@@ -153,6 +157,41 @@
 - 단계 수량 = 진입 계약 × %를 내림, 마지막 조각이 나머지. 30계약 33/33 → 9 / 9 / 12. 장전 50%면 15계약 → 4 / 4 / 7.
 - 의심 일부청산은 그때 남은 수량 기준(4-5).
 
+### 4-9. v4 돌파 구조 (브랜치 `v4-breakout`, 2026-10-15 사용자 결정)
+
+**왜:** 21일 분석(7/15~9/10)에서 추세 판정은 큰 움직임 시간의 약 28%를 반대 추세로 판정했고, 시작·끝 규칙을 바꿔도 속도와 흔들림을 맞바꿀 뿐이었음. 늦은 판정이 진입 방향을 정해서 반전 구간에 옛 방향 진입(의심 중 E2 8건 −$9,997)과 역방향 횡보 진입이 나왔음. 돈을 번 진입은 가격과 F가 방향을 정한 경우(E3)였음. 그래서 진입 방향은 가격 돌파와 F가 정하고, 느린 점수는 강한 반대 구조만 거름 (`docs/v4-design-draft.md`).
+
+**진입 B1 (매수 기준, 매도는 거울상):**
+1. 진입 봉 종가 > 지금 봉을 뺀 직전 `BreakoutBars`(15)봉의 최고가.
+2. 빠른 점수 F ≥ `BreakoutMinFast`(2) (직전에 마감된 추세 봉 값).
+3. 느린 점수 S > −`BreakoutBlockSlow`(3). 0이면 안 봄. 최소 진입 보장(4-7) 진입에는 적용하지 않음.
+4. 시간대·수량은 4-7 그대로(지표 발표·개장 전후 진입 금지, 장전 수량 50%). 장전 S 기준(`PreOpenTrendMinSlow`)과 손익비(`EntryMinRR`)는 B1에 쓰지 않음(익절 밴드가 가까우면 4-4의 "이미 지난 밴드" 규칙이 처리).
+5. 포지션은 추세 포지션(TL / TS). 손절(4-3 추세 범위), 익절 단계·트레일링·이익 보호 본절·1차 뒤 손절(4-4)은 추세 포지션과 같음.
+
+**B1 포지션 청산 (추세 판정 +1 / 0 / −1으로는 청산하지 않음):**
+
+| 순서 | 조건 | 수량 | 사유 코드 |
+| --- | --- | --- | --- |
+| 1 | 반대 돌파: 종가 < 직전 `BreakoutBars`봉 최저가 AND F ≤ −`BreakoutMinFast` (`BreakoutExitOnOpposite`) | 전량 | `OPP_BREAKOUT` |
+| 2 | 의심: F가 포지션 반대로 ±`SuspectFast`(2)를 처음 넘은 추세 봉 → 4-5와 같은 가격 확인 대기·일부청산. F가 0 이상으로 돌아오면 해제 | 4-5 | `SUSPECT`, `SUSPECT_STRONG` |
+| 3 | 마지막 조각: 2차 뒤 추세 봉 종가가 기준선 반대편 (4-4) | 나머지 | `LAST_MA` |
+| – | 손절·트레일링·종료 청산 (공통) | | `STOP` 등 |
+
+- 반대 돌파로 청산한 봉에는 반대 진입을 하지 않음(4-1 원칙 2). 다음 봉에 B1 조건이 맞으면 반대로 진입함.
+- 손절 뒤 같은 방향으로 다시 돌파하면 다시 진입함(재진입 제한 없음).
+- 추세 판정(TQ_Regime의 +1 / 0 / −1)은 계속 계산하고 화면·기록·E1~E4에만 씀.
+
+**근거 (`docs/tools/tq_entry_sim.py`, 로그의 1분봉·3분봉 S·F를 같은 청산 엔진으로 재현):**
+
+| 진입 규칙 | 21일 (7~9월) | 10/5~8 (검증) |
+| --- | --- | --- |
+| v3 E1 + E3 | 34건 +9.1R $35,218 (8·9월 −$3,450) | 8건 +2.2R $7,941 |
+| **B1 15봉 F ≥ 2 S 거르기 3** | 50건 +13.2R $46,747 (8·9월 +$7,850) | 10건 +1.9R −$2,561 (승률 20%) |
+| B1 10 / 20봉 F ≥ 2 | +12.8R / +12.2R | |
+| B1 15봉 F ≥ 1 | 55건 +10.3R (8·9월 −$7,642) | |
+
+시뮬레이션은 Playback보다 낙관적임(부분 체결 없음, 1분 EMA·ATR은 21:2x부터 쌓음). 10월 4일은 v3보다 나빴으므로 Playback으로 같은 날짜를 v3와 비교해 확인해야 함.
+
 ## 5. 대회 운영 규칙
 
 - **시간:** 예선 10/27(화), 본선 10/30(금) 모두 한국시간 21:30\~23:30.
@@ -163,16 +202,16 @@
 
 - **상태 상자:** main(`d05a041`)의 그리기 방식(구역별 색 제목줄·배경, ●○× 기호, `StatusPanelScale`). 구역: 현재 상태 / 진입 조건(미보유) / 포지션 / 익절 / 손절 / 청산. 막힌 진입은 사유를 수치와 함께 적음.
 - **차트:** 배경색 = 추세(상승 초록, 하락 빨강, 의심 중이면 주황·하늘색). 진입 화살표(매수 초록 ↑, 매도 빨강 ↓), 청산 화살표(파랑), 체결 라벨, 손절선·평단선, 장전 박스 고가·저가 점선(22:30 이후).
-- **로그** `내 문서\NinjaTrader 8\TQ_log_v3_종목.txt` (실시간·Playback): 실행 시작 설정 줄(`버전=v3`, settings_id), 추세 봉 마감마다(S·F·항목별·원값), 진입 봉 마감마다(추세, S·F, 의심, 구간, 경로별 후보 상태, 보유 상태, `시고저종=`), 사건마다(진입, 익절·청산 사유 코드, 손절 이동, 주문 오류).
-- **학습 데이터** `TQ_ml_v3_종목.csv` (백테스트 포함, 거래 1건마다): main의 열 + `path, session, s1..s4, f1, f2, slow, fast, pre_box_high, pre_box_low, atr_entry, rr_expected, fallback_entry, suspect_events, suspect_action, tp_stages_hit, trail_used, exit_reason`. v2 기록과 섞이지 않게 파일 이름을 따로 둠(2026-10-15 사용자 결정).
-- **사유 코드:** `TP1`, `TP2`, `LAST_MA`, `TRAIL`, `STOP`, `BE_STOP`, `SUSPECT`, `SUSPECT_STRONG`, `TREND_END`, `OPP_TREND`, `SIDE_REST_BAND`, `SIDE_MACD`, `SIDE_CROSS`, `FLATTEN_TIME`, `GAP`, 그리고 지시서 목록에 없던 `ENTRY_T2`(4-4의 진입 봉 T2 반대 신호 청산).
+- **로그** `내 문서\NinjaTrader 8\TQ_log_v3_종목.txt` (v4 브랜치는 `TQ_log_v4_종목.txt`, 실시간·Playback): 실행 시작 설정 줄(`버전=v3`, settings_id), 추세 봉 마감마다(S·F·항목별·원값), 진입 봉 마감마다(추세, S·F, 의심, 구간, 경로별 후보 상태, 보유 상태, `시고저종=`), 사건마다(진입, 익절·청산 사유 코드, 손절 이동, 주문 오류).
+- **학습 데이터** `TQ_ml_v3_종목.csv`(v4 브랜치는 `TQ_ml_v4_종목.csv`) (백테스트 포함, 거래 1건마다): main의 열 + `path, session, s1..s4, f1, f2, slow, fast, pre_box_high, pre_box_low, atr_entry, rr_expected, fallback_entry, suspect_events, suspect_action, tp_stages_hit, trail_used, exit_reason`. v2 기록과 섞이지 않게 파일 이름을 따로 둠(2026-10-15 사용자 결정).
+- **사유 코드:** `TP1`, `TP2`, `LAST_MA`, `TRAIL`, `STOP`, `BE_STOP`, `SUSPECT`, `SUSPECT_STRONG`, `TREND_END`, `OPP_TREND`, `OPP_BREAKOUT`(v4 반대 돌파), `SIDE_REST_BAND`, `SIDE_MACD`, `SIDE_CROSS`, `FLATTEN_TIME`, `GAP`, 그리고 지시서 목록에 없던 `ENTRY_T2`(4-4의 진입 봉 T2 반대 신호 청산).
 
 ## 7. 설정창 원칙
 
 - 이름: `[태그] 한국어 설명 (CodeName)`. 태그: **[설계]** 설계안의 동작과 값 · **[선택]** 고민사항 스위치 · **[안전]** 주문 거부 대비 · **[표시]** 화면·기록.
 - 묶음은 판단 순서, 한 묶음 안에서 [설계] 위 [선택] 아래. 쓰이지 않는 설정은 회색 잠금.
 - 00 묶음: "설계안 기본값으로 되돌리기" 버튼(10 수량·대회 시간, 12 화면·기록 묶음은 건드리지 않음), "마지막 동작" 표시.
-- 설정값은 108개 (10/15 진입 늘리기 4개, 1차 뒤 손절·밴드 거리 3개, 이익 보호 본절 1개, E2 최소 S 1개, F 반대 진입 금지·바로 반전 2개 추가. 원래 97개, 지시서 5-1은 50개 안쪽이 원칙이나, 5-2 표 그대로 두기로 2026-10-15 사용자 결정).
+- 설정값은 113개 (v4 B1 5개 추가. 10/15 진입 늘리기 4개, 1차 뒤 손절·밴드 거리 3개, 이익 보호 본절 1개, E2 최소 S 1개, F 반대 진입 금지·바로 반전 2개 추가. 원래 97개, 지시서 5-1은 50개 안쪽이 원칙이나, 5-2 표 그대로 두기로 2026-10-15 사용자 결정).
 
 ## 8. 설정값
 
@@ -194,14 +233,15 @@
 | | 그 금지는 가격 확인 뒤에만 (`SuspectBlockNeedPrice`) | 끔 | 선택 |
 | | 추세 진입은 빠른 점수가 반대면 안 함 (`TrendEntryNeedFast`) | 켬 | 선택 |
 | | 추세 끝날 때 바로 반전 (`RegimeDirectReverse`, 01 묶음) | 끔 | 선택 |
-| **03 진입 — 추세** | E1 추세 시작 봉 진입 (`UseEntryTrendStart`) | 켬 | 설계 |
-| | E2 눌림 진입 / 밴드 (`UseEntryPullback` / `TrendPullbackBand`) | 켬 / 0 (중심선, 10/15에 1에서) | 설계 |
+| **03 진입 — 추세** | E1 추세 시작 봉 진입 (`UseEntryTrendStart`) | 켬 (v4 브랜치 끔) | 설계 |
+| | B1 돌파 진입 / 범위 봉 수 / 최소 F / 느린 점수 거르기 / 반대 돌파 청산 (`UseBreakoutEntry` / `BreakoutBars` / `BreakoutMinFast` / `BreakoutBlockSlow` / `BreakoutExitOnOpposite`) — v4 | 켬 / 15 / 2 / 3 / 켬 | 설계 |
+| | E2 눌림 진입 / 밴드 (`UseEntryPullback` / `TrendPullbackBand`) | 켬 (v4 끔) / 0 (중심선, 10/15에 1에서) | 설계 |
 | | E2 최소 느린 점수 (`PullbackMinSlow`), 0 = 안 봄 | 2 | 선택 |
-| | E3 장전 박스 돌파 / 마감 시각 / 최소 S / 최소 F (`UseEntryOrb` / `OrbEndTime` / `OrbMinSlow` / `OrbMinFast`) | 켬 / 230000 / 1 / 1 | 설계 |
+| | E3 장전 박스 돌파 / 마감 시각 / 최소 S / 최소 F (`UseEntryOrb` / `OrbEndTime` / `OrbMinSlow` / `OrbMinFast`) | 켬 (v4 끔) / 230000 / 1 / 1 | 설계 |
 | | E3 방향별 최대 횟수 (`OrbMaxEntries`), 1 = 지시서 원래 규칙 | 2 | 선택 |
 | | E1·E2 최소 손익비 (`EntryMinRR`), 0 = 안 봄 | 1.0 | 선택 |
 | | E1 추세 재가속 (`E1Reaccel`) / 구간 첫 봉에 이미 있는 추세 (`E1AtSessionStart`) | 켬 / 끔 | 선택 |
-| **04 진입 — 횡보** | E4 횡보 진입 / 밴드 (`UseEntrySide` / `SideBand`) | 켬 / 2 | 설계 |
+| **04 진입 — 횡보** | E4 횡보 진입 / 밴드 (`UseEntrySide` / `SideBand`) | 켬 (v4 끔) / 2 | 설계 |
 | | 밴드 없이 T2로도 진입 (`SideT2Entry`) | 켬 | 설계 |
 | | 횡보 방향 필터 점수 (`SideBlockScore`) | 3 | 설계 |
 | | 손실 손절 뒤 같은 방향 횡보 재진입 금지 (`BlockSideAfterStop`) | 켬 | 선택 |

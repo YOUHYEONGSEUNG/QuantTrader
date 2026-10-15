@@ -176,6 +176,7 @@ T1 처리 규칙 (spec 2장 T1)
 
 ## B가 직접 계산하는 것 (v3 전략)
 - TQ_Signals에서 쓰는 값: `EntryUpLong`·`EntryDnShort`(E2 추세 눌림, 생성자 `UpLongBand`·`DnShortBand` ← `TrendPullbackBand`), `EntrySideLong`·`EntrySideShort`(E4 횡보, `SideBand` ← `SideBand`), `T2Bull/T2Bear`, `MacdUp/MacdDown`, `Golden/Dead`, `SwingHigh5/SwingLow5`, `K/D/Rsi`, 화면용 `MacdRising/Falling`·`Wait…`·`T1Bars…`·`MacdHist`·`Sma`(기록용). 나머지 5개 진입 신호는 계산되지만 쓰지 않으며, 그 밴드 인자에는 main 기본값(2 / 1 / 3 / 30 / 1 / 2)을, `SmaPeriod`에는 18을, `T1WindowUp/Dn/Side`에는 0을, `T1SameBar`에는 false를 넘긴다.
+- v4 브랜치 B1 돌파(spec 4-9): 진입 봉 고가·저가의 직전 `BreakoutBars`봉 최고·최저(전략 안의 내장 `MAX`·`MIN`), `TQ_Regime.FastScore`·`SlowScore`로 정한다. 추세 판정(`Regime`)은 쓰지 않는다. 보유 중 의심은 `SuspectEvent` 대신 F가 포지션 반대로 ±`SuspectFast`를 처음 넘은 추세 봉으로 본다.
 - 포지션 종류(TL·TS·SL·SS)와 진입 경로(E1~E4): `TQ_Regime.Regime`·`TrendStart`·`SuspectActive`·`SlowScore`·`FastScore`와 위 진입 신호, 장전 박스(진입 봉 21:31~22:30 최고가·최저가)로 고른다 (spec v3 4-2).
 - 단계별 익절: 추세 포지션은 TQ_ATRChannels 밴드(1차·2차), 횡보 1단계는 진입가 ± ATR × 배수(고정 가격). 마지막 조각 조건은 추세 봉 종가(`Closes[regimeBip][0]`)와 `TQ_Regime.SmaMid`/`SmaFast` 비교.
 - 손절: 신호 봉의 `SwingLow5`/`SwingHigh5` 한 틱 바깥, ATR 범위와 최소 틱으로 자름. 신호 봉 종가로 먼저 걸고 체결되면 체결가로 다시 계산 (spec v3 4-3).

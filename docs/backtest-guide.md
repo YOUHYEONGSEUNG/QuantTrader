@@ -1,4 +1,6 @@
-# 백테스트 가이드와 설정값 설명 (v3)
+# 백테스트 가이드와 설정값 설명 (v3 + v4 돌파 구조)
+
+> 브랜치 `v4-breakout`: B1 돌파 진입(spec 4-9)이 기본이고 E1~E4는 기본 끔. 기록은 `TQ_log_v4_종목.txt`, `TQ_ml_v4_종목.csv`. v3와 비교하려면 같은 날짜·같은 시작 시각으로 E1~E4를 켜고 B1을 끈 실행을 하나 더 돌린다.
 
 `TQ_Strategy` v3(브랜치 `v3-integrated`)를 Strategy Analyzer로 백테스트하고 Playback으로 확인하는 절차와, 설정창에 보이는 값의 뜻을 정리한 문서입니다. 규칙 자체는 `docs/spec.md`(v3), 바뀐 이력은 `docs/changelog.md`에 있습니다. v2 가이드는 `main` 브랜치의 같은 파일에 있습니다.
 
@@ -90,15 +92,17 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 
 | 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
-| UseEntryTrendStart | 켬 | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
+| UseBreakoutEntry / BreakoutBars / BreakoutMinFast / BreakoutBlockSlow | 켬 / 15 / 2 / 3 | B1(v4): 종가가 직전 15봉 고가 위(저가 아래) + F ≥ 2(≤ −2), S가 ±3 반대면 막음 | 끄면 v3 |
+| BreakoutExitOnOpposite | 켬 | B1 보유 중 반대 돌파(F 포함) → 전량 (`OPP_BREAKOUT`) | 끔 |
+| UseEntryTrendStart | 켬 (v4 끔) | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
 | EntryMinRR | 1.0 | E1·E2: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
 | E1Reaccel | 켬 | E1R: 추세 중 F가 0 이하로 갔다가 다시 시작 조건을 채운 추세 봉에서 E1 | 끔 |
 | E1AtSessionStart | 끔 | E1S: 구간 첫 진입 가능 봉(21:35)에 이미 있는 추세로 E1 (21일 10건 3승 −$2,792) | 켬 |
-| UseEntryPullback / TrendPullbackBand | 켬 / 0 | E2: 중심선 터치 → [MACD 상승 전환 OR 골든] (10/15에 −1배에서) | 1 |
+| UseEntryPullback / TrendPullbackBand | 켬 (v4 끔) / 0 | E2: 중심선 터치 → [MACD 상승 전환 OR 골든] (10/15에 −1배에서) | 1 |
 | PullbackMinSlow | 2 | E2는 S ≥ 2(매도 ≤ −2)일 때만 | 0 |
-| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
+| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 (v4 끔) / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
 | OrbMaxEntries | 2 | E3를 쓴 뒤 종가가 박스 안으로 돌아오면 다시 열림, 방향별 최대 횟수 | 1 |
-| UseEntrySide / SideBand / SideT2Entry | 켬 / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
+| UseEntrySide / SideBand / SideT2Entry | 켬 (v4 끔) / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
 | SideBlockScore | 3 | S+F ≥ 3이면 횡보 매도, ≤ −3이면 횡보 매수 금지 | |
 | BlockSideAfterStop | 켬 | 횡보 손실 손절 뒤 같은 방향 횡보 재진입 금지 | |
 | T1Window / MacdConfirmBars / T2CountConfirmBars | 5 / 2 / 켬 | 반전 대기 5+1봉, MACD 전환 2봉 연속, T2에서 MACD 꺾인 봉의 크로스 인정 | |
@@ -210,7 +214,7 @@ v3 추가 열 (7장)
 
 | 열 | 뜻 |
 | --- | --- |
-| path | 진입 경로 E1(추세 시작) / E1X(반대 추세 청산 뒤) / E1R(재가속) / E1S(구간 첫 봉 추세) / E2(추세 눌림) / E3(장전 박스 돌파) / E4(횡보) / TEST |
+| path | 진입 경로 E1(추세 시작) / E1X(반대 추세 청산 뒤) / E1R(재가속) / E1S(구간 첫 봉 추세) / B1(v4 돌파) / E2(추세 눌림) / E3(장전 박스 돌파) / E4(횡보) / TEST |
 | session | pre(장전) / post(장후) |
 | s1, s2, s3, s4, f1, f2, slow, fast | 신호 봉 시점 추세 봉 점수 항목(+1 / 0 / −1, RSI를 끄면 s4 빈칸)과 S, F |
 | pre_box_high, pre_box_low | 장전 박스 (진입 시점까지 기록된 값) |
@@ -221,4 +225,4 @@ v3 추가 열 (7장)
 | suspect_action | 마지막 의심 처리: SUSPECT / SUSPECT_STRONG / CANCEL(해제·확인 없음) |
 | tp_stages_hit | 체결된 익절 단계 수 |
 | trail_used | 트레일링으로 손절이 한 번이라도 옮겨졌으면 1 |
-| exit_reason | 마지막 청산 사유 코드: TP1, TP2, LAST_MA, TRAIL, STOP, BE_STOP, SUSPECT, SUSPECT_STRONG, TREND_END, OPP_TREND, ENTRY_T2, SIDE_REST_BAND, SIDE_MACD, SIDE_CROSS, FLATTEN_TIME, GAP |
+| exit_reason | 마지막 청산 사유 코드: TP1, TP2, LAST_MA, TRAIL, STOP, BE_STOP, SUSPECT, SUSPECT_STRONG, TREND_END, OPP_TREND, OPP_BREAKOUT(v4 반대 돌파), ENTRY_T2, SIDE_REST_BAND, SIDE_MACD, SIDE_CROSS, FLATTEN_TIME, GAP |

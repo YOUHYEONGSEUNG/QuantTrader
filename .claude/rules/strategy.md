@@ -10,7 +10,7 @@ paths:
 ## 원칙 (spec v3 2장, 4-1)
 - **포지션은 4가지:** 추세 매수 TL, 추세 매도 TS, 횡보 매수 SL, 횡보 매도 SS (`enum Pos`). 역진입·역추세 진입 코드는 두지 않는다.
 - **거울상:** 모든 규칙은 매수로 한 번만 정의하고 매도는 방향 부호 `dir`(+1 / −1)로 계산한다. 매수·매도 함수를 따로 쓰지 않는다. 밴드는 `Band(dir, n)`(n = 0 중심선), 비교는 `dir * (a - b) > 0` 꼴. 새 규칙을 넣을 때도 이 형태를 지킨다.
-- 진입 경로는 이름(E1~E4)을 붙여 로그·상태 상자·학습 데이터에 남긴다. 청산은 고정 사유 코드(spec v3 6장)로 남긴다. 새 사유를 만들면 spec과 backtest-guide 9장에 같이 적는다.
+- 진입 경로는 이름(E1~E4, v4 브랜치는 B1 돌파 추가)을 붙여 로그·상태 상자·학습 데이터에 남긴다. 청산은 고정 사유 코드(spec v3 6장)로 남긴다. 새 사유를 만들면 spec과 backtest-guide 9장에 같이 적는다.
 
 ## 데이터
 - Configure에서 `AddDataSeries(BarsPeriodType.Minute, 10)` → BarsArray[1], `AddDataSeries(BarsPeriodType.Minute, 3)` → BarsArray[2]. 추세는 `TQ_Regime(BarsArray[regimeBip], ...)` (`RegimeBarMinutes` 10이면 1, 아니면 2).
