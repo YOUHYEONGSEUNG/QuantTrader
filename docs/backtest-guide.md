@@ -1,6 +1,6 @@
 # 백테스트 가이드와 설정값 설명 (v3 + v4 돌파 구조)
 
-> 브랜치 `v4-breakout`: B1 돌파 진입(spec 4-9)이 기본이고 E1~E4는 기본 끔. 기록은 `TQ_log_v4_종목.txt`, `TQ_ml_v4_종목.csv`. v3와 비교하려면 같은 날짜·같은 시작 시각으로 E1~E4를 켜고 B1을 끈 실행을 하나 더 돌린다.
+> 브랜치 `v5-clean`: 규칙은 v3 그대로(E1~E4 켬, B1 끔), 계약 수는 1회 위험 금액 기준, 설정창은 핵심 16개(고급 설정 보기를 켜면 전부). 기록은 `TQ_log_v5_종목.txt`, `TQ_ml_v5_종목.csv`. v3(`v3-integrated`)와 비교하려면 같은 날짜·같은 시작 시각으로 돌리고, 고정 수량으로 비교하려면 `UseRiskSizing`을 끈다.
 
 `TQ_Strategy` v3(브랜치 `v3-integrated`)를 Strategy Analyzer로 백테스트하고 Playback으로 확인하는 절차와, 설정창에 보이는 값의 뜻을 정리한 문서입니다. 규칙 자체는 `docs/spec.md`(v3), 바뀐 이력은 `docs/changelog.md`에 있습니다. v2 가이드는 `main` 브랜치의 같은 파일에 있습니다.
 
@@ -84,25 +84,22 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | SuspectExitPercent | 50 | 남은 수량의 %. 먼 조각부터 조각 단위 | 33 / 100 |
 | SuspectStrongSlow / SuspectStrongExitPercent | 1 / 100 | 확인 때 S ≤ 1이면 전량 | |
 | BlockEntryWhileSuspect | 켬 | 의심 중 추세 방향 신규 진입 금지 | |
-| SuspectBlockNeedPrice | 끔 | 켜면 그 금지는 의심 뒤 가격 확인(직전 5봉 저점 이탈)이 있었을 때만 (켰을 때 의심 중 E2 8건 −$9,997) | 켬 |
 | TrendEntryNeedFast | 켬 | 추세 진입(E1·E2·E3)은 F가 반대면 안 함 | 끔 |
-| RegimeDirectReverse | 끔 | 추세가 끝나는 봉에 F가 반대로 ±2면 횡보 없이 반대 추세로 | 켬 |
 
 ### 5-3. 03 진입 — 추세, 04 진입 — 횡보, 05 진입 — 공통
 
 | 설정값 | 기본 | 뜻 | 비교할 것 |
 | --- | --- | --- | --- |
-| UseBreakoutEntry / BreakoutBars / BreakoutMinFast / BreakoutBlockSlow | 켬 / 15 / 2 / 3 | B1(v4): 종가가 직전 15봉 고가 위(저가 아래) + F ≥ 2(≤ −2), S가 ±3 반대면 막음 | 끄면 v3 |
+| UseBreakoutEntry / BreakoutBars / BreakoutMinFast / BreakoutMaxAbsSlow | 끔 / 15 / 2 / 1 | B1 중립 돌파: \|S\| ≤ 1일 때 종가가 직전 15봉 고가 위(저가 아래) + F ≥ 2(≤ −2) | 켬 |
 | BreakoutExitOnOpposite | 켬 | B1 보유 중 반대 돌파(F 포함) → 전량 (`OPP_BREAKOUT`) | 끔 |
-| UseEntryTrendStart | 켬 (v4 끔) | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
+| UseEntryTrendStart | 켬 | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
 | EntryMinRR | 1.0 | E1·E2: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
 | E1Reaccel | 켬 | E1R: 추세 중 F가 0 이하로 갔다가 다시 시작 조건을 채운 추세 봉에서 E1 | 끔 |
-| E1AtSessionStart | 끔 | E1S: 구간 첫 진입 가능 봉(21:35)에 이미 있는 추세로 E1 (21일 10건 3승 −$2,792) | 켬 |
-| UseEntryPullback / TrendPullbackBand | 켬 (v4 끔) / 0 | E2: 중심선 터치 → [MACD 상승 전환 OR 골든] (10/15에 −1배에서) | 1 |
+| UseEntryPullback / TrendPullbackBand | 켬 / 0 | E2: 중심선 터치 → [MACD 상승 전환 OR 골든] (10/15에 −1배에서) | 1 |
 | PullbackMinSlow | 2 | E2는 S ≥ 2(매도 ≤ −2)일 때만 | 0 |
-| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 (v4 끔) / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
+| UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
 | OrbMaxEntries | 2 | E3를 쓴 뒤 종가가 박스 안으로 돌아오면 다시 열림, 방향별 최대 횟수 | 1 |
-| UseEntrySide / SideBand / SideT2Entry | 켬 (v4 끔) / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
+| UseEntrySide / SideBand / SideT2Entry | 켬 / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
 | SideBlockScore | 3 | S+F ≥ 3이면 횡보 매도, ≤ −3이면 횡보 매수 금지 | |
 | BlockSideAfterStop | 켬 | 횡보 손실 손절 뒤 같은 방향 횡보 재진입 금지 | |
 | T1Window / MacdConfirmBars / T2CountConfirmBars | 5 / 2 / 켬 | 반전 대기 5+1봉, MACD 전환 2봉 연속, T2에서 MACD 꺾인 봉의 크로스 인정 | |
@@ -116,6 +113,8 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | SideStopMinAtr / SideStopMaxAtr | 1.0 / 2.0 | 횡보 포지션 손절 거리 범위 |
 | StopMinTicks | 32 | 최소 손절 거리(MNQ 8pt). 장전 ATR이 작을 때 |
 | BreakevenMinR / BreakevenFallbackAtr | 0.5 / 1.5 | 1차 이익 ≥ 손절 거리 × 0.5면 평단, 아니면 1차 체결가 ∓ 1.5 ATR | 0 (항상 평단) |
+| UseRiskSizing / RiskPerTrade | 켬 / $2,000 | 계약 = 위험 한도 × 구간 % ÷ (예상 손절 거리 × 계약당 가치), 최대 EntryQuantity × 구간 % | 끔 / 1500 / 3000 |
+| ShowAdvanced | 끔 | 설정창에 핵심 16개만. 켜면 전부 | |
 | BreakevenAtR | 0.8 | 1차 전이라도 최대 이익 ≥ 손절 거리 × 0.8이면 평단(이익 보호 본절) | 0 / 1.0 |
 | BreakevenBufferTicks / HandleOrderErrors | 8 / 켬 | 손절 이동 안전 거리, 주문 오류 직접 처리 |
 
@@ -159,7 +158,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | CrossLow / CrossHigh / CrossFilterBars | 20 / 80 / 5 | 골든은 최근 5봉 안에 %K < 20, 데드는 > 80 |
 | RsiPeriod | 14 | 진입 봉과 추세 봉(S4) |
 | ShowStatus / StatusPanelScale | 켬 / 130 | 차트 표시, 상태 상자 크기 % |
-| LogToFile / MlLogToFile | 켬 / 켬 | 로그(`TQ_log_v3_종목.txt`), 학습 데이터(`TQ_ml_v3_종목.csv`) |
+| LogToFile / MlLogToFile | 켬 / 켬 | 로그(`TQ_log_v5_종목.txt`), 학습 데이터(`TQ_ml_v5_종목.csv`) — v5 브랜치 |
 | UseTestEntry | 끔 | 주문 흐름 검증용 가짜 매수(2봉째 1차, 3봉째 2차, 4봉째 전량). **평소에는 반드시 끔** |
 | IntrabarTakeProfit | 켬 | 익절을 봉 진행 중 지정가로. 끄면 봉 마감 종가로 시장가 |
 
