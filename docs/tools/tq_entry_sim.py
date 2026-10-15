@@ -73,10 +73,11 @@ def load(log_path, dates):
             tr = b["h"] - b["l"] if pc is None else max(b["h"] - b["l"], abs(b["h"] - pc), abs(b["l"] - pc))
             atr = tr if atr is None else (atr * 13 + tr) / 14
             pc = b["c"]; b["ema"], b["atr"] = ema, atr
-        # 진입 봉 마감 때 보이는 추세 봉 값 = 그보다 먼저 마감된 것 (1분 지연)
+        # 진입 봉 마감 때 보이는 추세 봉 값 = 같은 시각까지 마감된 것. 실제 NT8 Playback 로그에서 3분봉이 바뀐 시각의 1분봉 4,407번이
+        # 모두 같은 시각 3분봉 값을 봤음(2026-10-15 확인, 1분봉 줄이 먼저 찍혀도 지표 값은 이미 갱신됨). 그 전에는 '<'로 1분 늦게 봤음
         j = -1
         for b in bars:
-            while j + 1 < len(reg) and reg[j + 1]["t"] < b["t"]:
+            while j + 1 < len(reg) and reg[j + 1]["t"] <= b["t"]:
                 j += 1
             b["reg"] = reg[j] if j >= 0 else None
             b["regi"] = j
