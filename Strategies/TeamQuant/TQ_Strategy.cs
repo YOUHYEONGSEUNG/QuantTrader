@@ -293,6 +293,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				TrendTp1R				= 1.0;
 				TrendTp2R				= 2.5;
 				UseAddOn				= true;
+				ExtendedEntryAtr		= 2.0;
+				ExtendedQtyPercent		= 50;
 				AddOnMinVel				= 0.3;
 				AddOnPercent			= 50;
 				AddOnEndTime			= 231000;
@@ -440,6 +442,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
 				+ " | 추세익절=" + (TrendTpMode == 2 ? TrendTp1R.ToString(inv) + "R/" + TrendTp2R.ToString(inv) + "R" : "밴드") + " 추가진입=" + UseAddOn
 					+ "(속도≥" + AddOnMinVel.ToString(inv) + " " + AddOnPercent + "% ~" + AddOnEndTime + ")"
+				+ " 달린진입=" + ExtendedEntryAtr.ToString(inv) + "ATR→" + ExtendedQtyPercent + "%"
 				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
 				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast + " |S|≤" + BreakoutMaxAbsSlow
@@ -1250,6 +1253,18 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					int byRisk	= (int)Math.Floor(RiskPerTrade * qtyPercent / 100.0 / (distPts * pv));
 					qty			= Math.Max(1, Math.Min(qty, byRisk));
 					riskNote	= string.Format(" 위험≈${0:N0}(손절 {1:F1}pt × {2}계약)", distPts * pv * qty, distPts, qty);
+				}
+			}
+			// spec 4-8 v6: 이미 달린 뒤의 추세 진입(종가가 중심선에서 진입 방향으로 ExtendedEntryAtr × ATR 넘게)은 수량만 줄임 (진입은 그대로).
+			// v5·v6 147건: 중심선 거리 높은 ⅓(≥ 1.7 ATR)이 두 버전 모두 손실. 막으면 진입이 줄어 수량으로 (사용자: 진입 횟수를 줄이지 않기)
+			if (IsTrendPos() && entryPath != "E5" && ExtendedEntryAtr > 0 && atr[0] > 0)
+			{
+				double ext = d * (Close[0] - channels.Mid[0]) / atr[0];
+				if (ext > ExtendedEntryAtr)
+				{
+					int before = qty;
+					qty = Math.Max(1, (int)Math.Floor(qty * ExtendedQtyPercent / 100.0));
+					riskNote += string.Format(" 달린 뒤 진입(중심선에서 {0:F1} ATR > {1}) → 수량 {2}→{3}", ext, ExtendedEntryAtr, before, qty);
 				}
 			}
 			baseQty = qty;
@@ -3238,6 +3253,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, 200)]
 		[Display(Name = "[선택] 추가 진입 수량 % (AddOnPercent)", Description = "기본 50. 처음 진입 계약 수 × 이 %", GroupName = "07. 청산 — 추세", Order = 25)]
 		public int AddOnPercent { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.0, 10.0)]
+		[Display(Name = "[선택] 달린 뒤 진입 기준 ATR (ExtendedEntryAtr)", Description = "기본 2. 추세 진입(E5 제외) 신호 봉 종가가 밴드 중심선(EMA26)에서 진입 방향으로 이 값 × 1분 ATR보다 멀면 수량을 아래 %로 줄임. 진입은 그대로. 0 = 안 봄. v5·v6 147건에서 중심선 거리 높은 ⅓이 두 버전 모두 손실(−2.3R, −5.3R). 18일 시뮬레이션: 7월 $34,852 → $34,289, 10월 $732 → $3,431", GroupName = "07. 청산 — 추세", Order = 27)]
+		public double ExtendedEntryAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 100)]
+		[Display(Name = "[선택] 달린 뒤 진입 수량 % (ExtendedQtyPercent)", Description = "기본 50", GroupName = "07. 청산 — 추세", Order = 28)]
+		public int ExtendedQtyPercent { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "[선택] 추가 진입 마감 시각 (AddOnEndTime)", Description = "기본 231000. 이 시각 봉부터는 추가하지 않음", GroupName = "07. 청산 — 추세", Order = 26)]
