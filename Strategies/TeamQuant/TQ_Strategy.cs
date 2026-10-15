@@ -72,7 +72,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private string			e3StopPrefix	= "";			// 걸어 둔 E3 스탑 주문 시그널명 앞부분 (같은 방향이면 이름을 그대로 써서 주문을 고침)
 		private bool			e3StopPlacedNow;				// 이번 봉에 다시 걸었음 (안 걸면 NinjaTrader가 봉 끝에 취소)
 		private readonly List<Order>	e3StopOrders	= new List<Order>();
-		private bool			earlyEntry;						// 개장 뒤 EarlyWindowMinutes 안에 들어간 추세 진입 (E5 제외, spec 4-4-2)
+		private bool			earlyEntry;
+		// 박스 장 감지와 하루 손실 (spec 4-11)
+		private double			sessStartPx		= double.NaN;	// 대회 구간 첫 봉 종가
+		private double			sessPrevPx;
+		private double			sessPath;						// 봉마다 종가 변화의 합
+		private int				sessBars;
+		private double			sessPnlUsd;						// 이번 구간 끝난 거래 손익 합 ($)
+		private bool			dayCutLogged;
+		private MAX				fadeHigh;						// 진입 봉 고가의 RangeFadeBars봉 최고
+		private MIN				fadeLow;						// 개장 뒤 EarlyWindowMinutes 안에 들어간 추세 진입 (E5 제외, spec 4-4-2)
 		private double			addFillSum;						// 추가분 체결가 합 (손익은 추가분 체결가 기준으로 따로 셈)
 		private int				addFillQty;
 		private int				tpStagesHit;
@@ -183,6 +192,19 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private SimpleFont		markFont;
 		private string			markTag			= "";
 		private int				markQty;
+
+		#region 고정값 (v6 박스 장 대책, spec 4-11)
+		private const double RangeFadeMaxEr		= 0.15;	// 박스 장 감지: 대회 구간 시작부터 지금까지 종가 효율비 ≤ 이 값
+		private const int RangeFadeMinBars		= 60;	// 감지는 대회 구간 시작 뒤 이 봉 수부터 (22:30)
+		private const int RangeFadeBars			= 30;	// 가짜 돌파 기준 범위 봉 수
+		private const int RangeFadeMaxLag		= 3;	// 범위를 깬 봉이 지금 봉 기준 1~3봉 전
+		private const double RangeFadeTargetR	= 1.0;	// 익절 R
+		private const double RangeFadeStopBuf	= 0.25;	// 손절 = 최근 4봉 극값 ∓ 이 값 × ATR
+		private const double RangeFadeStopMinAtr	= 1.0;
+		private const double RangeFadeStopMaxAtr	= 2.5;
+		private const int RangeFadeMaxHold		= 20;	// 최대 보유 봉 수
+		private const int DayLossQtyPercent		= 50;	// 하루 손실 한도를 넘으면 그 뒤 수량 %
+		#endregion
 
 		#region 고정값 (v6 정리, 2026-10-15 사용자 결정: 설정창에는 정말 조절할 값만. 값은 정리 전 기본값 그대로, 근거는 spec)
 		private const int RegimeBarMinutes = 3;
@@ -311,6 +333,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				E3StopEntry				= true;
 				// E5 개장 범위 돌파 (spec 4-10, 사용자 결정 2026-10-15): 28일 시뮬레이션 38건 +10.5R, 7월·10월 모두 이익
 				UseEntryOpenRange		= true;
+				UseEntryRangeFade		= true;
+				DayLossLimitR			= 1.5;
 				E5RangeMinutes			= 5;
 				E5TargetR				= 2.0;
 				// B1 박스 돌파 (4-9) — v6 기본 켬. 직전 BreakoutBoxBars봉 효율비 ≤ BreakoutMaxEr(박스)일 때 돌파 진입, 느린 점수는 안 봄(4)
@@ -380,6 +404,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				minBars0	= Math.Max(Math.Max(Math.Max(BandMidPeriod, MacdSlow + MacdSmooth), Math.Max(BandAtrPeriod, SwingBars)), Math.Max(BreakoutBars, BreakoutBoxBars) + 1) + 5;
 				rangeHigh	= MAX(Highs[0], BreakoutBars);
 				rangeLow	= MIN(Lows[0], BreakoutBars);
+				fadeHigh	= MAX(Highs[0], RangeFadeBars);
+				fadeLow		= MIN(Lows[0], RangeFadeBars);
 
 				// v6 브랜치는 TQ_log_v6_종목.txt, TQ_ml_v6_종목.csv로 따로 쓴다 (v3~v5 기록과 섞이지 않게)
 				// 기록 파일: 내 문서\NinjaTrader 8\TQ_log_v3_종목.txt, TQ_ml_v3_종목.csv (v2 기록과 섞이지 않게 따로, 사용자 결정 2026-10-15)
@@ -438,6 +464,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					+ "(속도≥" + AddOnMinVel.ToString(inv) + " " + AddOnPercent + "% ~" + AddOnEndTime + ")"
 				+ " 개장직후(" + EarlyWindowMinutes + "분 1차전량=" + EarlyFullExitAtTp1 + " 손절x" + EarlyStopMult.ToString(inv) + ")"
 				+ " 달린진입=" + ExtendedEntryAtr.ToString(inv) + "ATR→" + ExtendedQtyPercent + "%"
+				+ " | E6박스되돌림=" + UseEntryRangeFade + "(효율비≤" + RangeFadeMaxEr.ToString(inv) + " " + RangeFadeBars + "봉 " + RangeFadeTargetR.ToString(inv) + "R " + RangeFadeMaxHold + "분)"
+				+ " 하루손실한도=" + DayLossLimitR.ToString(inv) + "R→" + DayLossQtyPercent + "%"
 				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
 				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast
@@ -764,7 +792,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		private string PathName(string p)
 		{
-			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "B1" ? "B1 돌파" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p == "E5" ? "E5 개장 범위 돌파" : p;
+			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "B1" ? "B1 돌파" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p == "E5" ? "E5 개장 범위 돌파" : p == "E6" ? "E6 박스 장 되돌림" : p;
 		}
 
 		private string StateText(int st)
@@ -834,6 +862,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				orLow			= double.NaN;
 				orLongUsed		= false;
 				orShortUsed		= false;
+				sessStartPx		= double.NaN;
+				sessPath		= 0;
+				sessBars		= 0;
+				sessPnlUsd		= 0;
+				dayCutLogged	= false;
 				boxStartTime	= Time[0];
 				sessionTag		= Time[0].ToString("yyyyMMdd");
 			}
@@ -847,6 +880,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					boxHigh	= double.IsNaN(boxHigh) ? High[0] : Math.Max(boxHigh, High[0]);
 					boxLow	= double.IsNaN(boxLow) ? Low[0] : Math.Min(boxLow, Low[0]);
 				}
+				// spec 4-11 박스 장 감지용: 대회 구간 첫 봉부터 종가 변화의 합
+				if (double.IsNaN(sessStartPx))
+					sessStartPx = Close[0];
+				else
+				{
+					sessPath += Math.Abs(Close[0] - sessPrevPx);
+					sessBars++;
+				}
+				sessPrevPx = Close[0];
 				// E5 개장 범위: 개장 시각 봉 ~ 그 뒤 E5RangeMinutes − 1분 봉 (기본 22:30~22:34 봉)
 				int openRel = RelMinutes(OpenTime);
 				if (rel >= openRel && rel <= openRel + E5RangeMinutes - 1)
@@ -866,6 +908,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Draw.TextFixed(this, "TQ_EntryCount",
 				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryCount >= MinEntries ? "" : " (최소 미달)"),
 				TextPosition.TopRight);
+		}
+
+		// spec 4-11 박스 장: 대회 구간 시작 뒤 RangeFadeMinBars봉이 지났고, 시작부터 지금까지 효율비 ≤ RangeFadeMaxEr
+		private double SessionEr()	{ return sessPath > 0 && !double.IsNaN(sessStartPx) ? Math.Abs(Close[0] - sessStartPx) / sessPath : 1.0; }
+		private bool RangeDay()		{ return sessBars >= RangeFadeMinBars && SessionEr() <= RangeFadeMaxEr; }
+
+		// spec 4-11 가짜 돌파: 1~3봉 전 봉이 그 앞 RangeFadeBars봉 최저가를 깼는데, 직전 봉 종가는 그 아래이고 지금 봉 종가가 다시 위 → 매수 (매도는 거울상)
+		private int RangeFadeSignal()
+		{
+			for (int k = 0; k < 2; k++)
+			{
+				int d = k == 0 ? 1 : -1;
+				for (int lag = 1; lag <= RangeFadeMaxLag; lag++)
+				{
+					if (CurrentBars[0] < lag + RangeFadeBars + 1)
+						return 0;
+					double edge	= d > 0 ? fadeLow[lag + 1] : fadeHigh[lag + 1];
+					bool broke	= d > 0 ? Lows[0][lag] < edge : Highs[0][lag] > edge;
+					if (broke && d * (Close[0] - edge) > 0 && d * (Close[1] - edge) <= 0)
+						return d;
+				}
+			}
+			return 0;
 		}
 
 		// E5 개장 범위가 완성됐는지 (범위 마지막 봉이 지났는지)
@@ -924,7 +989,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 경로 우선순위: E1 > E3 > E2 > E4 (4-2)
 		private static int PathRank(string p)
 		{
-			return p == "E5" ? -1 : p == "E1" ? 0 : p == "E3" ? 1 : p == "B1" ? 2 : p == "E2" ? 3 : 4;	// E5(v6, 4-10)가 가장 먼저	// B1(v4)은 E3 다음
+			return p == "E5" ? -1 : p == "E1" ? 0 : p == "E3" ? 1 : p == "B1" ? 2 : p == "E2" ? 3 : p == "E6" ? 5 : 4;	// E5(v6, 4-10)가 가장 먼저	// B1(v4)은 E3 다음
 		}
 
 		// 진입 경로 4개 × 방향 2개의 후보와 막힌 사유를 만든다. 미보유일 때 매 진입 봉 마감마다
@@ -1124,6 +1189,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					else							{ c.Line = "○ E4 횡보" + DirText(d) + ": " + (d > 0 ? "저가" : "고가") + " " + bandTxt + " 터치" + (SideT2Entry ? " (또는 MACD + 크로스)" : ""); c.Code = "band"; }
 					list.Add(c);
 				}
+
+				// ── E6 박스 장 되돌림 (4-11) ── 박스 장으로 감지된 뒤 가짜 돌파의 반대로. 다른 경로가 없을 때만 (우선순위 마지막)
+				{
+					Candidate c = new Candidate { Path = "E6", Dir = d, QtyPercent = 100, Fallback = false };
+					bool range	= RangeDay();
+					string erTxt = string.Format("효율비 {0:F2} (≤ {1})", SessionEr(), RangeFadeMaxEr);
+					if (!UseEntryRangeFade)			{ c.Line = "× E6 박스 되돌림: 꺼짐"; c.Code = "off"; }
+					else if (sessBars < RangeFadeMinBars)	{ c.Line = "  E6 박스 되돌림: 박스 장 판단 전 (" + sessBars + "/" + RangeFadeMinBars + "봉)"; c.Code = "-"; }
+					else if (!range)				{ c.Line = "  E6 박스 되돌림: 박스 장 아님, " + erTxt; c.Code = "-"; }
+					else if (timeBlock != null || z != Zone.Post)	{ c.Line = "× E6 박스 되돌림: " + (timeBlock ?? "장후에만"); c.Code = "blk"; }
+					else if (RangeFadeSignal() == d)	{ c.Ready = true; c.Line = "● E6 박스 되돌림" + DirText(d) + ": 지금 진입 (" + erTxt + ")"; c.Code = "go"; }
+					else							{ c.Line = "○ E6 박스 되돌림" + DirText(d) + ": " + RangeFadeBars + "봉 " + (d > 0 ? "저가" : "고가") + " 가짜 돌파 대기, " + erTxt; c.Code = "wait"; }
+					list.Add(c);
+				}
 			}
 			return list;
 		}
@@ -1263,10 +1342,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			TradeBegin();
 			stopAtr		= atr[0];
 			int sinceOpen	= RelMinutes(ToTime(Time[0])) - RelMinutes(OpenTime);
-			earlyEntry		= IsTrendPos() && entryPath != "E5" && sinceOpen > 0 && sinceOpen <= EarlyWindowMinutes;
+			earlyEntry		= IsTrendPos() && entryPath != "E5" && entryPath != "E6" && sinceOpen > 0 && sinceOpen <= EarlyWindowMinutes;
 			stopSwing	= d > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];	// 신호 봉 포함 최근 SwingBars봉
 			if (entryPath == "E5")
 				stopSwing = OpenRangeMid();										// spec 4-10: E5 손절 기준 = 개장 범위 중간
+			if (entryPath == "E6")
+				stopSwing = d > 0 ? MIN(Lows[0], 4)[0] : MAX(Highs[0], 4)[0];		// spec 4-11: 최근 4봉 극값
 			initialStop	= CalcStop(refPx);
 			stopPrice	= initialStop;
 			// 위험 금액 수량 (UseRiskSizing, 사용자 결정 2026-10-15): 계약 = 위험 한도 × 구간 % ÷ (예상 손절 거리 × 계약당 가치).
@@ -1285,7 +1366,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			// spec 4-8 v6: 이미 달린 뒤의 추세 진입(종가가 중심선에서 진입 방향으로 ExtendedEntryAtr × ATR 넘게)은 수량만 줄임 (진입은 그대로).
 			// v5·v6 147건: 중심선 거리 높은 ⅓(≥ 1.7 ATR)이 두 버전 모두 손실. 막으면 진입이 줄어 수량으로 (사용자: 진입 횟수를 줄이지 않기)
-			if (IsTrendPos() && entryPath != "E5" && ExtendedEntryAtr > 0 && atr[0] > 0)
+			// spec 4-11 하루 손실 한도: 이번 구간 끝난 거래 손익이 −DayLossLimitR × 1회 위험 한도 이하면 그 뒤 수량 DayLossQtyPercent%
+			if (DayLossLimitR > 0 && sessPnlUsd <= -DayLossLimitR * RiskPerTrade)
+			{
+				int before = qty;
+				qty = Math.Max(1, (int)Math.Floor(qty * DayLossQtyPercent / 100.0));
+				riskNote += string.Format(" 하루 손실 ${0:N0} ≤ −{1}R → 수량 {2}→{3}", sessPnlUsd, DayLossLimitR, before, qty);
+			}
+			if (IsTrendPos() && entryPath != "E5" && entryPath != "E6" && ExtendedEntryAtr > 0 && atr[0] > 0)
 			{
 				double ext = d * (refPx - channels.Mid[0]) / atr[0];
 				if (ext > ExtendedEntryAtr)
@@ -1313,7 +1401,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (stopEntry)
 				e3StopPrefix = prefix;
 			string split;
-			if (entryPath == "E5")
+			if (entryPath == "E6")
+			{
+				// spec 4-11: 한 조각, 익절 = 진입가 ± RangeFadeTargetR × 손절 거리, RangeFadeMaxHold봉이면 청산
+				double risk = Math.Abs(refPx - initialStop);
+				SubmitChunk(prefix + "1", qty, 1, refPx + d * RangeFadeTargetR * risk);
+				split = qty + " (박스 장 되돌림: 익절 " + RangeFadeTargetR.ToString("F1") + "R, 최대 " + RangeFadeMaxHold + "분, 효율비 " + SessionEr().ToString("F2") + ")";
+			}
+			else if (entryPath == "E5")
 			{
 				// spec 4-10: 한 조각, 익절 = 진입가 ± E5TargetR × 손절 거리 (체결되면 체결가 기준으로 다시 검)
 				double risk = Math.Abs(Close[0] - initialStop);
@@ -1354,7 +1449,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 넣기 전에 전체 손절을 평단 이상으로. 추가 조각은 마지막 조각처럼(익절 지정가 없음) 트레일링·기준선·의심·손절로 나감
 		private void TryAddOn()
 		{
-			if (!UseAddOn || !contReady || !IsTrendPos() || path == "E5" || pos == Pos.None || !tp1Done || addSig.Length > 0)
+			if (!UseAddOn || !contReady || !IsTrendPos() || path == "E5" || path == "E6" || pos == Pos.None || !tp1Done || addSig.Length > 0)
 				return;
 			if (Position.MarketPosition == MarketPosition.Flat || entryFillQty <= 0)
 				return;
@@ -1418,7 +1513,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		private double CalcStop(double entryPrice)
 		{
-			double dist = path == "E5" ? E5StopDistance(entryPrice) : StopDistance(dir, IsTrendPos(), entryPrice, stopSwing, stopAtr);
+			double dist = path == "E5" ? E5StopDistance(entryPrice) : path == "E6" ? E6StopDistance(entryPrice) : StopDistance(dir, IsTrendPos(), entryPrice, stopSwing, stopAtr);
 			if (earlyEntry && EarlyStopMult > 1)
 				dist *= EarlyStopMult;	// spec 4-4-2: 개장 직후 흔들림에 바로 맞지 않게 넓힘 (위험 금액 수량이 계약을 줄여 1회 위험은 같음)
 			return Instrument.MasterInstrument.RoundToTickSize(entryPrice - dir * dist);
@@ -1430,6 +1525,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			double dist = dir * (entryPrice - stopSwing) + TickSize;
 			if (!double.IsNaN(stopAtr) && stopAtr > 0)
 				dist = Math.Max(E5StopMinAtr * stopAtr, Math.Min(Math.Max(E5StopMinAtr, E5StopMaxAtr) * stopAtr, dist));
+			return Math.Max(dist, StopMinTicks * TickSize);
+		}
+
+		// spec 4-11 E6 손절 거리: 최근 4봉 극값 ∓ RangeFadeStopBuf × ATR, ATR × [최소, 최대]로 자르고 StopMinTicks보다 좁으면 벌림
+		private double E6StopDistance(double entryPrice)
+		{
+			double a = double.IsNaN(stopAtr) ? 0 : stopAtr;
+			double dist = dir * (entryPrice - stopSwing) + RangeFadeStopBuf * a;
+			if (a > 0)
+				dist = Math.Max(RangeFadeStopMinAtr * a, Math.Min(RangeFadeStopMaxAtr * a, dist));
 			return Math.Max(dist, StopMinTicks * TickSize);
 		}
 
@@ -1541,7 +1646,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			SetStopForLive(s);
 
 			// R 익절(TrendTpMode 2)은 체결가 ± R × (체결가 − 손절) (spec 4-4)
-			if (IsTrendPos() && path != "E5")
+			if (IsTrendPos() && path != "E5" && path != "E6")
 				foreach (string sig in liveSignals)
 				{
 					bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;
@@ -1552,11 +1657,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 						SetTarget(sig);
 					}
 				}
-			// E5 익절은 체결가 ± E5TargetR × (체결가 − 손절) (spec 4-10)
-			if (path == "E5")
+			// E5 / E6 익절은 체결가 ± 목표 R × (체결가 − 손절) (spec 4-10, 4-11)
+			if (path == "E5" || path == "E6")
 				foreach (string sig in liveSignals)
 				{
-					chunkFixed[sig] = avg + dir * E5TargetR * Math.Abs(avg - s);
+					chunkFixed[sig] = avg + dir * (path == "E5" ? E5TargetR : RangeFadeTargetR) * Math.Abs(avg - s);
 					SetTarget(sig);
 				}
 			// 횡보 1단계 익절은 진입가 + dir × SideTp1Atr × 신호 봉 ATR: 체결가 기준으로 다시 건다
@@ -1594,6 +1699,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// (9일 시뮬레이션: 0.8R이면 지던 4건이 본전, 이기던 1건(+$985)이 잘림, 합계 +$1,192. 큰 이익 거래는 1차 익절이 먼저라 영향 없음)
 		private void ProtectProfitCheck()
 		{
+			if (path == "E6")
+				return;	// spec 4-11: 박스 장 되돌림은 본전 이동 없이 1R 익절·손절·시간
 			bool e5 = path == "E5";
 			double atR = e5 ? E5BreakevenR : BreakevenAtR;	// spec 4-10: E5는 E5BreakevenR에서 본전, 그 뒤 트레일링
 			if (atR <= 0 || tp1Done || (breakevenDone && !e5) || e5Trail || entryFillQty <= 0 || double.IsNaN(trStop0))
@@ -1725,6 +1832,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			if (path == "E5")
 				return;	// spec 4-10: 손절·익절 지정가·본전·트레일링·종료 청산만 (공통 처리)
+			if (path == "E6")
+			{
+				// spec 4-11: 추세 판정·의심으로는 청산하지 않고, RangeFadeMaxHold봉이 지나면 시장가 전량
+				if (trBars >= RangeFadeMaxHold)
+					FlattenRemaining("TIME", "박스 장 되돌림 최대 보유 " + RangeFadeMaxHold + "분");
+				return;
+			}
 			int st = RegimeState();
 			int xs = ExitState();	// spec 3-3: 추세 청산은 청산용 판정으로
 			if (xs == dir)
@@ -2181,6 +2295,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			trOpen = false;
 			MlEnd();
+			sessPnlUsd += trPnlPts * Instrument.MasterInstrument.PointValue;	// spec 4-11 하루 손실 한도
+			if (DayLossLimitR > 0 && sessPnlUsd <= -DayLossLimitR * RiskPerTrade && !dayCutLogged)
+			{
+				dayCutLogged = true;
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 하루 손실 ${2:N0} ≤ −{3}R(${4:N0}) → 이후 진입 수량 {5}%", Time[0], Instrument.FullName,
+					sessPnlUsd, DayLossLimitR, DayLossLimitR * RiskPerTrade, DayLossQtyPercent));
+			}
 		}
 
 		// 열: main의 열 + v3 추가 (7장). '#'으로 시작하는 줄은 실행별 설정 요약 (read_csv(comment='#'))
@@ -2489,6 +2610,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				sb.Append("  의심 중 (" + (sus < 0 ? "하락의심" : "상승의심") + ")\n");
 			string box = double.IsNaN(boxHigh) ? "" : string.Format(" · 장전 박스 {0:N2} ~ {1:N2}{2}", boxLow, boxHigh, BoxReady() ? "" : " (기록 중)");
 			sb.Append(ZoneText(z) + (z == Zone.Pre ? " (수량 " + PreOpenQtyPercent + "%)" : "") + box + "\n");
+			if (UseEntryRangeFade && sessBars > 0)
+				sb.AppendFormat("박스 장 판단: 효율비 {0:F2} (≤ {1}이면 박스 장, {2}/{3}봉){4}\n", SessionEr(), RangeFadeMaxEr, Math.Min(sessBars, RangeFadeMinBars), RangeFadeMinBars,
+					RangeDay() ? " → 박스 장" : "");
+			if (DayLossLimitR > 0 && sessPnlUsd != 0)
+				sb.AppendFormat("오늘 손익: ${0:N0}{1}\n", sessPnlUsd, sessPnlUsd <= -DayLossLimitR * RiskPerTrade ? " → 손실 한도, 수량 " + DayLossQtyPercent + "%" : "");
 			if (UseEntryOpenRange && !double.IsNaN(orHigh))
 				sb.AppendFormat("개장 {0}분 범위: {1:N2} ~ {2:N2}{3}\n", E5RangeMinutes, orLow, orHigh, OpenRangeReady() ? "" : " (기록 중)");
 			if (UseBreakoutEntry)
@@ -2589,6 +2715,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			sb.Section("청산", ToneExit);
 			if (pos == Pos.None)
 				sb.Append("● 청산 주문 냄, 체결 대기\n");
+			else if (path == "E6")
+			{
+				sb.AppendFormat("○ 익절 {0:F1}R 지정가, {1}분이면 시장가 청산 (지금 {2}분)\n", RangeFadeTargetR, RangeFadeMaxHold, trBars);
+				sb.Append("  추세 판정·의심으로는 청산하지 않음\n");
+			}
 			else if (path == "E5")
 			{
 				sb.AppendFormat("○ 익절 {0:F1}R 지정가, 최대 이익 {1:F1}R이면 본전 → 트레일링 {2} ATR{3}\n", E5TargetR, E5BreakevenR, TrailAtr, e5Trail ? " (트레일링 중)" : "");
@@ -2886,6 +3017,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Display(Name = "[설계] E4 횡보 진입 (UseEntrySide)", Description = "기본 켬. 횡보 중 저가가 아래 밴드에 닿은 뒤 대기 봉 수 안에 [MACD 상승 전환 OR 골든크로스]면 횡보 매수(매도는 거울상)", GroupName = "01. 진입 경로", Order = 6)]
 		public bool UseEntrySide { get; set; }
 
+		[NinjaScriptProperty]
+		[Display(Name = "[선택] E6 박스 장 되돌림 진입 (UseEntryRangeFade)", Description = "기본 켬(v6, 2026-10-15 사용자 결정: 10/7 같은 박스 장 대책). 대회 구간 시작 60분 뒤부터, 시작부터 지금까지 종가 효율비 ≤ 0.15(박스 장)이면, 30봉 고가·저가를 1~3봉 전에 잠깐 넘었다가 다시 안으로 마감할 때 반대로 진입. 익절 1R, 손절 최근 4봉 극값 바깥, 최대 20분. 다른 경로가 없을 때만. 28일 시뮬레이션 단독 47건 +8.8R(7월 +1.9, 8·9월 +3.9, 10월 +3.0), 항상 켜면 −5.6R", GroupName = "01. 진입 경로", Order = 7)]
+		public bool UseEntryRangeFade { get; set; }
+
 
 
 
@@ -3014,6 +3149,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(0, 235959)]
 		[Display(Name = "[설계] 전량 청산 시각 (FlattenTime)", Description = "HHmmss, 기본 232700 = 23:27. 이 봉이 마감되면 남은 수량을 전량 시장가", GroupName = "10. 수량·대회 시간", Order = 7)]
 		public int FlattenTime { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.0, 20.0)]
+		[Display(Name = "[안전] 하루 손실 한도 R (DayLossLimitR)", Description = "기본 1.5. 이번 대회 구간에 끝난 거래 손익 합이 −이 값 × 1회 위험 한도(기본 −$3,000) 이하가 되면 그 뒤 진입 수량을 50%로. 진입은 그대로. 0 = 안 씀. 18일 시뮬레이션: 최악의 날 −$6,440 → −$4,498, 합계는 거의 같음", GroupName = "10. 수량·대회 시간", Order = 8)]
+		public double DayLossLimitR { get; set; }
 
 		// ── 11. 지표 계산값 ──
 
