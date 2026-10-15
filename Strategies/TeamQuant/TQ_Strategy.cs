@@ -115,7 +115,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private double			contVel;						// 속도
 		private double			contSlow;						// 연속 S = S1~S4 연속값 합 (−4~+4)
 		private double			contFast;						// 연속 F = F1·F2 연속값 합 (−2~+2)
-		private int				contState;						// +1 / 0 / −1
+		private int				contState;						// +1 / 0 / −1 (진입용 판정)
+		private int				contExitState;					// 청산용 판정: 속도 시작 없음, 끝 = C ≤ ScoreExitOff (TREND_END·OPP_TREND)
 		private int				contSuspect;					// 의심 중 방향 (−1 하락의심, +1 상승의심)
 		private int				contFPrev;						// 직전 1분봉의 F(정수 환산)
 		private bool			contReady;
@@ -195,6 +196,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				ScoreTrendOff			= 0.0;
 				ScoreVelBars			= 6;
 				ScoreVelMin				= 0.25;
+				ScoreExitOff			= -0.1;
 				RegimeFast				= 6;
 				RegimeMid				= 20;
 				RegimeSlow				= 60;
@@ -402,7 +404,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			System.Globalization.CultureInfo inv = System.Globalization.CultureInfo.InvariantCulture;
 			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v6"
 				+ " | 판정=" + (RegimeMode == 2 ? "점수(기준x" + ScoreScale.ToString(inv) + " 켬" + ScoreTrendOn.ToString(inv) + " 끔" + ScoreTrendOff.ToString(inv)
-					+ " 속도" + ScoreVelBars + "봉≥" + ScoreVelMin.ToString(inv) + ")" : "v3")
+					+ " 속도" + ScoreVelBars + "봉≥" + ScoreVelMin.ToString(inv) + " 청산끔" + ScoreExitOff.ToString(inv) + ")" : "v3")
 				+ " | 추세봉=" + RegimeBarMinutes + "분 MA=" + RegimeFast + "/" + RegimeMid + "/" + RegimeSlow
 				+ " S2방식=" + RegimeS2Mode + " 기울기봉=" + RegimeSlopeBars + " RSI항목=" + RegimeUseRsi + " RSI폭=" + RegimeRsiBand.ToString(inv)
 				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow
@@ -563,6 +565,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return x > 0 ? n : -n;
 		}
 
+		// 보유 포지션의 추세 청산(TREND_END·OPP_TREND)이 보는 판정. RegimeMode 2면 흔들림에 둔한 청산용 판정, 1이면 v3 판정 그대로
+		private int ExitState()
+		{
+			if (RegimeMode == 2)
+				return contReady ? contExitState : 0;
+			return RawRegimeState();
+		}
+
 		private int SuspectActiveNow()	{ return RegimeMode == 2 ? contSuspect : regime.SuspectActive[0]; }
 
 		private static double R6(double x)	{ return Math.Round(x, 6); }
@@ -636,6 +646,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				else if (contState == -1)	contState = upGo ? 1 : contScore >= -ScoreTrendOff ? 0 : -1;
 				else						contState = upGo ? 1 : dnGo ? -1 : 0;
 			}
+			// 청산용 판정 (spec 3-3): 시작 = C ≥ ScoreTrendOn만(속도 시작 없음), 끝 = C ≤ ScoreExitOff, 반대 시작이면 바로 반대
+			int prevX = contExitState;
+			if (contReady)
+			{
+				if (contExitState == 1)			contExitState = contScore <= -ScoreTrendOn ? -1 : contScore <= ScoreExitOff ? 0 : 1;
+				else if (contExitState == -1)	contExitState = contScore >= ScoreTrendOn ? 1 : contScore >= -ScoreExitOff ? 0 : -1;
+				else							contExitState = contScore >= ScoreTrendOn ? 1 : contScore <= -ScoreTrendOn ? -1 : 0;
+			}
+			if (contExitState != prevX)
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 청산용 판정(점수) {2} → {3}  C={4:F3}", Time[0], Instrument.FullName, StateText(prevX), StateText(contExitState), contScore));
 			if (contState != prev)
 				contSuspect = 0;
 			if (contState != 0 && contState != prev)
@@ -1554,21 +1574,22 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			}
 			int st = RegimeState();
-			if (st == dir)
+			int xs = ExitState();	// spec 3-3: 추세 청산은 청산용 판정으로 (RegimeMode 1이면 st와 같음)
+			if (xs == dir)
 				sawOwnTrend = true;
 
 			// 반대 추세 시작 → 항상 전량 청산 (4-1 원칙 4). 같은 봉 반대 진입은 없음. 다음 봉에 E1을 허용한다 (사용자 결정 2026-10-15)
-			if (st == -dir)
+			if (xs == -dir)
 			{
-				e1AfterExitDir	= st;
+				e1AfterExitDir	= xs;
 				e1AfterExitBar	= CurrentBars[0];
 				FlattenRemaining("OPP_TREND", "반대 추세 시작");
 				return;
 			}
 			// 추세 종료(횡보) → 전량 청산 (TrendExitOnEnd). 보유 중 그 방향 추세였던 적이 있을 때만 (E3로 횡보 중 들어간 경우를 위해)
-			if (TrendExitOnEnd && st == 0 && sawOwnTrend)
+			if (TrendExitOnEnd && xs == 0 && sawOwnTrend)
 			{
-				FlattenRemaining("TREND_END", "추세 종료 (S ≤ " + TrendEndSlow + ")");
+				FlattenRemaining("TREND_END", RegimeMode == 2 ? "추세 종료 (점수 C ≤ " + ScoreExitOff.ToString("F2") + ")" : "추세 종료 (S ≤ " + TrendEndSlow + ")");
 				return;
 			}
 
@@ -1722,7 +1743,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		#region 횡보 포지션 청산 (4-6)
 		private void ManageSideExits()
 		{
-			int st = RegimeState();
+			int st = ExitState();	// spec 3-3: 반대 추세 청산은 청산용 판정으로
 			// 반대 방향 추세 시작 → 전량 (SideExitOnOppTrend). 같은 방향 추세면 횡보 규칙 그대로
 			if (SideExitOnOppTrend && st == -dir)
 			{
@@ -2664,6 +2685,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public double ScoreVelMin { get; set; }
 
 		[NinjaScriptProperty]
+		[Range(-1.0, 1.0)]
+		[Display(Name = "[선택] 점수 판정: 청산용 판정 종료 점수 (ScoreExitOff)", Description = "기본 −0.1. 보유 포지션의 TREND_END·OPP_TREND는 따로 계산한 청산용 판정을 봄: 속도로 시작하지 않고(C ≥ 시작 점수일 때만), 상승은 C ≤ 이 값이면 끝(하락은 ≥ −값). 진입 판정은 빠르게, 청산은 흔들림에 둔하게. 18일 시뮬레이션 10월 −4.6R → −3.1R, 7월 같음", GroupName = "01. 추세 판단 (추세 봉)", Order = 26)]
+		public double ScoreExitOff { get; set; }
+
+		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
 		[Display(Name = "[설계] 이동평균 단기 (RegimeFast)", Description = "기본 6. F1(종가 > 단기선 AND 단기선 상승)과 마지막 조각 기준선 2에 씀. 줄이면 빠른 점수가 빨리 바뀜", GroupName = "01. 추세 판단 (추세 봉)", Order = 1)]
 		public int RegimeFast { get; set; }
@@ -3357,7 +3383,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			HashSet<string> locked = new HashSet<string>();
 			if (RegimeS2Mode != 2)		locked.Add("RegimeSlopeBars");
 			if (RegimeMode != 2)
-				foreach (string name in new[] { "ScoreScale", "ScoreTrendOn", "ScoreTrendOff", "ScoreVelBars", "ScoreVelMin" })
+				foreach (string name in new[] { "ScoreScale", "ScoreTrendOn", "ScoreTrendOff", "ScoreVelBars", "ScoreVelMin", "ScoreExitOff" })
 					locked.Add(name);
 			else
 				foreach (string name in new[] { "TrendStartFast", "TrendStartSlow", "TrendEndSlow" })
