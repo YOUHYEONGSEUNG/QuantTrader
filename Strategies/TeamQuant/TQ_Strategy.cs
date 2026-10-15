@@ -104,6 +104,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				reaccelNow;						// 이 진입 봉에서 처음 본 추세 재가속 (±1, E1Reaccel, 사용자 결정 2026-10-15)
 		private bool			reaccelDipUp;					// 상승추세 중 F가 0 이하로 내려간 적이 있음 (재가속 대기)
 		private bool			reaccelDipDn;
+		// 재가속 기준은 추세 시작 기준과 따로 고정: 시작 기준을 1로 내려도(2026-10-15) 재가속은 처음 정한 대로 "F가 다시 ±2, S ±2"
+		private const int		ReaccelFast		= 2;
+		private const int		ReaccelSlow		= 2;
 		private bool			sessionOpenUsed;				// 이번 대회 구간의 첫 진입 가능 봉이 지났는지 (E1AtSessionStart)
 		private bool			suspectPriceBroken;				// 지금 의심 중에 가격 확인(직전 저점 이탈)이 있었는지 (SuspectBlockNeedPrice)
 
@@ -170,8 +173,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				RegimeFast				= 6;
 				RegimeMid				= 20;
 				RegimeSlow				= 60;
-				TrendStartFast			= 2;
-				TrendStartSlow			= 2;
+				TrendStartFast			= 1;	// 2026-10-15 사용자 결정 2 → 1 (21일 재현: 지연 중간 20 → 7분, 추세 전환은 늘어남)
+				TrendStartSlow			= 1;
 				TrendEndSlow			= 0;
 				RegimeMacdSlopeBars		= 2;
 				RegimeS2Mode			= 1;
@@ -186,11 +189,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				SuspectStrongSlow		= 1;
 				SuspectStrongExitPercent	= 100;
 				BlockEntryWhileSuspect	= true;
-				SuspectBlockNeedPrice	= true;
+				SuspectBlockNeedPrice	= false;	// 2026-10-15 켬으로 넣었다가 되돌림: 의심 중 E2 8건 3승 −$9,997
+				TrendEntryNeedFast		= true;
+				RegimeDirectReverse		= false;
 				// 03 진입 — 추세
 				UseEntryTrendStart		= true;
 				UseEntryPullback		= true;
-				TrendPullbackBand		= 1;
+				TrendPullbackBand		= 0;	// 2026-10-15 사용자 결정 1(−1배) → 0(중심선)
+				PullbackMinSlow			= 2;
 				UseEntryOrb				= true;
 				OrbEndTime				= 230000;
 				OrbMinSlow				= 1;
@@ -198,7 +204,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				OrbMaxEntries			= 2;
 				EntryMinRR				= 1.0;
 				E1Reaccel				= true;
-				E1AtSessionStart		= true;
+				E1AtSessionStart		= false;	// 2026-10-15 사용자 결정 켬 → 끔 (21일 10건 3승, −$2,792)
 				// 04 진입 — 횡보
 				UseEntrySide			= true;
 				SideBand				= 2;
@@ -220,6 +226,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				HandleOrderErrors		= true;
 				BreakevenMinR			= 0.5;
 				BreakevenFallbackAtr	= 1.5;
+				BreakevenAtR			= 0.8;
 				// 07 청산 — 추세
 				TrendTp1Band			= 2;
 				TrendTp2Band			= 3;
@@ -299,7 +306,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				regimeBip	= RegimeBarMinutes == 10 ? 1 : 2;
 				regime		= TQ_Regime(BarsArray[regimeBip], RegimeFast, RegimeMid, RegimeSlow, false, MacdFast, MacdSlow, MacdSmooth, RsiPeriod,
 								RegimeS2Mode, RegimeSlopeBars, RegimeUseRsi, RegimeRsiBand, RegimeMacdSlopeBars,
-								TrendStartFast, TrendStartSlow, TrendEndSlow, SuspectFast);
+								TrendStartFast, TrendStartSlow, TrendEndSlow, SuspectFast, RegimeDirectReverse);
 				// v3는 EntryUpLong / EntryDnShort(추세 눌림, 밴드 = TrendPullbackBand), EntrySideLong / EntrySideShort(횡보, 밴드 = SideBand)만 쓴다.
 				// 쓰지 않는 밴드 인자(의심 진입 4개, 역추세 매수)에는 main 기본값을 넘긴다: 2 / 1 / 3 / 30 / 1 / 2. 마지막 조각 이동평균은 쓰지 않아 main 기본 18
 				signals		= TQ_Signals(T1Window, CrossFilterBars, CrossLow, CrossHigh, RsiPeriod, SwingBars,
@@ -357,16 +364,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return "[" + Instrument.FullName + "] " + BarsPeriod.Value + "분봉 | 버전=v3"
 				+ " | 추세봉=" + RegimeBarMinutes + "분 MA=" + RegimeFast + "/" + RegimeMid + "/" + RegimeSlow
 				+ " S2방식=" + RegimeS2Mode + " 기울기봉=" + RegimeSlopeBars + " RSI항목=" + RegimeUseRsi + " RSI폭=" + RegimeRsiBand.ToString(inv)
-				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow
+				+ " MACD기울기봉=" + RegimeMacdSlopeBars + " 시작F=" + TrendStartFast + " 시작S=" + TrendStartSlow + " 종료S=" + TrendEndSlow + " 바로반전=" + RegimeDirectReverse
 				+ " | 의심F=" + SuspectFast + " 가격확인=" + SuspectNeedPrice + "(" + SuspectConfirmBars + "봉) 청산%=" + SuspectExitPercent
-				+ " 강한의심S=" + SuspectStrongSlow + "(" + SuspectStrongExitPercent + "%) 의심중진입금지=" + BlockEntryWhileSuspect + "(가격확인때만=" + SuspectBlockNeedPrice + ")"
-				+ " | E1=" + UseEntryTrendStart + "(재가속=" + E1Reaccel + " 구간첫봉=" + E1AtSessionStart + ") E2=" + UseEntryPullback + "(밴드" + TrendPullbackBand + ") E3=" + UseEntryOrb
+				+ " 강한의심S=" + SuspectStrongSlow + "(" + SuspectStrongExitPercent + "%) 의심중진입금지=" + BlockEntryWhileSuspect + "(가격확인때만=" + SuspectBlockNeedPrice + ") 추세진입F필요=" + TrendEntryNeedFast
+				+ " | E1=" + UseEntryTrendStart + "(재가속=" + E1Reaccel + " 구간첫봉=" + E1AtSessionStart + ") E2=" + UseEntryPullback + "(밴드" + TrendPullbackBand + " S" + PullbackMinSlow + ") E3=" + UseEntryOrb
 				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
 				+ " | E4=" + UseEntrySide + "(밴드" + SideBand + " T2=" + SideT2Entry + ") 횡보필터=" + SideBlockScore + " 횡보재진입금지=" + BlockSideAfterStop
 				+ " | 대기=" + T1Window + " MACD확인=" + MacdConfirmBars + " T2앞봉인정=" + T2CountConfirmBars
 				+ " | 손절봉=" + SwingBars + " 추세손절ATR=" + TrendStopMinAtr.ToString(inv) + "~" + TrendStopMaxAtr.ToString(inv)
 				+ " 횡보손절ATR=" + SideStopMinAtr.ToString(inv) + "~" + SideStopMaxAtr.ToString(inv) + " 최소손절틱=" + StopMinTicks
-				+ " 본절최소R=" + BreakevenMinR.ToString(inv) + " 모자라면ATR=" + BreakevenFallbackAtr.ToString(inv) + " 밴드최소R=" + TrendTpMinR.ToString(inv)
+				+ " 본절최소R=" + BreakevenMinR.ToString(inv) + " 모자라면ATR=" + BreakevenFallbackAtr.ToString(inv) + " 밴드최소R=" + TrendTpMinR.ToString(inv) + " 이익보호R=" + BreakevenAtR.ToString(inv)
 				+ " | 추세익절=" + TrendTp1Band + "/" + TrendTp2Band + "배 " + TrendTp1Percent + "/" + TrendTp2Percent + "% 트레일링ATR=" + TrailAtr.ToString(inv)
 				+ " 마지막조각=" + TrendLastExitMa + " 추세종료청산=" + TrendExitOnEnd + " 1분T2청산=" + TrendExitOnEntryT2
 				+ " | 횡보1단계=" + SideTp1Atr.ToString(inv) + "ATR " + SideTp1Percent + "% 전량밴드=" + SideRestBand
@@ -439,6 +446,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					else
 					{
 						ProtectBeforeOpenCheck();
+						ProtectProfitCheck();
 						UpdateTrailStop();
 						UpdateTargets();
 						if (IsTrendPos())	ManageTrendExits();
@@ -537,7 +545,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			bool dip = st > 0 ? reaccelDipUp : reaccelDipDn;
 			if (st * f <= 0)
 				dip = true;
-			else if (dip && st * f >= TrendStartFast && st * s >= TrendStartSlow)
+			else if (dip && st * f >= ReaccelFast && st * s >= ReaccelSlow)
 			{
 				reaccelNow	= st;
 				dip			= false;
@@ -755,6 +763,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					? (SuspectBlockNeedPrice ? "의심 중 + 가격 확인됨(직전 " + SwingBars + "봉 " + (d > 0 ? "저점 이탈" : "고점 돌파") + ")이라 추세 방향 신규 진입 안 함"
 						: "의심 중이라 추세 방향 신규 진입 안 함")
 					: null;
+				// 추세 진입(E1·E2·E3)은 빠른 점수가 반대면 안 함 (TrendEntryNeedFast, 사용자 결정 2026-10-15):
+				// 추세 판정은 늦어서, 반전 초입에는 판정은 옛 방향인데 F는 이미 반대다 (21일: 반대 의심 중 E2 8건 −$9,997)
+				string fastBlock = TrendEntryNeedFast && d * F < 0 ? "빠른 점수 F가 반대 (" + Signed(F) + ")" : null;
+				if (suspectBlock == null)
+					suspectBlock = fastBlock;
 				// E1이 열리는 경우: 추세 시작 / 반대 추세 청산 뒤 / 재가속 / 이번 구간 첫 진입 가능 봉에 이미 있는 추세
 				bool sessionOpenNow	= E1AtSessionStart && !sessionOpenUsed && (z == Zone.Pre || z == Zone.Post);
 				string e1Kind		= trendStartNow == d ? "추세 시작"
@@ -805,6 +818,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					string block = !UseEntryPullback ? "꺼짐" : timeBlock ?? suspectBlock;
 					if (block == null && z == Zone.Pre && !fallback && d * S < PreOpenTrendMinSlow)
 						block = "장전에는 S가 " + Signed(d * PreOpenTrendMinSlow) + " 이상이어야 함 (지금 " + Signed(S) + ")";
+					// 추세 끝물 거르기 (PullbackMinSlow, 사용자 결정 2026-10-15): S가 ±2 미만이면 눌림을 받지 않음 (21일 |S| ≤ 1 E2 4건 1승, −$6,867)
+					if (block == null && PullbackMinSlow > 0 && d * S < PullbackMinSlow)
+						block = "S가 " + Signed(d * PullbackMinSlow) + " 이상이어야 함 (지금 " + Signed(S) + ", 추세 끝물)";
 					// 손익비 필터 (E1과 같은 EntryMinRR, 사용자 결정 2026-10-15): 신호가 나온 봉에서만 본다
 					if (block == null && sig && st == d)
 					{
@@ -1178,6 +1194,23 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			else			blockSideShort = true;
 			if (BlockSideAfterStop && !already)
 				Out(string.Format("[{0}][{1}][TQ_Strategy] 횡보 {2} 손실 손절 → 이번 대회 구간 같은 방향 횡보 진입 금지", time, Instrument.FullName, DirText(dir)));
+		}
+
+		// 이익 보호 본절 (BreakevenAtR, v2와 같은 방식. 사용자 결정 2026-10-15): 1차 익절 전이라도 진입 뒤 최대 유리폭이
+		// 처음 손절 거리 × 이 값에 닿으면 진입 봉 마감에 손절을 평단으로. v2는 주력 진입을 뺐지만 v3는 4가지 포지션 모두
+		// (9일 시뮬레이션: 0.8R이면 지던 4건이 본전, 이기던 1건(+$985)이 잘림, 합계 +$1,192. 큰 이익 거래는 1차 익절이 먼저라 영향 없음)
+		private void ProtectProfitCheck()
+		{
+			if (BreakevenAtR <= 0 || tp1Done || breakevenDone || entryFillQty <= 0 || double.IsNaN(trStop0))
+				return;
+			double avg	= AvgPrice();
+			double risk	= Math.Abs(avg - trStop0);
+			if (risk <= 0 || trMfe < BreakevenAtR * risk)
+				return;
+			if (lastStopLabel != "이익 보호 본절")
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 최대 이익 {2:F1}pt ≥ 손절 거리 {3:F1}pt × {4} → 손절을 평단으로 (이익 보호)",
+					Time[0], Instrument.FullName, trMfe, risk, BreakevenAtR));
+			MoveStopTo(avg, "이익 보호 본절", Time[0]);
 		}
 
 		// 개장 보호 (ProtectBeforeOpen): 개장 직전 봉(OpenTime − 1분) 마감에 이익이 ATR × ProtectAtr 이상이면 손절을 평단으로
@@ -2363,12 +2396,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 2)]
-		[Display(Name = "[설계] 추세 시작: 빠른 점수 F 기준 (TrendStartFast)", Description = "기본 2. F ≥ 이 값 AND S ≥ 느린 점수 기준이면 상승추세 시작(하락은 거울상). 내리면 추세 인정이 빠르지만 잦아짐", GroupName = "01. 추세 판단 (추세 봉)", Order = 4)]
+		[Display(Name = "[설계] 추세 시작: 빠른 점수 F 기준 (TrendStartFast)", Description = "기본 1(2026-10-15 사용자 결정, 그 전 2). F ≥ 이 값 AND S ≥ 느린 점수 기준이면 상승추세 시작(하락은 거울상). 내리면 추세 인정이 빠르지만 잦아짐", GroupName = "01. 추세 판단 (추세 봉)", Order = 4)]
 		public int TrendStartFast { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 4)]
-		[Display(Name = "[설계] 추세 시작: 느린 점수 S 기준 (TrendStartSlow)", Description = "기본 2. 추세 시작에 필요한 S. 올리면 추세 인정이 느리지만 확실해짐", GroupName = "01. 추세 판단 (추세 봉)", Order = 5)]
+		[Display(Name = "[설계] 추세 시작: 느린 점수 S 기준 (TrendStartSlow)", Description = "기본 1(2026-10-15 사용자 결정, 그 전 2). 추세 시작에 필요한 S. 올리면 추세 인정이 느리지만 확실해짐. E1 재가속(E1R)은 이 값과 따로 F ±2·S ±2", GroupName = "01. 추세 판단 (추세 봉)", Order = 5)]
 		public int TrendStartSlow { get; set; }
 
 		[NinjaScriptProperty]
@@ -2401,6 +2434,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(0, 50)]
 		[Display(Name = "[선택] RSI 항목 폭 (RegimeRsiBand)", Description = "기본 5(55 이상 / 45 이하). RSI 항목을 끄면 쓰지 않음", GroupName = "01. 추세 판단 (추세 봉)", Order = 13)]
 		public double RegimeRsiBand { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[선택] 추세 끝날 때 바로 반전 (RegimeDirectReverse)", Description = "기본 끔(2026-10-15 사용자 결정). 추세가 끝나는 봉(S가 종료 기준에 닿음)에 F가 이미 반대로 ±2면 횡보를 건너뛰고 반대 추세로. 21일 재현: 횡보 판정 8 → 5%, 추세 전환 35 → 50번, 반대 판정 시간은 그대로(28 → 29%)", GroupName = "01. 추세 판단 (추세 봉)", Order = 14)]
+		public bool RegimeDirectReverse { get; set; }
 
 		// ── 02. 의심 이벤트 ──
 		[NinjaScriptProperty]
@@ -2439,8 +2476,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public bool BlockEntryWhileSuspect { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[선택] 의심 진입 금지는 가격 확인 뒤에만 (SuspectBlockNeedPrice)", Description = "기본 켬(2026-10-15 사용자 결정). 의심이 뜬 뒤 진입 봉 종가가 직전 구조 손절 봉 수의 저점 아래로 마감한 적이 있을 때만 위 진입 금지를 적용(매도는 고점 위). 끄면 의심이 살아 있는 동안 항상 막음", GroupName = "02. 의심 이벤트", Order = 14)]
+		[Display(Name = "[선택] 의심 진입 금지는 가격 확인 뒤에만 (SuspectBlockNeedPrice)", Description = "기본 끔(2026-10-15 켬으로 넣었다가 같은 날 되돌림: 의심 중 E2 8건 3승 −$9,997). 켜면 의심이 뜬 뒤 진입 봉 종가가 직전 구조 손절 봉 수의 저점 아래로 마감한 적이 있을 때만 위 진입 금지를 적용(매도는 고점 위). 끄면 의심이 살아 있는 동안 항상 막음", GroupName = "02. 의심 이벤트", Order = 14)]
 		public bool SuspectBlockNeedPrice { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[선택] 추세 진입은 빠른 점수가 반대면 안 함 (TrendEntryNeedFast)", Description = "기본 켬(2026-10-15 사용자 결정). 매수 E1·E2·E3는 F ≥ 0, 매도는 F ≤ 0일 때만. 추세 판정은 늦어서 반전 초입에는 판정은 옛 방향인데 F는 이미 반대(21일: 반대 의심 중 E2 8건 −$9,997)", GroupName = "02. 의심 이벤트", Order = 15)]
+		public bool TrendEntryNeedFast { get; set; }
 
 		// ── 03. 진입 — 추세 ──
 		[NinjaScriptProperty]
@@ -2455,8 +2496,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, 3)]
-		[Display(Name = "[설계] E2 눌림 밴드 (TrendPullbackBand)", Description = "기본 1(매수는 −1배, 매도는 +1배). 0 = 중심선. 올리면 깊은 눌림만 받음", GroupName = "03. 진입 — 추세", Order = 2)]
+		[Display(Name = "[설계] E2 눌림 밴드 (TrendPullbackBand)", Description = "기본 0 = 중심선(2026-10-15 사용자 결정, 그 전 1 = 매수 −1배·매도 +1배). 올리면 깊은 눌림만 받음", GroupName = "03. 진입 — 추세", Order = 2)]
 		public int TrendPullbackBand { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 4)]
+		[Display(Name = "[선택] E2 최소 느린 점수 (PullbackMinSlow)", Description = "기본 2(2026-10-15 사용자 결정). 매수 E2는 S ≥ 이 값, 매도는 S ≤ −값일 때만. 추세 끝물(S ±1)의 눌림을 거름. 0 = 안 봄", GroupName = "03. 진입 — 추세", Order = 13)]
+		public int PullbackMinSlow { get; set; }
 
 		[NinjaScriptProperty]
 		[RefreshProperties(RefreshProperties.All)]
@@ -2493,7 +2539,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public bool E1Reaccel { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "[선택] E1 구간 첫 봉에 이미 있는 추세로 진입 (E1AtSessionStart)", Description = "기본 켬(2026-10-15 사용자 결정). 대회 구간의 첫 진입 가능 봉(기본 21:35, 장전이면 장전 수량·S 기준 적용)에 추세가 있으면 E1과 같은 필터로 그 방향 진입. 경로 이름 E1S", GroupName = "03. 진입 — 추세", Order = 12)]
+		[Display(Name = "[선택] E1 구간 첫 봉에 이미 있는 추세로 진입 (E1AtSessionStart)", Description = "기본 끔(2026-10-15 넣고 같은 날 끔: 21일 10건 3승 −$2,792). 대회 구간의 첫 진입 가능 봉(기본 21:35, 장전이면 장전 수량·S 기준 적용)에 추세가 있으면 E1과 같은 필터로 그 방향 진입. 경로 이름 E1S", GroupName = "03. 진입 — 추세", Order = 12)]
 		public bool E1AtSessionStart { get; set; }
 
 		// ── 04. 진입 — 횡보 ──
@@ -2585,6 +2631,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(0, double.MaxValue)]
 		[Display(Name = "[선택] 본절 이익이 모자랄 때 손절 = 1차 체결가 ∓ ATR × (BreakevenFallbackAtr)", Description = "기본 1.5. 매수는 1차 체결가 − 이 값 × 1분 ATR, 매도는 +. 지금 손절보다 유리할 때만 옮김. 0 = 손절 유지", GroupName = "06. 손절", Order = 6)]
 		public double BreakevenFallbackAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "[선택] 이익 보호 본절: 최대 이익이 손절 거리 × (BreakevenAtR)", Description = "기본 0.8(2026-10-15 사용자 결정, v2와 같은 방식). 1차 익절 전이라도 진입 뒤 최대 유리폭이 처음 손절 거리 × 이 값에 닿으면 진입 봉 마감에 손절을 평단으로. 4가지 포지션 모두. 0 = 끔", GroupName = "06. 손절", Order = 7)]
+		public double BreakevenAtR { get; set; }
 
 		// ── 07. 청산 — 추세 ──
 		[NinjaScriptProperty]
@@ -2972,7 +3023,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					locked.Add(name);
 			if (!BlockEntryWhileSuspect)	locked.Add("SuspectBlockNeedPrice");
 			if (BreakevenMinR <= 0)			locked.Add("BreakevenFallbackAtr");
-			if (!UseEntryPullback)		locked.Add("TrendPullbackBand");
+			if (!UseEntryPullback)
+				foreach (string name in new[] { "TrendPullbackBand", "PullbackMinSlow" })
+					locked.Add(name);
 			if (!UseEntryOrb)
 				foreach (string name in new[] { "OrbEndTime", "OrbMinSlow", "OrbMinFast", "OrbMaxEntries" })
 					locked.Add(name);

@@ -43,9 +43,9 @@
 
 | 지금 | 조건 | 다음 |
 | --- | --- | --- |
-| 상승추세 아님 | F ≥ `TrendStartFast`(2) AND S ≥ `TrendStartSlow`(2) | 상승추세 (그 봉 = 추세 시작 봉) |
+| 상승추세 아님 | F ≥ `TrendStartFast`(1, 10/15에 2에서 내림) AND S ≥ `TrendStartSlow`(1, 같음) | 상승추세 (그 봉 = 추세 시작 봉) |
 | 상승추세 | 하락추세 시작 조건 충족 | 바로 하락추세 |
-| 상승추세 | S ≤ `TrendEndSlow`(0) | 횡보 |
+| 상승추세 | S ≤ `TrendEndSlow`(0) | 횡보. `DirectReverse`(전략 `RegimeDirectReverse`, 기본 끔)를 켜면 그 봉에 F ≤ −2일 때 바로 하락추세 |
 | 상승추세 | F ≤ −`SuspectFast`(2)가 처음 된 봉 | 상승추세 유지 + **하락의심 이벤트** 1회 |
 | 상승추세 + 의심 중 | F ≥ 0 | 의심 해제 (이벤트 없음) |
 
@@ -72,15 +72,16 @@
 | 경로 | 포지션 | 조건 (매수 기준) | 스위치 |
 | --- | --- | --- | --- |
 | **E1 추세 시작** | TL | 추세 봉 `TrendStart = +1`을 처음 본 진입 봉 마감에 매수. 필터 ① 종가 < Band(+1, `TrendTp1Band`) ② (Band(+1, `TrendTp2Band`) − 종가) ≥ 예상 손절 거리 × `EntryMinRR` | `UseEntryTrendStart` |
-| E1 추세 재가속 (`E1R`) | TL | 상승추세 중 F가 0 이하로 내려갔다가 다시 F ≥ `TrendStartFast` AND S ≥ `TrendStartSlow`가 된 추세 봉을 처음 본 진입 봉 마감. 필터 ①② 같음 (2026-10-15 사용자 결정) | `E1Reaccel` |
-| E1 구간 첫 봉 추세 (`E1S`) | TL | 대회 구간 첫 진입 가능 봉(기본 21:35)에 추세 = 상승. 필터 ①② 같음, 장전 규칙 적용 (2026-10-15 사용자 결정) | `E1AtSessionStart` |
-| **E2 추세 눌림** | TL | 추세 = 상승 AND `EntryUpLong`(저가 ≤ Band(−, `TrendPullbackBand`) → T1 [MACD 상승 전환 OR 골든]). 필터: E1의 ②(손익비 `EntryMinRR`, 2026-10-15 추가) | `UseEntryPullback` |
+| E1 추세 재가속 (`E1R`) | TL | 상승추세 중 F가 0 이하로 내려갔다가 다시 F ≥ 2 AND S ≥ 2가 된 추세 봉(추세 시작 기준과 따로 고정)을 처음 본 진입 봉 마감. 필터 ①② 같음 (2026-10-15 사용자 결정) | `E1Reaccel` |
+| E1 구간 첫 봉 추세 (`E1S`) | TL | 대회 구간 첫 진입 가능 봉(기본 21:35)에 추세 = 상승. 필터 ①② 같음, 장전 규칙 적용 (2026-10-15 사용자 결정, 같은 날 기본 끔: 21일 10건 3승 −$2,792) | `E1AtSessionStart` |
+| **E2 추세 눌림** | TL | 추세 = 상승 AND `EntryUpLong`(저가 ≤ Band(−, `TrendPullbackBand`) → T1 [MACD 상승 전환 OR 골든]). 필터: E1의 ②(손익비 `EntryMinRR`), S ≥ `PullbackMinSlow`(2) (둘 다 2026-10-15 추가). 기본 밴드는 중심선(`TrendPullbackBand` 0, 10/15에 1에서 바꿈) | `UseEntryPullback` |
 | **E3 장전 박스 돌파** | TL | 장후(4-7) AND `OrbEndTime` 전 AND 진입 봉 종가 > 장전 박스 고가 AND S ≥ `OrbMinSlow` AND F ≥ `OrbMinFast`. 방향별 `OrbMaxEntries`(2)번까지: 한 번 쓰면 진입 봉 종가가 박스 안(고가 이하)으로 돌아온 뒤에야 다시 돌파를 받음 (2026-10-15 사용자 결정, 지시서 원래 규칙은 방향별 한 번 = 1) | `UseEntryOrb` |
 | **E4 횡보** | SL | 추세 = 횡보 AND `EntrySideLong`(저가 ≤ Band(−, `SideBand`) → T1, 또는 `SideT2Entry`면 T2Bull) | `UseEntrySide` |
 
 공통 필터 (막히면 상태 상자·로그에 사유를 수치와 함께 남김):
 - 진입 시간(4-7)과 장전 제한.
-- 의심 중에는 그 추세 방향 신규 진입 안 함 (`BlockEntryWhileSuspect`). `SuspectBlockNeedPrice`(기본 켬, 2026-10-15)면 의심이 뜬 뒤 진입 봉 종가가 직전 `SwingBars`봉 저점 아래로 마감한 적이 있을 때만 막음(4-5의 가격 확인과 같은 식).
+- 의심 중에는 그 추세 방향 신규 진입 안 함 (`BlockEntryWhileSuspect`). `SuspectBlockNeedPrice`를 켜면 의심이 뜬 뒤 진입 봉 종가가 직전 `SwingBars`봉 저점 아래로 마감한 적이 있을 때만 막음(4-5의 가격 확인과 같은 식). 10/15에 기본 켬으로 넣었다가 같은 날 기본 끔으로 되돌림(21일: 반대 의심 중 E2 8건 3승 −$9,997).
+- **추세 진입은 빠른 점수가 반대면 안 함 (`TrendEntryNeedFast`, 기본 켬, 2026-10-15 사용자 결정):** E1·E2·E3 매수는 F ≥ 0, 매도는 F ≤ 0일 때만. 추세 판정은 늦어서(큰 움직임 시간의 약 28%를 반대 추세로 판정) 반전 초입에는 판정은 옛 방향인데 F는 이미 반대임.
 - 횡보 방향 필터: S+F ≥ `SideBlockScore`(3)이면 SS 금지, ≤ −3이면 SL 금지.
 - 재진입 제한: 횡보 포지션이 본절 전 손실 손절로 끝나면 그 대회 구간에서 같은 방향 횡보 진입 금지(`BlockSideAfterStop`). 추세 포지션은 제한하지 않음.
 - 같은 봉에 여러 경로가 충족되면 E1 > E3 > E2 > E4, 진입은 1회. 같은 경로에 두 방향이 같이 충족되면 매수 먼저(구현 선택).
@@ -92,6 +93,7 @@
 - **구조 손절:** 신호 봉 포함 최근 `SwingBars`(5)봉 저가 − 1틱. 거리를 신호 봉 1분 ATR(14) × [최소, 최대]로 자름. 추세 [`TrendStopMinAtr` 1.5, `TrendStopMaxAtr` 3.0], 횡보 [`SideStopMinAtr` 1.0, `SideStopMaxAtr` 2.0].
 - 거리가 `StopMinTicks`(32틱 = MNQ 8pt)보다 작으면 그만큼 벌림 (장전 ATR이 절반이라 너무 좁아지는 것 방지).
 - 신호 봉 종가로 먼저 걸고 체결되면 체결가로 다시 계산. 갭으로 이미 넘었으면 즉시 전량 청산(`GAP`).
+- **이익 보호 본절 (`BreakevenAtR` 0.8, 2026-10-15 사용자 결정, v2와 같은 방식):** 1차 익절 전이라도 진입 뒤 최대 유리폭이 처음 손절 거리 × 0.8에 닿으면 진입 봉 마감에 손절을 평단으로. 4가지 포지션 모두(v2는 주력 진입을 뺐음). 근거: 7/15~30 9일 35건 시뮬레이션에서 0.8R이면 지던 4건이 본전, 이기던 1건(+$985)이 잘림, 합계 +$1,192. 0.5R은 이기던 5건을 잘랐음.
 - 손절은 유리한 쪽으로만 움직임. 옮길 때 `BreakevenBufferTicks`(8) 안전 거리(가까우면 미뤘다가 봉 마감마다 재시도).
 
 ### 4-4. 추세 포지션 청산 (TL / TS)
@@ -170,7 +172,7 @@
 - 이름: `[태그] 한국어 설명 (CodeName)`. 태그: **[설계]** 설계안의 동작과 값 · **[선택]** 고민사항 스위치 · **[안전]** 주문 거부 대비 · **[표시]** 화면·기록.
 - 묶음은 판단 순서, 한 묶음 안에서 [설계] 위 [선택] 아래. 쓰이지 않는 설정은 회색 잠금.
 - 00 묶음: "설계안 기본값으로 되돌리기" 버튼(10 수량·대회 시간, 12 화면·기록 묶음은 건드리지 않음), "마지막 동작" 표시.
-- 설정값은 104개 (10/15 진입 늘리기 4개, 1차 뒤 손절·밴드 거리 3개 추가. 원래 97개, 지시서 5-1은 50개 안쪽이 원칙이나, 5-2 표 그대로 두기로 2026-10-15 사용자 결정).
+- 설정값은 108개 (10/15 진입 늘리기 4개, 1차 뒤 손절·밴드 거리 3개, 이익 보호 본절 1개, E2 최소 S 1개, F 반대 진입 금지·바로 반전 2개 추가. 원래 97개, 지시서 5-1은 50개 안쪽이 원칙이나, 5-2 표 그대로 두기로 2026-10-15 사용자 결정).
 
 ## 8. 설정값
 
@@ -179,7 +181,7 @@
 | **00 설정 세트** | 설계안 기본값으로 되돌리기 (`PresetApplyDefaults`), 마지막 동작 (`PresetStatus`) | – | 표시 |
 | **01 추세 판단 (추세 봉)** | 추세 봉 분 (`RegimeBarMinutes`) 3 / 10 | 3 | 설계 |
 | | 이동평균 단기 / 중기 / 장기 (`RegimeFast` / `RegimeMid` / `RegimeSlow`) | 6 / 20 / 60 | 설계 |
-| | 추세 시작: 빠른 점수 / 느린 점수 (`TrendStartFast` / `TrendStartSlow`) | 2 / 2 | 설계 |
+| | 추세 시작: 빠른 점수 / 느린 점수 (`TrendStartFast` / `TrendStartSlow`) | 1 / 1 (10/15에 2 / 2에서) | 설계 |
 | | 추세 종료: 느린 점수가 이 값 이하 (`TrendEndSlow`) | 0 | 설계 |
 | | MACD선 기울기 연속 봉 수 (`RegimeMacdSlopeBars`) | 2 | 설계 |
 | | S2 방식 / 기울기 봉 수 (`RegimeS2Mode` / `RegimeSlopeBars`) | 1 / 5 | 선택 |
@@ -189,13 +191,16 @@
 | | 일부청산 % (`SuspectExitPercent`) | 50 | 선택 |
 | | 강한 의심 기준 S / 그때 청산 % (`SuspectStrongSlow` / `SuspectStrongExitPercent`) | 1 / 100 | 선택 |
 | | 의심 중 추세 방향 신규 진입 금지 (`BlockEntryWhileSuspect`) | 켬 | 선택 |
-| | 그 금지는 가격 확인 뒤에만 (`SuspectBlockNeedPrice`) | 켬 | 선택 |
+| | 그 금지는 가격 확인 뒤에만 (`SuspectBlockNeedPrice`) | 끔 | 선택 |
+| | 추세 진입은 빠른 점수가 반대면 안 함 (`TrendEntryNeedFast`) | 켬 | 선택 |
+| | 추세 끝날 때 바로 반전 (`RegimeDirectReverse`, 01 묶음) | 끔 | 선택 |
 | **03 진입 — 추세** | E1 추세 시작 봉 진입 (`UseEntryTrendStart`) | 켬 | 설계 |
-| | E2 눌림 진입 / 밴드 (`UseEntryPullback` / `TrendPullbackBand`) | 켬 / 1 | 설계 |
+| | E2 눌림 진입 / 밴드 (`UseEntryPullback` / `TrendPullbackBand`) | 켬 / 0 (중심선, 10/15에 1에서) | 설계 |
+| | E2 최소 느린 점수 (`PullbackMinSlow`), 0 = 안 봄 | 2 | 선택 |
 | | E3 장전 박스 돌파 / 마감 시각 / 최소 S / 최소 F (`UseEntryOrb` / `OrbEndTime` / `OrbMinSlow` / `OrbMinFast`) | 켬 / 230000 / 1 / 1 | 설계 |
 | | E3 방향별 최대 횟수 (`OrbMaxEntries`), 1 = 지시서 원래 규칙 | 2 | 선택 |
 | | E1·E2 최소 손익비 (`EntryMinRR`), 0 = 안 봄 | 1.0 | 선택 |
-| | E1 추세 재가속 (`E1Reaccel`) / 구간 첫 봉에 이미 있는 추세 (`E1AtSessionStart`) | 켬 / 켬 | 선택 |
+| | E1 추세 재가속 (`E1Reaccel`) / 구간 첫 봉에 이미 있는 추세 (`E1AtSessionStart`) | 켬 / 끔 | 선택 |
 | **04 진입 — 횡보** | E4 횡보 진입 / 밴드 (`UseEntrySide` / `SideBand`) | 켬 / 2 | 설계 |
 | | 밴드 없이 T2로도 진입 (`SideT2Entry`) | 켬 | 설계 |
 | | 횡보 방향 필터 점수 (`SideBlockScore`) | 3 | 설계 |
@@ -207,6 +212,7 @@
 | | 횡보 손절 ATR 최소 / 최대 (`SideStopMinAtr` / `SideStopMaxAtr`) | 1.0 / 2.0 | 설계 |
 | | 최소 손절 틱 (`StopMinTicks`) | 32 | 안전 |
 | | 1차 뒤 본절에 필요한 이익 R (`BreakevenMinR`) / 모자랄 때 1차 체결가 ∓ ATR 배수 (`BreakevenFallbackAtr`) | 0.5 / 1.5 | 선택 |
+| | 이익 보호 본절: 최대 이익이 손절 거리 × (`BreakevenAtR`), 0 = 끔 | 0.8 | 선택 |
 | | 손절 이동 안전 거리 틱 (`BreakevenBufferTicks`), 주문 오류 직접 처리 (`HandleOrderErrors`) | 8 / 켬 | 안전 |
 | **07 청산 — 추세** | 1차 / 2차 익절 밴드 (`TrendTp1Band` / `TrendTp2Band`) | 2 / 3 | 설계 |
 | | 1차 / 2차 익절 % (`TrendTp1Percent` / `TrendTp2Percent`) | 33 / 33 | 설계 |

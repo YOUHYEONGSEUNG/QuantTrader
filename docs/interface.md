@@ -37,12 +37,13 @@ v3 추세 판단 (spec v3 3장). 추세를 +1 상승 / 0 횡보 / −1 하락으
 | UseRsi | true | S4 RSI 항목 사용 |
 | RsiBand | 5 | S4: RSI ≥ 50 + 이 값이면 +1, ≤ 50 − 이 값이면 −1 |
 | MacdSlopeBars | 2 | F2: MACD선이 이 봉 수 연속 커지면 +1, 작아지면 −1 |
-| TrendStartFast / TrendStartSlow | 2 / 2 | 추세 시작: F ≥ 앞의 값 AND S ≥ 뒤의 값 (하락은 거울상) |
+| TrendStartFast / TrendStartSlow | 1 / 1 (2026-10-15에 2 / 2에서) | 추세 시작: F ≥ 앞의 값 AND S ≥ 뒤의 값 (하락은 거울상) |
 | TrendEndSlow | 0 | 상승추세 끝: S ≤ 이 값 (하락추세 끝: S ≥ −이 값) |
 | SuspectFast | 2 | 의심 이벤트: 상승추세 중 F ≤ −이 값이 된 첫 봉 (하락추세는 F ≥ 이 값) |
+| DirectReverse | false | 추세가 끝나는 봉(S가 종료 기준에 닿음)에 F가 이미 반대로 ±2면 횡보 없이 반대 추세로 (2026-10-15 추가, 생성자 마지막 인자) |
 | ShowPlots | false | 차트 표시 전용. 생성자 인자가 아니다 |
 
-전략의 설정값 이름: `Fast/Mid/Slow` ↔ `RegimeFast/RegimeMid/RegimeSlow`, `S2Mode` ↔ `RegimeS2Mode`, `SlopeBars` ↔ `RegimeSlopeBars`, `UseRsi` ↔ `RegimeUseRsi`, `RsiBand` ↔ `RegimeRsiBand`, `MacdSlopeBars` ↔ `RegimeMacdSlopeBars`. `TrendStartFast`·`TrendStartSlow`·`TrendEndSlow`·`SuspectFast`·MACD·RSI 기간은 같은 이름.
+전략의 설정값 이름: `Fast/Mid/Slow` ↔ `RegimeFast/RegimeMid/RegimeSlow`, `S2Mode` ↔ `RegimeS2Mode`, `SlopeBars` ↔ `RegimeSlopeBars`, `UseRsi` ↔ `RegimeUseRsi`, `RsiBand` ↔ `RegimeRsiBand`, `MacdSlopeBars` ↔ `RegimeMacdSlopeBars`. `DirectReverse` ↔ `RegimeDirectReverse`. `TrendStartFast`·`TrendStartSlow`·`TrendEndSlow`·`SuspectFast`·MACD·RSI 기간은 같은 이름.
 
 | 이름 | 타입 | 의미 |
 | --- | --- | --- |

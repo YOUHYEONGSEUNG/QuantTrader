@@ -64,10 +64,11 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				UseRsi						= true;		// S4 RSI 항목 사용
 				RsiBand						= 5;		// RSI가 50에서 이만큼 벗어나야 +1 / −1
 				MacdSlopeBars				= 2;		// F2: MACD선이 몇 봉 연속 커져야(작아져야) 하는지
-				TrendStartFast				= 2;		// 추세 시작: F ≥ 이 값 (하락은 ≤ −값)
-				TrendStartSlow				= 2;		// 추세 시작: S ≥ 이 값
+				TrendStartFast				= 1;		// 추세 시작: F ≥ 이 값 (하락은 ≤ −값). 2026-10-15 사용자 결정 2 → 1
+				TrendStartSlow				= 1;		// 추세 시작: S ≥ 이 값. 2026-10-15 사용자 결정 2 → 1
 				TrendEndSlow				= 0;		// 상승추세 끝: S ≤ 이 값 (하락추세 끝: S ≥ −값)
 				SuspectFast					= 2;		// 의심: 추세 중 F가 반대로 이 값에 닿은 첫 봉
+				DirectReverse				= false;	// 추세가 끝나는 봉에 F가 이미 반대로 ±2면 횡보를 건너뛰고 반대 추세로 (2026-10-15 사용자 결정, 기본 끔)
 				ShowPlots					= false;	// 차트 표시용. 끄면 플롯 선을 안 그린다 (값·전략 동작은 그대로)
 
 				// 플롯 순서는 아래 Properties의 Values 인덱스와 맞춘다
@@ -175,15 +176,18 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			bool startUp	= F >= TrendStartFast && S >= TrendStartSlow;
 			bool startDn	= F <= -TrendStartFast && S <= -TrendStartSlow;
 			int prev		= trend;
+			//  · DirectReverse: 추세가 끝나는 봉(S가 종료 기준에 닿음)에 F가 이미 반대로 ±2(최대)면 횡보 없이 반대 추세로.
+			//    S는 끝 기준(0)에 먼저 닿고 시작 기준(±1 이상)은 그 뒤라, 이게 없으면 반전은 거의 항상 횡보를 거친다
+			//    (7/15~9/10 21일: 반대 전환 27번 중 22번이 횡보를 거침. 재현: 횡보 판정 8 → 5%, 추세 전환 35 → 50번)
 			if (trend == 1)
 			{
 				if (startDn)					trend = -1;
-				else if (S <= TrendEndSlow)		trend = 0;
+				else if (S <= TrendEndSlow)		trend = DirectReverse && F <= -2 ? -1 : 0;
 			}
 			else if (trend == -1)
 			{
 				if (startUp)					trend = 1;
-				else if (S >= -TrendEndSlow)	trend = 0;
+				else if (S >= -TrendEndSlow)	trend = DirectReverse && F >= 2 ? 1 : 0;
 			}
 			else
 			{
@@ -322,8 +326,12 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Display(Name = "SuspectFast", Description = "의심 이벤트: 상승추세 중 F ≤ −이 값이 된 첫 봉 (하락추세는 F ≥ 이 값)", GroupName = "Parameters", Order = 16)]
 		public int SuspectFast { get; set; }
 
+		[NinjaScriptProperty]
+		[Display(Name = "DirectReverse", Description = "추세가 끝나는 봉에 F가 이미 반대로 ±2면 횡보 없이 반대 추세로 (기본 끔)", GroupName = "Parameters", Order = 17)]
+		public bool DirectReverse { get; set; }
+
 		// 표시 전용 토글. [NinjaScriptProperty]를 붙이지 않아 생성자 시그니처가 바뀌지 않는다
-		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 17)]
+		[Display(Name = "ShowPlots", Description = "플롯 선 표시. 끄면 차트에서 선이 안 보임(값·전략 동작은 그대로)", GroupName = "Parameters", Order = 18)]
 		public bool ShowPlots { get; set; }
 
 		[Browsable(false)]
@@ -390,18 +398,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_Regime[] cacheTQ_Regime;
-		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
-			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
+			return TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast, directReverse);
 		}
 
-		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input, int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
 			if (cacheTQ_Regime != null)
 				for (int idx = 0; idx < cacheTQ_Regime.Length; idx++)
-					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].S2Mode == s2Mode && cacheTQ_Regime[idx].SlopeBars == slopeBars && cacheTQ_Regime[idx].UseRsi == useRsi && cacheTQ_Regime[idx].RsiBand == rsiBand && cacheTQ_Regime[idx].MacdSlopeBars == macdSlopeBars && cacheTQ_Regime[idx].TrendStartFast == trendStartFast && cacheTQ_Regime[idx].TrendStartSlow == trendStartSlow && cacheTQ_Regime[idx].TrendEndSlow == trendEndSlow && cacheTQ_Regime[idx].SuspectFast == suspectFast && cacheTQ_Regime[idx].EqualsInput(input))
+					if (cacheTQ_Regime[idx] != null && cacheTQ_Regime[idx].Fast == fast && cacheTQ_Regime[idx].Mid == mid && cacheTQ_Regime[idx].Slow == slow && cacheTQ_Regime[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Regime[idx].MacdFast == macdFast && cacheTQ_Regime[idx].MacdSlow == macdSlow && cacheTQ_Regime[idx].MacdSmooth == macdSmooth && cacheTQ_Regime[idx].RsiPeriod == rsiPeriod && cacheTQ_Regime[idx].S2Mode == s2Mode && cacheTQ_Regime[idx].SlopeBars == slopeBars && cacheTQ_Regime[idx].UseRsi == useRsi && cacheTQ_Regime[idx].RsiBand == rsiBand && cacheTQ_Regime[idx].MacdSlopeBars == macdSlopeBars && cacheTQ_Regime[idx].TrendStartFast == trendStartFast && cacheTQ_Regime[idx].TrendStartSlow == trendStartSlow && cacheTQ_Regime[idx].TrendEndSlow == trendEndSlow && cacheTQ_Regime[idx].SuspectFast == suspectFast && cacheTQ_Regime[idx].DirectReverse == directReverse && cacheTQ_Regime[idx].EqualsInput(input))
 						return cacheTQ_Regime[idx];
-			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, RsiPeriod = rsiPeriod, S2Mode = s2Mode, SlopeBars = slopeBars, UseRsi = useRsi, RsiBand = rsiBand, MacdSlopeBars = macdSlopeBars, TrendStartFast = trendStartFast, TrendStartSlow = trendStartSlow, TrendEndSlow = trendEndSlow, SuspectFast = suspectFast }, input, ref cacheTQ_Regime);
+			return CacheIndicator<TeamQuant.TQ_Regime>(new TeamQuant.TQ_Regime(){ Fast = fast, Mid = mid, Slow = slow, ShowDebugVisuals = showDebugVisuals, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, RsiPeriod = rsiPeriod, S2Mode = s2Mode, SlopeBars = slopeBars, UseRsi = useRsi, RsiBand = rsiBand, MacdSlopeBars = macdSlopeBars, TrendStartFast = trendStartFast, TrendStartSlow = trendStartSlow, TrendEndSlow = trendEndSlow, SuspectFast = suspectFast, DirectReverse = directReverse }, input, ref cacheTQ_Regime);
 		}
 	}
 }
@@ -410,14 +418,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast, directReverse);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast, directReverse);
 		}
 	}
 }
@@ -426,14 +434,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
-			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
+			return indicator.TQ_Regime(Input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast, directReverse);
 		}
 
-		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast)
+		public Indicators.TeamQuant.TQ_Regime TQ_Regime(ISeries<double> input , int fast, int mid, int slow, bool showDebugVisuals, int macdFast, int macdSlow, int macdSmooth, int rsiPeriod, int s2Mode, int slopeBars, bool useRsi, double rsiBand, int macdSlopeBars, int trendStartFast, int trendStartSlow, int trendEndSlow, int suspectFast, bool directReverse)
 		{
-			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast);
+			return indicator.TQ_Regime(input, fast, mid, slow, showDebugVisuals, macdFast, macdSlow, macdSmooth, rsiPeriod, s2Mode, slopeBars, useRsi, rsiBand, macdSlopeBars, trendStartFast, trendStartSlow, trendEndSlow, suspectFast, directReverse);
 		}
 	}
 }

@@ -67,7 +67,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | --- | --- | --- | --- |
 | RegimeBarMinutes | 3 | 추세 봉. 3 또는 10 | 10 (이때 이평 6/18/36) |
 | RegimeFast / RegimeMid / RegimeSlow | 6 / 20 / 60 | F1 단기선, S1·S2 중기선, S2 장기선 | Fast 8 |
-| TrendStartFast / TrendStartSlow | 2 / 2 | 추세 시작: F ≥ 2 AND S ≥ 2 | |
+| TrendStartFast / TrendStartSlow | 1 / 1 | 추세 시작: F ≥ 1 AND S ≥ 1 (10/15에 2 / 2에서. 21일 재현: 지연 중간 20 → 7분, 추세 전환 11 → 19번) | 2 / 2 |
 | TrendEndSlow | 0 | 추세 끝: S ≤ 0 → 횡보 | |
 | RegimeMacdSlopeBars | 2 | F2: MACD선 연속 증가·감소 봉 수 | |
 | RegimeS2Mode / RegimeSlopeBars | 1 / 5 | S2: 1 중기 > 장기, 2 장기선 기울기(5봉 전 대비) | 2 |
@@ -82,7 +82,9 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | SuspectExitPercent | 50 | 남은 수량의 %. 먼 조각부터 조각 단위 | 33 / 100 |
 | SuspectStrongSlow / SuspectStrongExitPercent | 1 / 100 | 확인 때 S ≤ 1이면 전량 | |
 | BlockEntryWhileSuspect | 켬 | 의심 중 추세 방향 신규 진입 금지 | |
-| SuspectBlockNeedPrice | 켬 | 그 금지는 의심 뒤 가격 확인(직전 5봉 저점 이탈)이 있었을 때만 | 끔 |
+| SuspectBlockNeedPrice | 끔 | 켜면 그 금지는 의심 뒤 가격 확인(직전 5봉 저점 이탈)이 있었을 때만 (켰을 때 의심 중 E2 8건 −$9,997) | 켬 |
+| TrendEntryNeedFast | 켬 | 추세 진입(E1·E2·E3)은 F가 반대면 안 함 | 끔 |
+| RegimeDirectReverse | 끔 | 추세가 끝나는 봉에 F가 반대로 ±2면 횡보 없이 반대 추세로 | 켬 |
 
 ### 5-3. 03 진입 — 추세, 04 진입 — 횡보, 05 진입 — 공통
 
@@ -91,8 +93,9 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | UseEntryTrendStart | 켬 | E1: 추세 시작을 처음 본 진입 봉에 진입. 반대 추세 시작으로 청산한 뒤에는 2봉 안에도 | |
 | EntryMinRR | 1.0 | E1·E2: 2차 익절까지 남은 폭 ≥ 예상 손절 × 이 값 | 0 / 1.5 |
 | E1Reaccel | 켬 | E1R: 추세 중 F가 0 이하로 갔다가 다시 시작 조건을 채운 추세 봉에서 E1 | 끔 |
-| E1AtSessionStart | 켬 | E1S: 구간 첫 진입 가능 봉(21:35)에 이미 있는 추세로 E1 | 끔 |
-| UseEntryPullback / TrendPullbackBand | 켬 / 1 | E2: −1배 터치 → [MACD 상승 전환 OR 골든] | |
+| E1AtSessionStart | 끔 | E1S: 구간 첫 진입 가능 봉(21:35)에 이미 있는 추세로 E1 (21일 10건 3승 −$2,792) | 켬 |
+| UseEntryPullback / TrendPullbackBand | 켬 / 0 | E2: 중심선 터치 → [MACD 상승 전환 OR 골든] (10/15에 −1배에서) | 1 |
+| PullbackMinSlow | 2 | E2는 S ≥ 2(매도 ≤ −2)일 때만 | 0 |
 | UseEntryOrb / OrbEndTime / OrbMinSlow / OrbMinFast | 켬 / 230000 / 1 / 1 | E3: 장후 23:00 전, 종가가 장전 박스 밖 + S·F ≥ 1. 방향별 OrbMaxEntries번 | 끔 |
 | OrbMaxEntries | 2 | E3를 쓴 뒤 종가가 박스 안으로 돌아오면 다시 열림, 방향별 최대 횟수 | 1 |
 | UseEntrySide / SideBand / SideT2Entry | 켬 / 2 / 켬 | E4: 횡보 중 −2배 터치 → 반전, 또는 MACD 전환 + 크로스 | |
@@ -109,6 +112,7 @@ MNQ는 1포인트가 계약당 2달러다. 30계약이면 1포인트에 60달러
 | SideStopMinAtr / SideStopMaxAtr | 1.0 / 2.0 | 횡보 포지션 손절 거리 범위 |
 | StopMinTicks | 32 | 최소 손절 거리(MNQ 8pt). 장전 ATR이 작을 때 |
 | BreakevenMinR / BreakevenFallbackAtr | 0.5 / 1.5 | 1차 이익 ≥ 손절 거리 × 0.5면 평단, 아니면 1차 체결가 ∓ 1.5 ATR | 0 (항상 평단) |
+| BreakevenAtR | 0.8 | 1차 전이라도 최대 이익 ≥ 손절 거리 × 0.8이면 평단(이익 보호 본절) | 0 / 1.0 |
 | BreakevenBufferTicks / HandleOrderErrors | 8 / 켬 | 손절 이동 안전 거리, 주문 오류 직접 처리 |
 
 ### 5-5. 07 청산 — 추세, 08 청산 — 횡보

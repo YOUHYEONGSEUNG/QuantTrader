@@ -193,7 +193,7 @@ DEFAULTS = dict(
     suspect_max_score=5, suspect_min_evidence=1, suspect_evidence_bars=2, trend_confirm_bars=1, trend_exit_bars=1,
     # v3 (mode=3, docs/v3 지시서 3장). 이동평균은 위의 fast / mid / slow, RSI 폭은 score_rsi_band를 같이 쓴다
     s2_mode=1, slope_bars=5, use_rsi=True, macd_slope_bars=2,
-    trend_start_fast=2, trend_start_slow=2, trend_end_slow=0, suspect_fast=2,
+    trend_start_fast=1, trend_start_slow=1, trend_end_slow=0, suspect_fast=2, direct_reverse=0,
 )
 
 # 설정 문자열의 짧은 이름 → DEFAULTS 키
@@ -205,7 +205,7 @@ ALIASES = {
     "confirm": "trend_confirm_bars", "exitbars": "trend_exit_bars",
     # v3
     "s2": "s2_mode", "slope": "slope_bars", "userrsi": "use_rsi", "mslope": "macd_slope_bars",
-    "tsf": "trend_start_fast", "tss": "trend_start_slow", "tes": "trend_end_slow", "sf": "suspect_fast",
+    "tsf": "trend_start_fast", "tss": "trend_start_slow", "tes": "trend_end_slow", "sf": "suspect_fast", "rev": "direct_reverse",
 }
 
 
@@ -252,12 +252,12 @@ def compute_regime_v3(tb, p):
             if start_dn:
                 trend = -1
             elif S <= p["trend_end_slow"]:
-                trend = 0
+                trend = -1 if p["direct_reverse"] and F <= -2 else 0   # TQ_Regime DirectReverse (2026-10-15)
         elif trend == -1:
             if start_up:
                 trend = 1
             elif S >= -p["trend_end_slow"]:
-                trend = 0
+                trend = 1 if p["direct_reverse"] and F >= 2 else 0
         else:
             if start_up:
                 trend = 1
