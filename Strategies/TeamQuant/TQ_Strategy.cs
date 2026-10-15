@@ -69,6 +69,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 추가 진입 (spec 4-4-1, 사용자 결정 2026-10-15): 1차 익절 뒤 점수 속도가 포지션 방향으로 AddOnMinVel 이상이면 한 번
 		private string			addSig			= "";			// 추가 진입 조각 시그널명 (없으면 "")
 		private int				baseQty;						// 처음 진입 계약 수 (추가 수량 계산용)
+		private bool			earlyEntry;						// 개장 뒤 EarlyWindowMinutes 안에 들어간 추세 진입 (E5 제외, spec 4-4-2)
 		private double			addFillSum;						// 추가분 체결가 합 (손익은 추가분 체결가 기준으로 따로 셈)
 		private int				addFillQty;
 		private int				tpStagesHit;
@@ -294,6 +295,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				TrendTp2R				= 2.5;
 				UseAddOn				= true;
 				ExtendedEntryAtr		= 2.0;
+				// spec 4-4-2 개장 직후 진입 옵션 (기본 끔, 2026-10-15 사용자 결정: 옵션으로)
+				EarlyWindowMinutes		= 5;
+				EarlyFullExitAtTp1		= false;
+				EarlyStopMult			= 1.0;
 				ExtendedQtyPercent		= 50;
 				AddOnMinVel				= 0.3;
 				AddOnPercent			= 50;
@@ -442,6 +447,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
 				+ " | 추세익절=" + (TrendTpMode == 2 ? TrendTp1R.ToString(inv) + "R/" + TrendTp2R.ToString(inv) + "R" : "밴드") + " 추가진입=" + UseAddOn
 					+ "(속도≥" + AddOnMinVel.ToString(inv) + " " + AddOnPercent + "% ~" + AddOnEndTime + ")"
+				+ " 개장직후(" + EarlyWindowMinutes + "분 1차전량=" + EarlyFullExitAtTp1 + " 손절x" + EarlyStopMult.ToString(inv) + ")"
 				+ " 달린진입=" + ExtendedEntryAtr.ToString(inv) + "ATR→" + ExtendedQtyPercent + "%"
 				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
@@ -1236,6 +1242,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			TradeBegin();
 			stopAtr		= atr[0];
+			int sinceOpen	= RelMinutes(ToTime(Time[0])) - RelMinutes(OpenTime);
+			earlyEntry		= IsTrendPos() && entryPath != "E5" && sinceOpen > 0 && sinceOpen <= EarlyWindowMinutes;
 			stopSwing	= d > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];	// 신호 봉 포함 최근 SwingBars봉
 			if (entryPath == "E5")
 				stopSwing = OpenRangeMid();										// spec 4-10: E5 손절 기준 = 개장 범위 중간
@@ -1292,10 +1300,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				{
 					// spec 4-4 v6: 1·2차 익절 = 진입가 ± TrendTp1R / TrendTp2R × 손절 거리 (체결되면 체결가 기준으로 다시 검)
 					double risk = Math.Abs(Close[0] - initialStop);
+					bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;	// spec 4-4-2: 개장 직후 진입은 1차 익절점에서 전량
 					SubmitChunk(prefix + "1", q1, 1, NoBand, Close[0] + d * TrendTp1R * risk);
-					SubmitChunk(prefix + "2", q2, 2, NoBand, Close[0] + d * TrendTp2R * risk);
-					SubmitChunk(prefix + "3", qty - q1 - q2, 3, NoBand, double.NaN);
-					split = q1 + "/" + q2 + "/" + (qty - q1 - q2) + " (익절 " + TrendTp1R.ToString("F2") + "R / " + TrendTp2R.ToString("F2") + "R)";
+					SubmitChunk(prefix + "2", q2, 2, NoBand, Close[0] + d * (allAtTp1 ? TrendTp1R : TrendTp2R) * risk);
+					SubmitChunk(prefix + "3", qty - q1 - q2, 3, NoBand, allAtTp1 ? Close[0] + d * TrendTp1R * risk : double.NaN);
+					split = q1 + "/" + q2 + "/" + (qty - q1 - q2) + (allAtTp1 ? " (개장 직후: 전량 " + TrendTp1R.ToString("F2") + "R)"
+						: " (익절 " + TrendTp1R.ToString("F2") + "R / " + TrendTp2R.ToString("F2") + "R)")
+						+ (earlyEntry && EarlyStopMult > 1 ? " 개장 직후 손절 ×" + EarlyStopMult.ToString("F1") : "");
 				}
 				else
 				{
@@ -1401,6 +1412,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private double CalcStop(double entryPrice)
 		{
 			double dist = path == "E5" ? E5StopDistance(entryPrice) : StopDistance(dir, IsTrendPos(), entryPrice, stopSwing, stopAtr);
+			if (earlyEntry && EarlyStopMult > 1)
+				dist *= EarlyStopMult;	// spec 4-4-2: 개장 직후 흔들림에 바로 맞지 않게 넓힘 (위험 금액 수량이 계약을 줄여 1회 위험은 같음)
 			return Instrument.MasterInstrument.RoundToTickSize(entryPrice - dir * dist);
 		}
 
@@ -1523,11 +1536,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// R 익절(TrendTpMode 2)은 체결가 ± R × (체결가 − 손절) (spec 4-4)
 			if (IsTrendPos() && path != "E5" && TrendTpMode == 2)
 				foreach (string sig in liveSignals)
-					if (chunkStage[sig] == 1 || chunkStage[sig] == 2)
+				{
+					bool allAtTp1 = earlyEntry && EarlyFullExitAtTp1;
+					if (chunkStage[sig] == 1 || chunkStage[sig] == 2 || (allAtTp1 && chunkStage[sig] == 3))
 					{
-						chunkFixed[sig] = avg + dir * (chunkStage[sig] == 1 ? TrendTp1R : TrendTp2R) * Math.Abs(avg - s);
+						double rr = allAtTp1 || chunkStage[sig] == 1 ? TrendTp1R : TrendTp2R;
+						chunkFixed[sig] = avg + dir * rr * Math.Abs(avg - s);
 						SetTarget(sig);
 					}
+				}
 			// E5 익절은 체결가 ± E5TargetR × (체결가 − 손절) (spec 4-10)
 			if (path == "E5")
 				foreach (string sig in liveSignals)
@@ -2024,6 +2041,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tp1FillPrice	= double.NaN;
 			addSig			= "";
 			baseQty			= 0;
+			earlyEntry		= false;
 			addFillSum		= 0;
 			addFillQty		= 0;
 			tpStagesHit		= 0;
@@ -3253,6 +3271,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, 200)]
 		[Display(Name = "[선택] 추가 진입 수량 % (AddOnPercent)", Description = "기본 50. 처음 진입 계약 수 × 이 %", GroupName = "07. 청산 — 추세", Order = 25)]
 		public int AddOnPercent { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 60)]
+		[Display(Name = "[선택] 개장 직후 진입: 분 수 (EarlyWindowMinutes)", Description = "기본 5. 개장 시각(OpenTime) 뒤 이 분 수 안에 신호 봉이 마감된 추세 진입(E5 제외)에 아래 두 옵션을 적용", GroupName = "07. 청산 — 추세", Order = 29)]
+		public int EarlyWindowMinutes { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[선택] 개장 직후 진입: 1차 익절점에서 전량 (EarlyFullExitAtTp1)", Description = "기본 끔. 켜면 개장 직후 진입은 세 조각 모두 1차 익절(1R)에 지정가. 익절 방식 2에서만. 18일 시뮬레이션: 5분 +0.3R +$75(거의 같음), 3·8·10분은 나빠짐. 10월 개장 직후 진입은 모두 1R 전에 손절돼 영향 없음", GroupName = "07. 청산 — 추세", Order = 30)]
+		public bool EarlyFullExitAtTp1 { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1.0, 5.0)]
+		[Display(Name = "[선택] 개장 직후 진입: 손절 배율 (EarlyStopMult)", Description = "기본 1(끔). 1.5면 개장 직후 진입의 손절 거리를 1.5배로 넓히고, 위험 금액 수량이라 계약이 줄어 1회 위험은 같음. 익절 R도 넓어진 거리 기준. 18일 시뮬레이션 1.5: 7월 +20.4 → +20.9R, 10월 +2.5 → +3.7R, 진입 61 → 56건(오래 들고 있어 다음 신호를 못 받음)", GroupName = "07. 청산 — 추세", Order = 31)]
+		public double EarlyStopMult { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0.0, 10.0)]
