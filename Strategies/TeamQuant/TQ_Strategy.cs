@@ -204,6 +204,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private const double RangeFadeStopMaxAtr	= 2.5;
 		private const int RangeFadeMaxHold		= 20;	// 최대 보유 봉 수
 		private const int DayLossQtyPercent		= 50;	// 하루 손실 한도를 넘으면 그 뒤 수량 %
+		private const double Tp1TrailAtr		= 3.0;	// spec 4-4: 1차 익절 뒤 트레일링 = 진입 뒤 최고가 − 이 값 × ATR (본전보다 나을 때부터, 2차 뒤는 TrailAtr)
 		#endregion
 
 		#region 고정값 (v6 정리, 2026-10-15 사용자 결정: 설정창에는 정말 조절할 값만. 값은 정리 전 기본값 그대로, 근거는 spec)
@@ -347,7 +348,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 07 청산 — 추세
 				TrailAtr				= 2.5;
 				// spec 4-4 v6: 추세 익절을 손절 거리(R) 기준으로 (1 = 밴드 +2/+3배, 2 = R). 18일 시뮬레이션 두 달 모두 나음
-				TrendTp1R				= 1.0;
+				TrendTp1R				= 0.5;	// 2026-10-15 사용자 결정 1 → 0.5 (18일 시뮬레이션 합계 +23.0 → +24.5R, 밴드 +13.6R)
 				TrendTp2R				= 2.5;
 				UseAddOn				= true;
 				// spec 4-4-2 개장 직후 진입 옵션 (기본 끔, 2026-10-15 사용자 결정: 옵션으로)
@@ -1780,7 +1781,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			double avg		= AvgPrice();
 			double risk		= double.IsNaN(trStop0) ? double.NaN : Math.Abs(avg - trStop0);
 			double gain		= dir * (tp1Price - avg);
-			if (BreakevenMinR <= 0 || double.IsNaN(risk) || risk <= 0 || gain >= BreakevenMinR * risk)
+			// 1차 익절가는 틱으로 반올림돼 0.5R보다 한 틱 모자랄 수 있음 (TrendTp1R 0.5 = BreakevenMinR): 한 틱 여유
+			if (BreakevenMinR <= 0 || double.IsNaN(risk) || risk <= 0 || gain >= BreakevenMinR * risk - TickSize)
 			{
 				MoveStopTo(avg, "평단", time);
 				return;
@@ -1805,13 +1807,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			trailExtreme = double.IsNaN(trailExtreme) ? (dir > 0 ? High[0] : Low[0])
 				: dir > 0 ? Math.Max(trailExtreme, High[0]) : Math.Min(trailExtreme, Low[0]);
-			if (!IsTrendPos() || !(tp2Done || e5Trail) || TrailAtr <= 0)
+			// 2차 뒤(또는 E5 본전 뒤)는 TrailAtr, 1차 뒤 2차 전은 더 넓게 Tp1TrailAtr (2026-10-15 사용자 결정).
+			// 손절은 유리한 쪽으로만 움직이므로(MoveStopTo) 1차 뒤 본전 자리가 더 가까우면 본전에 있다가, 가격이 더 올라 트레일링 선이 본전을 넘을 때부터 따라감
+			double k = tp2Done || e5Trail ? TrailAtr : tp1Done && path != "E6" ? Tp1TrailAtr : 0;
+			if (!IsTrendPos() || k <= 0)
 				return;
 			double a = atr[0];
 			if (double.IsNaN(a) || a <= 0)
 				return;
 			double before = stopPrice;
-			MoveStopTo(trailExtreme - dir * TrailAtr * a, "트레일링", Time[0]);
+			MoveStopTo(trailExtreme - dir * k * a, "트레일링", Time[0]);
 			if (stopPrice != before)
 				trailUsed = true;
 		}
@@ -2707,7 +2712,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					double.IsNaN(deferredStop) ? "" : string.Format(" → {0:N2} 이동 대기", deferredStop));
 			if (IsTrendPos() && TrailAtr > 0)
 				sb.Append(tp2Done ? string.Format("○ 트레일링: {0} {1:N2} {2} {3} ATR\n", dir > 0 ? "최고가" : "최저가", trailExtreme, dir > 0 ? "−" : "+", TrailAtr)
-					: "  → 2차 뒤 트레일링 " + (dir > 0 ? "최고가 − " : "최저가 + ") + TrailAtr + " ATR\n");
+					: tp1Done ? "○ 1차 뒤 트레일링: " + (dir > 0 ? "최고가 − " : "최저가 + ") + Tp1TrailAtr + " ATR (본전보다 나을 때부터), 2차 뒤 " + TrailAtr + " ATR\n"
+					: "  → 1차 뒤 " + Tp1TrailAtr + " ATR, 2차 뒤 " + TrailAtr + " ATR 트레일링\n");
 			if (!tp1Done)
 				sb.Append("  → 1" + (IsTrendPos() ? "차" : "단계") + " 익절 뒤 평단으로\n");
 
@@ -3062,7 +3068,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0.1, 10.0)]
-		[Display(Name = "[선택] 추세 1차 익절 R (TrendTp1R)", Description = "기본 1. 익절 방식 2에서 1차 익절 = 진입가 ± 이 값 × 손절 거리", GroupName = "03. 익절·손절", Order = 0)]
+		[Display(Name = "[선택] 추세 1차 익절 R (TrendTp1R)", Description = "기본 0.5(2026-10-15 사용자 결정, 그 전 1). 1차 익절 = 진입가 ± 이 값 × 손절 거리. 1차 뒤 손절은 평단, 가격이 더 가면 최고가 − 3 ATR로 따라감. 18일 시뮬레이션 합계: 0.5R +24.5R, 1R +23.0R, 밴드 +13.6R", GroupName = "03. 익절·손절", Order = 0)]
 		public double TrendTp1R { get; set; }
 
 		[NinjaScriptProperty]
