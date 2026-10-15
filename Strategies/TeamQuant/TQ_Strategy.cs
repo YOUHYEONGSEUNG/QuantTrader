@@ -214,6 +214,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 3-4 7레짐 (2026-10-16 사용자 제안): 횡보 / 시작의심 / 추세 / 종료의심 (위·아래)
 		private const double R7EndSuspectC		= 0.1;	// 추세 중 C가 이 값 아래로(또는 속도가 반대로 ScoreVelMin) → 종료의심
 		private const int E1DelayBars			= 3;	// E1 = 추세 확정 뒤 이 봉 수째 진입 봉 (18일: 0분(지금) $41,253, 1분 $46,290, 2분 $43,960, 3분 $55,839, 5분 $41,606)
+		private const int ForceStartTime		= 232000;	// spec 5 최소 진입 강제 채우기: 이 시각 봉부터 종료 청산 전까지
 		private const double Tp1TrailAtr		= 3.0;	// spec 4-4: 1차 익절 뒤 트레일링 = 진입 뒤 최고가 − 이 값 × ATR (본전보다 나을 때부터, 2차 뒤는 TrailAtr)
 		#endregion
 
@@ -346,6 +347,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				UseEntryOpenRange		= true;
 				UseEntryRangeFade		= true;
 				DayLossLimitR			= 1.5;
+				ForceMinEntries			= true;
 				E5RangeMinutes			= 5;
 				E5TargetR				= 2.0;
 				// B1 박스 돌파 (4-9) — v6 기본 켬. 직전 BreakoutBoxBars봉 효율비 ≤ BreakoutMaxEr(박스)일 때 돌파 진입, 느린 점수는 안 봄(4)
@@ -534,18 +536,27 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 
 			List<Candidate> cands = null;
+			bool force = ForceNeeded();
 			if (Position.MarketPosition == MarketPosition.Flat)
 			{
 				ResetTradeState();
 				cands = EvaluateEntries();
-				if (InEntryWindow())
+				if (force)
+					ForceEnter();
+				else if (InEntryWindow())
 					RouteEntry(cands);
 				else
 					ForgetE3Stop();	// 진입 시간 밖: 걸어 둔 E3 스탑은 다시 걸지 않으니 봉 끝에 취소됨
 			}
 			else
 			{
-				if (gapFlattened || pos == Pos.None)
+				if (force && !gapFlattened && pos != Pos.None)
+				{
+					// spec 5: 최소 진입을 채우려고 지금 포지션을 정리 (강제 진입이면 다음 봉에 바로 청산)
+					FlattenRemaining(path == "FORCE" ? "FORCE_EXIT" : "FORCE_PREP",
+						string.Format("최소 진입 {0}/{1}회 채우기", entryCount, MinEntries));
+				}
+				else if (gapFlattened || pos == Pos.None)
 				{
 					// 전량 청산 주문을 낸 뒤에도 포지션이 남아 있으면 다시 낸다 (거부·미체결·수량 어긋남)
 					FlattenLeftover();
@@ -1474,6 +1485,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					riskNote += string.Format(" 달린 뒤 진입(중심선에서 {0:F1} ATR > {1}) → 수량 {2}→{3}", ext, ExtendedEntryAtr, before, qty);
 				}
 			}
+			if (entryPath == "FORCE")
+				qty = 1;	// spec 5 강제 채우기는 1계약
 			baseQty = qty;
 			MlBegin();
 
@@ -1536,11 +1549,28 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				qty, split + riskNote, stopPrice, double.IsNaN(rr) ? "-" : rr.ToString("F2"), RegimeState(), Signed(SlowNow()), Signed(FastNow())));
 		}
 
+		// spec 5 최소 진입 강제 채우기 (2026-10-16 사용자 결정): ForceStartTime 봉부터 종료 청산 전까지 진입 횟수 < MinEntries면
+		// 보유 포지션을 정리하고, 미보유면 점수 방향(0이면 매수)으로 1계약 시장가 진입 → 다음 봉에 청산을 되풀이
+		private bool ForceNeeded()
+		{
+			if (!ForceMinEntries || entryCount >= MinEntries)
+				return false;
+			int rel = RelMinutes(ToTime(Time[0]));
+			return rel >= RelMinutes(ForceStartTime) && rel < RelMinutes(FlattenTime);
+		}
+
+		private void ForceEnter()
+		{
+			int d = contScore < 0 ? -1 : 1;
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 최소 진입 강제 채우기 {2}/{3}회 → {4} 1계약", Time[0], Instrument.FullName, entryCount, MinEntries, DirText(d)));
+			Enter(d > 0 ? Pos.TL : Pos.TS, d, "FORCE", 1, true, double.NaN);
+		}
+
 		// spec 4-4-1 추가 진입: 추세 포지션(E5 제외), 1차 익절 뒤, 점수 속도가 포지션 방향으로 AddOnMinVel 이상이면 처음 수량 × AddOnPercent를 한 번.
 		// 넣기 전에 전체 손절을 평단 이상으로. 추가 조각은 마지막 조각처럼(익절 지정가 없음) 트레일링·기준선·의심·손절로 나감
 		private void TryAddOn()
 		{
-			if (!UseAddOn || !contReady || !IsTrendPos() || path == "E5" || path == "E6" || pos == Pos.None || !tp1Done || addSig.Length > 0)
+			if (!UseAddOn || !contReady || !IsTrendPos() || path == "E5" || path == "E6" || path == "FORCE" || pos == Pos.None || !tp1Done || addSig.Length > 0)
 				return;
 			if (Position.MarketPosition == MarketPosition.Flat || entryFillQty <= 0)
 				return;
@@ -1925,8 +1955,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				ManageBreakoutExits();
 				return;
 			}
-			if (path == "E5")
-				return;	// spec 4-10: 손절·익절 지정가·본전·트레일링·종료 청산만 (공통 처리)
+			if (path == "E5" || path == "FORCE")
+				return;	// spec 4-10: 손절·익절 지정가·본전·트레일링·종료 청산만 (공통 처리). FORCE는 다음 봉에 ForceNeeded가 정리
 			if (path == "E6")
 			{
 				// spec 4-11: 추세 판정·의심으로는 청산하지 않고, RangeFadeMaxHold봉이 지나면 시장가 전량
@@ -3254,6 +3284,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(0.0, 20.0)]
 		[Display(Name = "[안전] 하루 손실 한도 R (DayLossLimitR)", Description = "기본 1.5. 이번 대회 구간에 끝난 거래 손익 합이 −이 값 × 1회 위험 한도(기본 −$3,000) 이하가 되면 그 뒤 진입 수량을 50%로. 진입은 그대로. 0 = 안 씀. 18일 시뮬레이션: 최악의 날 −$6,440 → −$4,498, 합계는 거의 같음", GroupName = "10. 수량·대회 시간", Order = 8)]
 		public double DayLossLimitR { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[안전] 최소 진입 강제 채우기 (ForceMinEntries)", Description = "기본 켬(2026-10-16 사용자 결정). 23:20 봉부터 종료 청산 전까지 이 종목 진입 횟수가 최소 진입 목표보다 적으면, 보유 포지션을 정리하고 1계약 시장가 진입 → 다음 봉 청산을 되풀이해 횟수를 채움. 방향은 점수 C의 부호(0이면 매수). 대회 최소 진입: 합계 5회, 나스닥·골드 각 2회 → 한 종목은 최소 진입 목표를 3으로", GroupName = "10. 수량·대회 시간", Order = 9)]
+		public bool ForceMinEntries { get; set; }
 
 		// ── 11. 지표 계산값 ──
 
