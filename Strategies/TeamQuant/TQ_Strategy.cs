@@ -137,6 +137,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				orbCountShort;
 		private bool			orbArmedLong	= true;			// E3 매수가 열려 있음: 구간 시작 때, 그리고 E3 뒤 종가가 박스 안으로 돌아오면 (OrbMaxEntries, 사용자 결정 2026-10-15)
 		private bool			orbArmedShort	= true;
+		// E5 개장 범위 돌파 (spec 4-10): 개장 시각 봉부터 E5RangeMinutes개 진입 봉의 최고가·최저가
+		private double			orHigh			= double.NaN;
+		private double			orLow			= double.NaN;
+		private bool			orLongUsed;						// 이번 구간 E5 매수를 썼음 (방향별 하루 한 번)
+		private bool			orShortUsed;
+		private bool			e5Trail;						// E5 보유: E5BreakevenR에 닿아 본전으로 옮겼고 이제 트레일링
 		private bool			blockSideLong;					// 횡보 매수 손실 손절 뒤 이번 구간 횡보 매수 금지
 		private bool			blockSideShort;
 		private string			sessionTag		= "";
@@ -228,6 +234,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				OrbMinSlow				= 1;
 				OrbMinFast				= 1;
 				OrbMaxEntries			= 2;
+				// E5 개장 범위 돌파 (spec 4-10, 사용자 결정 2026-10-15): 28일 시뮬레이션 38건 +10.5R, 7월·10월 모두 이익
+				UseEntryOpenRange		= true;
+				E5RangeMinutes			= 5;
+				E5TargetR				= 2.0;
+				E5BreakevenR			= 1.0;
+				E5StopMinAtr			= 1.0;
+				E5StopMaxAtr			= 4.0;
 				// B1 박스 돌파 (4-9) — v6 기본 켬. 직전 BreakoutBoxBars봉 효율비 ≤ BreakoutMaxEr(박스)일 때 돌파 진입, 느린 점수는 안 봄(4)
 				UseBreakoutEntry		= true;
 				BreakoutBars			= 15;
@@ -412,6 +425,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ " 강한의심S=" + SuspectStrongSlow + "(" + SuspectStrongExitPercent + "%) 의심중진입금지=" + BlockEntryWhileSuspect + " 추세진입F필요=" + TrendEntryNeedFast
 				+ " | E1=" + UseEntryTrendStart + "(재가속=" + E1Reaccel + ") E2=" + UseEntryPullback + "(밴드" + TrendPullbackBand + " S" + PullbackMinSlow + ") E3=" + UseEntryOrb
 				+ "(~" + OrbEndTime + " S" + OrbMinSlow + " F" + OrbMinFast + " 최대" + OrbMaxEntries + "번) 손익비=" + EntryMinRR.ToString(inv)
+				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
+					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
 				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast + " |S|≤" + BreakoutMaxAbsSlow
 				+ " 효율비≤" + BreakoutMaxEr.ToString(inv) + "(" + BreakoutBoxBars + "봉) 반대청산=" + BreakoutExitOnOpposite + ")"
 				+ " | E4=" + UseEntrySide + "(밴드" + SideBand + " T2=" + SideT2Entry + ") 횡보필터=" + SideBlockScore + " 횡보재진입금지=" + BlockSideAfterStop
@@ -764,7 +779,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		private string PathName(string p)
 		{
-			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "B1" ? "B1 돌파" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p;
+			return p == "E1" ? "E1 추세 시작" : p == "E1X" ? "E1 반대 추세 청산 뒤" : p == "E1R" ? "E1 추세 재가속" : p == "E1S" ? "E1 구간 첫 봉 추세" : p == "B1" ? "B1 돌파" : p == "E2" ? "E2 추세 눌림" : p == "E3" ? "E3 장전 박스 돌파" : p == "E4" ? "E4 횡보" : p == "E5" ? "E5 개장 범위 돌파" : p;
 		}
 
 		private string StateText(int st)
@@ -830,6 +845,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				orbArmedShort	= true;
 				boxHigh			= double.NaN;
 				boxLow			= double.NaN;
+				orHigh			= double.NaN;
+				orLow			= double.NaN;
+				orLongUsed		= false;
+				orShortUsed		= false;
 				boxStartTime	= Time[0];
 				sessionTag		= Time[0].ToString("yyyyMMdd");
 			}
@@ -842,6 +861,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				{
 					boxHigh	= double.IsNaN(boxHigh) ? High[0] : Math.Max(boxHigh, High[0]);
 					boxLow	= double.IsNaN(boxLow) ? Low[0] : Math.Min(boxLow, Low[0]);
+				}
+				// E5 개장 범위: 개장 시각 봉 ~ 그 뒤 E5RangeMinutes − 1분 봉 (기본 22:30~22:34 봉)
+				int openRel = RelMinutes(OpenTime);
+				if (rel >= openRel && rel <= openRel + E5RangeMinutes - 1)
+				{
+					orHigh	= double.IsNaN(orHigh) ? High[0] : Math.Max(orHigh, High[0]);
+					orLow	= double.IsNaN(orLow) ? Low[0] : Math.Min(orLow, Low[0]);
 				}
 				// E3 다시 열기: 박스가 완성된 뒤 종가가 박스 안(매수는 고가 이하, 매도는 저가 이상)으로 마감하면 (보유 중에도 본다)
 				if (BoxReady())
@@ -856,6 +882,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryCount >= MinEntries ? "" : " (최소 미달)"),
 				TextPosition.TopRight);
 		}
+
+		// E5 개장 범위가 완성됐는지 (범위 마지막 봉이 지났는지)
+		private bool OpenRangeReady()
+		{
+			return !double.IsNaN(orHigh) && InEntryWindow() && RelMinutes(ToTime(Time[0])) > RelMinutes(OpenTime) + E5RangeMinutes - 1;
+		}
+
+		private double OpenRangeMid()	{ return (orHigh + orLow) / 2; }
 
 		// 장전 박스가 완성됐는지 (개장 시각 봉이 지났는지)
 		private bool BoxReady()
@@ -904,7 +938,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 경로 우선순위: E1 > E3 > E2 > E4 (4-2)
 		private static int PathRank(string p)
 		{
-			return p == "E1" ? 0 : p == "E3" ? 1 : p == "B1" ? 2 : p == "E2" ? 3 : 4;	// B1(v4)은 E3 다음
+			return p == "E5" ? -1 : p == "E1" ? 0 : p == "E3" ? 1 : p == "B1" ? 2 : p == "E2" ? 3 : 4;	// E5(v6, 4-10)가 가장 먼저	// B1(v4)은 E3 다음
 		}
 
 		// 진입 경로 4개 × 방향 2개의 후보와 막힌 사유를 만든다. 미보유일 때 매 진입 봉 마감마다
@@ -1041,6 +1075,22 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					list.Add(c);
 				}
 
+				// ── E5 개장 범위 돌파 (4-10) ── 개장 범위가 완성된 뒤 진입 봉 종가가 범위 고가 위(매도는 저가 아래). 방향별 하루 한 번.
+				// 추세 판정·S·F·의심은 보지 않음 (28일 시뮬레이션과 같은 조건)
+				{
+					Candidate c = new Candidate { Path = "E5", Dir = d, QtyPercent = fallback ? MinEntryQtyPercent : 100, Fallback = fallback };
+					double edge	= d > 0 ? orHigh : orLow;
+					bool used	= d > 0 ? orLongUsed : orShortUsed;
+					string rangeTxt = string.Format("개장 {0}분 범위 {1} {2:N2}", E5RangeMinutes, d > 0 ? "고가" : "저가", edge);
+					if (!UseEntryOpenRange)			{ c.Line = "× E5 개장 범위: 꺼짐"; c.Code = "off"; }
+					else if (!OpenRangeReady())		{ c.Line = "  E5 개장 범위: " + (double.IsNaN(orHigh) ? "범위 전" : "범위 기록 중"); c.Code = "-"; }
+					else if (used)					{ c.Line = "  E5 개장 범위: 오늘 " + DirText(d) + " 씀"; c.Code = "used"; }
+					else if (timeBlock != null)		{ c.Line = "× E5 개장 범위: " + timeBlock; c.Code = "blk"; }
+					else if (d * (Close[0] - edge) > 0)	{ c.Ready = true; c.Line = "● E5 개장 범위: 지금 진입 (종가 " + Close[0].ToString("N2") + (d > 0 ? " > " : " < ") + rangeTxt + ")"; c.Code = "go"; }
+					else							{ c.Line = string.Format("○ E5 개장 범위: 종가 {0} {1}", d > 0 ? ">" : "<", rangeTxt); c.Code = "wait"; }
+					list.Add(c);
+				}
+
 				// ── B1 박스 돌파 (4-9) ── 진입 봉 종가가 직전 BreakoutBars봉 고가 위(매도는 저가 아래) AND F ≥ BreakoutMinFast
 				// AND 직전 BreakoutBoxBars봉이 박스(효율비 ≤ BreakoutMaxEr, 1이면 안 봄) AND |S| ≤ BreakoutMaxAbsSlow(4면 안 봄). 추세 판정(+1/0/−1)은 보지 않는다
 				{
@@ -1141,6 +1191,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 			if (best.Path == "E1")
 				e1AfterExitDir = 0;
+			if (best.Path == "E5")
+			{
+				if (best.Dir > 0)	orLongUsed = true;
+				else				orShortUsed = true;
+			}
 			if (best.Path == "B1")
 			{
 				lastBreakoutDir		= best.Dir;
@@ -1163,6 +1218,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			TradeBegin();
 			stopAtr		= atr[0];
 			stopSwing	= d > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];	// 신호 봉 포함 최근 SwingBars봉
+			if (entryPath == "E5")
+				stopSwing = OpenRangeMid();										// spec 4-10: E5 손절 기준 = 개장 범위 중간
 			initialStop	= CalcStop(Close[0]);
 			stopPrice	= initialStop;
 			// 위험 금액 수량 (UseRiskSizing, 사용자 결정 2026-10-15): 계약 = 위험 한도 × 구간 % ÷ (예상 손절 거리 × 계약당 가치).
@@ -1187,7 +1244,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			signalSeq++;
 			string prefix = p.ToString() + signalSeq + ".";
 			string split;
-			if (IsTrendPos())
+			if (entryPath == "E5")
+			{
+				// spec 4-10: 한 조각, 익절 = 진입가 ± E5TargetR × 손절 거리 (체결되면 체결가 기준으로 다시 검)
+				double risk = Math.Abs(Close[0] - initialStop);
+				SubmitChunk(prefix + "1", qty, 1, NoBand, Close[0] + d * E5TargetR * risk);
+				split = qty + " (익절 " + E5TargetR.ToString("F1") + "R, " + E5BreakevenR.ToString("F1") + "R 뒤 본전·트레일링, 개장 범위 "
+					+ orLow.ToString("N2") + "~" + orHigh.ToString("N2") + ")";
+			}
+			else if (IsTrendPos())
 			{
 				int q1 = (qty * TrendTp1Percent) / 100;
 				int q2 = (qty * TrendTp2Percent) / 100;
@@ -1272,8 +1337,17 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		private double CalcStop(double entryPrice)
 		{
-			double dist = StopDistance(dir, IsTrendPos(), entryPrice, stopSwing, stopAtr);
+			double dist = path == "E5" ? E5StopDistance(entryPrice) : StopDistance(dir, IsTrendPos(), entryPrice, stopSwing, stopAtr);
 			return Instrument.MasterInstrument.RoundToTickSize(entryPrice - dir * dist);
+		}
+
+		// spec 4-10 E5 손절 거리: 개장 범위 중간 한 틱 바깥까지, 신호 봉 ATR × [E5StopMinAtr, E5StopMaxAtr]로 자르고 StopMinTicks보다 좁으면 벌림
+		private double E5StopDistance(double entryPrice)
+		{
+			double dist = dir * (entryPrice - stopSwing) + TickSize;
+			if (!double.IsNaN(stopAtr) && stopAtr > 0)
+				dist = Math.Max(E5StopMinAtr * stopAtr, Math.Min(Math.Max(E5StopMinAtr, E5StopMaxAtr) * stopAtr, dist));
+			return Math.Max(dist, StopMinTicks * TickSize);
 		}
 
 		private void SetStopForLive(double price)
@@ -1383,6 +1457,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			trStop0		= s;
 			SetStopForLive(s);
 
+			// E5 익절은 체결가 ± E5TargetR × (체결가 − 손절) (spec 4-10)
+			if (path == "E5")
+				foreach (string sig in liveSignals)
+				{
+					chunkFixed[sig] = avg + dir * E5TargetR * Math.Abs(avg - s);
+					SetTarget(sig);
+				}
 			// 횡보 1단계 익절은 진입가 + dir × SideTp1Atr × 신호 봉 ATR: 체결가 기준으로 다시 건다
 			if (!IsTrendPos())
 				foreach (string sig in liveSignals)
@@ -1418,16 +1499,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// (9일 시뮬레이션: 0.8R이면 지던 4건이 본전, 이기던 1건(+$985)이 잘림, 합계 +$1,192. 큰 이익 거래는 1차 익절이 먼저라 영향 없음)
 		private void ProtectProfitCheck()
 		{
-			if (BreakevenAtR <= 0 || tp1Done || breakevenDone || entryFillQty <= 0 || double.IsNaN(trStop0))
+			bool e5 = path == "E5";
+			double atR = e5 ? E5BreakevenR : BreakevenAtR;	// spec 4-10: E5는 E5BreakevenR에서 본전, 그 뒤 트레일링
+			if (atR <= 0 || tp1Done || (breakevenDone && !e5) || e5Trail || entryFillQty <= 0 || double.IsNaN(trStop0))
 				return;
 			double avg	= AvgPrice();
 			double risk	= Math.Abs(avg - trStop0);
-			if (risk <= 0 || trMfe < BreakevenAtR * risk)
+			if (risk <= 0 || trMfe < atR * risk)
 				return;
 			if (lastStopLabel != "이익 보호 본절")
-				Out(string.Format("[{0}][{1}][TQ_Strategy] 최대 이익 {2:F1}pt ≥ 손절 거리 {3:F1}pt × {4} → 손절을 평단으로 (이익 보호)",
-					Time[0], Instrument.FullName, trMfe, risk, BreakevenAtR));
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 최대 이익 {2:F1}pt ≥ 손절 거리 {3:F1}pt × {4} → 손절을 평단으로 (이익 보호{5})",
+					Time[0], Instrument.FullName, trMfe, risk, atR, e5 ? ", E5 트레일링 시작" : ""));
 			MoveStopTo(avg, "이익 보호 본절", Time[0]);
+			if (e5)
+				e5Trail = true;
 		}
 
 		// 개장 보호 (ProtectBeforeOpen): 개장 직전 봉(OpenTime − 1분) 마감에 이익이 ATR × ProtectAtr 이상이면 손절을 평단으로
@@ -1548,7 +1633,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			trailExtreme = double.IsNaN(trailExtreme) ? (dir > 0 ? High[0] : Low[0])
 				: dir > 0 ? Math.Max(trailExtreme, High[0]) : Math.Min(trailExtreme, Low[0]);
-			if (!IsTrendPos() || !tp2Done || TrailAtr <= 0)
+			if (!IsTrendPos() || !(tp2Done || e5Trail) || TrailAtr <= 0)
 				return;
 			double a = atr[0];
 			if (double.IsNaN(a) || a <= 0)
@@ -1573,6 +1658,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				ManageBreakoutExits();
 				return;
 			}
+			if (path == "E5")
+				return;	// spec 4-10: 손절·익절 지정가·본전·트레일링·종료 청산만 (공통 처리)
 			int st = RegimeState();
 			int xs = ExitState();	// spec 3-3: 추세 청산은 청산용 판정으로 (RegimeMode 1이면 st와 같음)
 			if (xs == dir)
@@ -1854,6 +1941,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			entryFillQty	= 0;
 			gapFlattened	= false;
 			breakevenDone	= false;
+			e5Trail			= false;
 			stopNote		= "";
 			deferredStop	= double.NaN;
 			lastStopTarget	= double.NaN;
@@ -2362,6 +2450,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				sb.Append("  의심 중 (" + (sus < 0 ? "하락의심" : "상승의심") + ")\n");
 			string box = double.IsNaN(boxHigh) ? "" : string.Format(" · 장전 박스 {0:N2} ~ {1:N2}{2}", boxLow, boxHigh, BoxReady() ? "" : " (기록 중)");
 			sb.Append(ZoneText(z) + (z == Zone.Pre ? " (수량 " + PreOpenQtyPercent + "%)" : "") + box + "\n");
+			if (UseEntryOpenRange && !double.IsNaN(orHigh))
+				sb.AppendFormat("개장 {0}분 범위: {1:N2} ~ {2:N2}{3}\n", E5RangeMinutes, orLow, orHigh, OpenRangeReady() ? "" : " (기록 중)");
 			if (UseBreakoutEntry)
 				sb.AppendFormat("돌파 범위 ({0}분): {1:N2} ~ {2:N2}{3}\n", BreakoutBars, rangeLow[1], rangeHigh[1],
 					lastBreakoutDir == 0 ? "" : string.Format(" · 마지막 돌파 {0} {1:HH:mm}", lastBreakoutDir > 0 ? "▲" : "▼", lastBreakoutTime));
@@ -2461,6 +2551,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			sb.Section("청산", ToneExit);
 			if (pos == Pos.None)
 				sb.Append("● 청산 주문 냄, 체결 대기\n");
+			else if (path == "E5")
+			{
+				sb.AppendFormat("○ 익절 {0:F1}R 지정가, 최대 이익 {1:F1}R이면 본전 → 트레일링 {2} ATR{3}\n", E5TargetR, E5BreakevenR, TrailAtr, e5Trail ? " (트레일링 중)" : "");
+				sb.Append("  추세 판정·의심으로는 청산하지 않음\n");
+			}
 			else if (path == "B1")
 			{
 				if (BreakoutExitOnOpposite)
@@ -2830,6 +2925,37 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, 10)]
 		[Display(Name = "[선택] E3 방향별 최대 횟수 (OrbMaxEntries)", Description = "기본 2(2026-10-15 사용자 결정, 그 전에는 1). 한 번 쓰면 진입 봉 종가가 박스 안(매수는 박스 고가 이하, 매도는 저가 이상)으로 돌아온 뒤에야 다시 돌파를 받음. 1 = 지시서 원래 규칙", GroupName = "03. 진입 — 추세", Order = 7)]
 		public int OrbMaxEntries { get; set; }
+
+		// ── E5 개장 범위 돌파 (v6, 4-10) ──
+		[NinjaScriptProperty]
+		[RefreshProperties(RefreshProperties.All)]
+		[Display(Name = "[설계] E5 개장 범위 돌파 진입 (UseEntryOpenRange)", Description = "기본 켬(v6, 2026-10-15 사용자 결정). 개장 시각(OpenTime) 봉부터 N분 동안의 고가·저가를 범위로 잡고, 그 뒤 진입 봉 종가가 범위를 벗어나면 그 방향으로 진입. 방향별 하루 한 번. 손절 = 범위 중간, 익절 = 목표 R, 본전 R에 닿으면 본전 → 트레일링. 추세 판정·S·F는 보지 않음. 28일(7~10월) 시뮬레이션 38건 +10.5R, 하루 최악 −2R", GroupName = "03. 진입 — 추세", Order = 30)]
+		public bool UseEntryOpenRange { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 30)]
+		[Display(Name = "[선택] E5 개장 범위 분 수 (E5RangeMinutes)", Description = "기본 5(22:30~22:34 봉). 시뮬레이션: 5·7분 +10.5·+10.5R(목표 2R), 3분 +5.9R, 10분 +4.6R, 15분 −0.5R", GroupName = "03. 진입 — 추세", Order = 31)]
+		public int E5RangeMinutes { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.5, 10.0)]
+		[Display(Name = "[선택] E5 익절 목표 R (E5TargetR)", Description = "기본 2. 익절 지정가 = 진입가 ± 이 값 × 손절 거리. 5분 범위에서 1.5 / 2 / 2.5 / 3R = +8.1 / +10.5 / +10.1 / +7.9R", GroupName = "03. 진입 — 추세", Order = 32)]
+		public double E5TargetR { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, 10.0)]
+		[Display(Name = "[선택] E5 본전 이동 R (E5BreakevenR)", Description = "기본 1. 진입 뒤 최대 이익이 손절 거리 × 이 값에 닿으면 손절을 평단으로 옮기고, 그 뒤 진입 뒤 최고가(매도는 최저가) − 트레일링 ATR 배수(TrailAtr) × ATR로 따라감", GroupName = "03. 진입 — 추세", Order = 33)]
+		public double E5BreakevenR { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, 10.0)]
+		[Display(Name = "[설계] E5 손절 ATR 최소 (E5StopMinAtr)", Description = "기본 1. 범위 중간까지 거리가 신호 봉 ATR × 이 값보다 짧으면 벌림", GroupName = "03. 진입 — 추세", Order = 34)]
+		public double E5StopMinAtr { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, 10.0)]
+		[Display(Name = "[설계] E5 손절 ATR 최대 (E5StopMaxAtr)", Description = "기본 4. 범위 중간까지 거리가 신호 봉 ATR × 이 값보다 길면 줄임", GroupName = "03. 진입 — 추세", Order = 35)]
+		public double E5StopMaxAtr { get; set; }
 
 		// ── B1 돌파 (v4, 4-9) ── 03 묶음 맨 위쪽 순서(Order 20~)로 둔다
 		[NinjaScriptProperty]
@@ -3362,7 +3488,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		internal static readonly HashSet<string> CoreSettings = new HashSet<string>
 		{
 			"PresetApplyDefaults", "PresetStatus", "ShowAdvanced",
-			"UseEntryTrendStart", "UseEntryPullback", "UseEntryOrb", "UseEntrySide", "UseBreakoutEntry",
+			"UseEntryTrendStart", "UseEntryPullback", "UseEntryOrb", "UseEntrySide", "UseBreakoutEntry", "UseEntryOpenRange",
 			"EntryQuantity", "UseRiskSizing", "RiskPerTrade", "MinEntries", "ContestStartTime", "EntryEndTime", "FlattenTime",
 			"ShowStatus"
 		};
@@ -3395,6 +3521,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				locked.Add("E1Reaccel");
 			if (BreakevenMinR <= 0)			locked.Add("BreakevenFallbackAtr");
 			if (!UseRiskSizing)				locked.Add("RiskPerTrade");
+			if (!UseEntryOpenRange)
+				foreach (string name in new[] { "E5RangeMinutes", "E5TargetR", "E5BreakevenR", "E5StopMinAtr", "E5StopMaxAtr" })
+					locked.Add(name);
 			if (!UseBreakoutEntry)
 				foreach (string name in new[] { "BreakoutBars", "BreakoutMinFast", "BreakoutMaxAbsSlow", "BreakoutExitOnOpposite", "BreakoutBoxBars", "BreakoutMaxEr" })
 					locked.Add(name);
