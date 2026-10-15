@@ -204,6 +204,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private const double RangeFadeStopMaxAtr	= 2.5;
 		private const int RangeFadeMaxHold		= 20;	// 최대 보유 봉 수
 		private const int DayLossQtyPercent		= 50;	// 하루 손실 한도를 넘으면 그 뒤 수량 %
+		private const int E5EndTime				= 225000;	// spec 4-10: E5는 이 시각 봉 전까지 (28일: 22:35~44 26건 +10.2R, 22:45 뒤 12건 +0.3R)
+		private const int NormalEntryEndTime	= 230000;	// spec 4-7: 이 시각 봉부터는 최소 진입 보장 진입만 (18일: 23:00~23:15 B1·E6 6건 −5.6R)
 		private const double Tp1TrailAtr		= 3.0;	// spec 4-4: 1차 익절 뒤 트레일링 = 진입 뒤 최고가 − 이 값 × ATR (본전보다 나을 때부터, 2차 뒤는 TrailAtr)
 		#endregion
 
@@ -467,7 +469,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ " 달린진입=" + ExtendedEntryAtr.ToString(inv) + "ATR→" + ExtendedQtyPercent + "%"
 				+ " | E6박스되돌림=" + UseEntryRangeFade + "(효율비≤" + RangeFadeMaxEr.ToString(inv) + " " + RangeFadeBars + "봉 " + RangeFadeTargetR.ToString(inv) + "R " + RangeFadeMaxHold + "분)"
 				+ " 하루손실한도=" + DayLossLimitR.ToString(inv) + "R→" + DayLossQtyPercent + "%"
-				+ " | E5개장범위=" + UseEntryOpenRange + "(" + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
+				+ " 일반진입마감=" + NormalEntryEndTime
+				+ " | E5개장범위=" + UseEntryOpenRange + "(~" + E5EndTime + " " + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
 				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast
 				+ " 효율비≤" + BreakoutMaxEr.ToString(inv) + "(" + BreakoutBoxBars + "봉) 반대청산=" + BreakoutExitOnOpposite + ")"
@@ -1025,6 +1028,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 시간대 공통 사유
 				string timeBlock = z == Zone.Out ? "진입 시간 아님" : z == Zone.News ? "지표 발표 진입 금지 (" + NewsBlockMinutes + "분)"
 					: z == Zone.OpenBlock ? "개장 전후 진입 금지" : null;
+				// spec 4-7 v6: 23:00 봉부터는 최소 진입 보장(진입 횟수 < MinEntries)일 때만 새 진입 (개장 직후 움직임이 끝난 뒤의 돌파·되돌림은 졌음)
+				if (timeBlock == null && !fallback && RelMinutes(ToTime(Time[0])) >= RelMinutes(NormalEntryEndTime))
+					timeBlock = TimeText(NormalEntryEndTime) + " 뒤에는 최소 진입 보장만";
 				// 의심 중에는 그 추세 방향 신규 진입 안 함 (가격 확인 뒤에만 막는 완화는 10/15에 넣었다가 손실로 지웠다: 의심 중 E2 8건 −$9,997)
 				string suspectBlock = BlockEntryWhileSuspect && st == d && suspectActive == -d ? "의심 중이라 추세 방향 신규 진입 안 함" : null;
 				// 추세 진입(E1·E2·E3)은 빠른 점수가 반대면 안 함 (TrendEntryNeedFast, 사용자 결정 2026-10-15):
@@ -1142,6 +1148,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					string rangeTxt = string.Format("개장 {0}분 범위 {1} {2:N2}", E5RangeMinutes, d > 0 ? "고가" : "저가", edge);
 					if (!UseEntryOpenRange)			{ c.Line = "× E5 개장 범위: 꺼짐"; c.Code = "off"; }
 					else if (!OpenRangeReady())		{ c.Line = "  E5 개장 범위: " + (double.IsNaN(orHigh) ? "범위 전" : "범위 기록 중"); c.Code = "-"; }
+					else if (!fallback && RelMinutes(ToTime(Time[0])) >= RelMinutes(E5EndTime))	{ c.Line = "  E5 개장 범위: " + TimeText(E5EndTime) + " 이후라 안 함"; c.Code = "late"; }
 					else if (used)					{ c.Line = "  E5 개장 범위: 오늘 " + DirText(d) + " 씀"; c.Code = "used"; }
 					else if (timeBlock != null)		{ c.Line = "× E5 개장 범위: " + timeBlock; c.Code = "blk"; }
 					else if (d * (Close[0] - edge) > 0)	{ c.Ready = true; c.Line = "● E5 개장 범위: 지금 진입 (종가 " + Close[0].ToString("N2") + (d > 0 ? " > " : " < ") + rangeTxt + ")"; c.Code = "go"; }
