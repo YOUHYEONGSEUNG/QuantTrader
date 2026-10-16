@@ -13,7 +13,7 @@ paths:
 - 진입 경로는 이름(E1~E4, v4 브랜치는 B1 돌파 추가)을 붙여 로그·상태 상자·학습 데이터에 남긴다. 청산은 고정 사유 코드(spec v3 6장)로 남긴다. 새 사유를 만들면 spec과 backtest-guide 9장에 같이 적는다.
 
 ## 데이터
-- Configure에서 `AddDataSeries(BarsPeriodType.Minute, 10)` → BarsArray[1], `AddDataSeries(BarsPeriodType.Minute, 3)` → BarsArray[2]. 추세는 `TQ_Regime(BarsArray[regimeBip], ...)` (`RegimeBarMinutes` 10이면 1, 아니면 2).
+- Configure에서 `AddDataSeries(BarsPeriodType.Minute, 3)` → BarsArray[1](`regimeBip` = 1, v6 정리에서 10분봉을 뺐음). 추세는 `TQ_Regime(BarsArray[regimeBip], ...)`.
 - CurrentBars[0], CurrentBars[regimeBip] 가드를 두고, `regime.Regime[0]`이 NaN이면 아무것도 하지 않는다.
 - `AddDataSeries(BarsPeriodType.Tick, 1)` → BarsArray[2](`tickBip`, v6 2026-10-16): `TickExits()`에서 현재가 청산(손절 안전장치, B1 반대 돌파)만 한다. 여기서 쓰는 1분봉 값은 직전 마감 때 필드에 담아 둔 것(`tk…`). 주문은 BIP 0으로.
 - 진입·청산 판단과 주문은 `BarsInProgress == 0`(진입 봉)에서만 한다(현재가 청산 예외). 추세 봉 마감 때는 로그만 남긴다(1분 지연).
