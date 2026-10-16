@@ -571,6 +571,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					// 전량 청산 주문을 낸 뒤에도 포지션이 남아 있으면 다시 낸다 (거부·미체결·수량 어긋남)
 					FlattenLeftover();
 				}
+				else if (!double.IsNaN(stopPrice) && Position.MarketPosition != MarketPosition.Flat && dir * (Close[0] - stopPrice) < 0)
+				{
+					// spec 4-3 안전장치: 종가가 이미 손절가를 넘었는데 포지션이 남음 = 손절 주문 수량이 보유 수량보다 적었음.
+					// 7/24 22:35 E5 16계약이 4 + 12로 나뉘어 체결되고 손절은 12계약만 나가, 4계약이 손절 없이 23:27까지 남았음 (−1.57R)
+					FlattenRemaining(breakevenDone ? "BE_STOP" : "STOP", string.Format("종가 {0}가 손절가 {1}를 넘었는데 {2}계약 남음", Close[0], stopPrice, Position.Quantity));
+				}
 				else
 				{
 					RetryDeferredStop();
