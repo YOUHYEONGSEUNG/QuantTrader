@@ -33,7 +33,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private TQ_Signals		signals;	// 진입 봉 신호
 		private ATR				atr;		// 진입 봉 ATR (손절·익절·트레일링 거리)
 		private int				regimeBip	= 1;	// 추세를 판단하는 시리즈 번호: 3분봉 (BarsArray[1])
-		private const int		tickBip		= 2;	// 1틱 시리즈 (BarsArray[2]): 현재가 청산만 본다 (spec 4-3 손절 안전장치, 4-9 B1 반대 돌파)
+		private double			tkLastPx	= double.NaN;	// 현재가 청산: 마지막으로 본 체결가 (같은 가격이면 다시 계산 안 함)
 		private double			tkSmaFast	= double.NaN, tkAtr = double.NaN, tkMacdSl = double.NaN;	// 현재가 F 계산용: 직전 1분봉 마감 때 값
 		private double			tkEdgeLow	= double.NaN, tkEdgeHigh = double.NaN;	// 현재가 반대 돌파 기준: 마감된 직전 BreakoutBars봉 최저·최고
 		private int				tickOppExitBar	= -10;	// 현재가 반대 돌파로 청산한 때의 CurrentBars[0] (그 봉이 마감될 때 새 진입 안 함)
@@ -406,8 +406,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			{
 				// 추세 봉 = 3분봉 → BarsArray[1] (v6 정리에서 10분봉 선택을 뺐음)
 				AddDataSeries(BarsPeriodType.Minute, 3);
-				// 1틱 → BarsArray[2]: 봉 마감을 기다리지 않는 청산(현재가)용. 진입·판정은 그대로 1분봉 마감 (2026-10-16 사용자 결정)
-				AddDataSeries(BarsPeriodType.Tick, 1);
 
 				// 주문 오류를 NinjaTrader 기본 동작(포지션을 닫고 전략 종료)에 맡기지 않고 OnOrderUpdate에서 직접 처리한다 (SetDefaults·Configure에서만 정할 수 있음)
 				if (HandleOrderErrors)
@@ -530,11 +528,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (BarsInProgress == regimeBip)
 			{
 				LogRegimeBar();
-				return;
-			}
-			if (BarsInProgress == tickBip)
-			{
-				TickExits();
 				return;
 			}
 			if (BarsInProgress != 0)
@@ -2157,12 +2150,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					dir > 0 ? "<" : ">", TrendLastExitMa == 1 ? "중기선" : "단기선", ma));
 		}
 
-		// 현재가 청산 (1틱 시리즈, 2026-10-16 사용자 결정: 봉 마감을 기다리지 말고 현재가로 바로)
-		private void TickExits()
+		// 현재가 청산 (2026-10-16 사용자 결정: 봉 마감을 기다리지 말고 현재가로 바로). 실시간·Playback에서 체결가가 바뀔 때마다.
+		// 1틱 데이터 시리즈로 했더니 불러온 며칠 치 틱을 전부 처리해 Playback 이동이 멈춘 듯 느려져서, 과거 데이터에는 불리지 않는 OnMarketData로 바꿈
+		protected override void OnMarketData(MarketDataEventArgs e)
 		{
-			if (pos == Pos.None || gapFlattened || Position.MarketPosition == MarketPosition.Flat || CurrentBars[tickBip] < 0)
+			if (e.MarketDataType != MarketDataType.Last || State != State.Realtime || CurrentBars[0] < minBars0 || e.Price == tkLastPx)
 				return;
-			double px = Closes[tickBip][0];
+			tkLastPx = e.Price;
+			TickExits(e.Price);
+		}
+
+		private void TickExits(double px)
+		{
+			if (pos == Pos.None || gapFlattened || Position.MarketPosition == MarketPosition.Flat)
+				return;
 			// spec 4-3 손절 안전장치: 현재가가 손절가를 BreakevenBufferTicks 넘게 지났는데 포지션이 남음 = 손절 주문 수량이 모자람 (7/24 E5).
 			// 손절 스탑은 닿는 순간 체결되므로 여유를 두어 정상 체결과 겹치지 않게 함
 			if (!double.IsNaN(stopPrice) && dir * (stopPrice - px) >= Math.Max(1, BreakevenBufferTicks) * TickSize)
@@ -2775,6 +2776,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 추세 봉 마감 줄 (채점기 --validate가 읽는 형식: "N분봉 마감 추세=… S=… F=… (…) … 종가=… 이평=… MACD선=… RSI=…")
 		private void LogRegimeBar()
 		{
+			if (State == State.Historical)
+				return;	// LogEntryBar와 같음
 			int st = RawRegimeState();
 			int ev = regime.SuspectEvent[0];
 			int ts = regime.TrendStart[0];
@@ -2788,6 +2791,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 진입 봉 마감 줄: 추세·점수·의심·구간·후보 경로별 상태·보유 상태·시고저종 (7장)
 		private void LogEntryBar(List<Candidate> cands)
 		{
+			if (State == State.Historical)
+				return;	// 매 봉 줄은 실시간만 (과거 며칠 치를 Output 창에 찍으면 시작·Playback 이동이 느려짐. 로그 파일은 원래 실시간만)
 			string cand = "";
 			if (cands != null)
 				foreach (Candidate c in cands)

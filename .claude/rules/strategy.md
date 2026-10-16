@@ -15,7 +15,8 @@ paths:
 ## 데이터
 - Configure에서 `AddDataSeries(BarsPeriodType.Minute, 3)` → BarsArray[1](`regimeBip` = 1, v6 정리에서 10분봉을 뺐음). 추세는 `TQ_Regime(BarsArray[regimeBip], ...)`.
 - CurrentBars[0], CurrentBars[regimeBip] 가드를 두고, `regime.Regime[0]`이 NaN이면 아무것도 하지 않는다.
-- `AddDataSeries(BarsPeriodType.Tick, 1)` → BarsArray[2](`tickBip`, v6 2026-10-16): `TickExits()`에서 현재가 청산(손절 안전장치, B1 반대 돌파)만 한다. 여기서 쓰는 1분봉 값은 직전 마감 때 필드에 담아 둔 것(`tk…`). 주문은 BIP 0으로.
+- 현재가 청산(손절 안전장치, B1 반대 돌파)은 `OnMarketData`(Last, 실시간만) → `TickExits(px)`. 여기서 쓰는 1분봉 값은 직전 마감 때 필드에 담아 둔 것(`tk…`). 주문은 BIP 0으로. **1틱 데이터 시리즈는 쓰지 않는다:** 불러온 며칠 치 틱을 전부 처리해 Playback 이동이 멈춘 듯 느려졌음(2026-10-16).
+- 과거 데이터(`State.Historical`)에서는 매 봉 로그 줄을 찍지 않는다(Output 창이 느려짐).
 - 진입·청산 판단과 주문은 `BarsInProgress == 0`(진입 봉)에서만 한다(현재가 청산 예외). 추세 봉 마감 때는 로그만 남긴다(1분 지연).
 - 추세 봉의 이벤트(`TrendStart`, `SuspectEvent`)는 새 추세 봉 값을 처음 본 진입 봉에서만 쓴다 (`ObserveRegime`, `trendStartNow`·`suspectEventNow`).
 
