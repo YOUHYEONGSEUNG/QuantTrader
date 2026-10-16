@@ -137,7 +137,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				contExitState;
 		private int				r7;								// 7레짐: 0 횡보, ±1 시작의심, ±2 추세, ±3 종료의심 (부호 = 방향)
 		private int				r7Since			= -1;			// 추세(±2)가 된 진입 봉 번호 (종료의심 동안에도 이어 셈)
-		private int				r7Age			= -1;			// 추세 확정 뒤 지난 진입 봉 수 (추세·종료의심일 때만, 아니면 −1)					// 청산용 판정: 속도 시작 없음, 끝 = C ≤ ScoreExitOff (TREND_END·OPP_TREND)
+		private int				r7Age			= -1;
+		private int				r7Warn;							// 전환의심: 추세·눌림 중 반대 방향 빠른 출발이면 그 반대 방향(±1), 아니면 0 (spec 3-4)
+		private bool			warnDone;						// 이 포지션에서 전환의심 일부청산을 했음			// 추세 확정 뒤 지난 진입 봉 수 (추세·종료의심일 때만, 아니면 −1)					// 청산용 판정: 속도 시작 없음, 끝 = C ≤ ScoreExitOff (TREND_END·OPP_TREND)
 		private int				contSuspect;					// 의심 중 방향 (−1 하락의심, +1 상승의심)
 		private int				contFPrev;						// 직전 1분봉의 F(정수 환산)
 		private bool			contReady;
@@ -569,6 +571,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					UpdateTargets();
 					if (IsTrendPos())	ManageTrendExits();
 					else				ManageSideExits();
+					WarnCheck();
 					TryAddOn();
 				}
 			}
@@ -622,7 +625,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		#region 추세 봉 관찰과 공통 헬퍼
 		// 직전에 마감된 추세 봉의 추세: +1 상승, 0 횡보, −1 하락
-		private int RegimeState()	{ return contReady ? contState : 0; }
+		// spec 3-4: 진입 판정 = 7레짐의 추세·눌림 방향 (그 전에는 점수+속도 빠른 판정 contState). 시작의심·전환의심·횡보는 0
+		private int RegimeState()	{ return contReady ? R7TrendDir() : 0; }
 
 		// TQ_Regime(v3)의 판정 그대로 (추세 봉 마감 줄과 채점기 --validate는 항상 이 값)
 		private int RawRegimeState()
@@ -741,12 +745,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			int f = FastNow();
 			if (f <= -SuspectFast && contFPrev > -SuspectFast)		fastCrossNow = -1;
 			else if (f >= SuspectFast && contFPrev < SuspectFast)	fastCrossNow = 1;
-			if (contState != 0 && fastCrossNow == -contState)
+			int stR = R7TrendDir();	// spec 3-4: 의심 이벤트도 7레짐 방향 기준
+			if (stR != 0 && fastCrossNow == -stR)
 			{
-				suspectEventNow	= -contState;
-				contSuspect		= -contState;
+				suspectEventNow	= -stR;
+				contSuspect		= -stR;
 			}
-			else if (contSuspect != 0 && contState * f >= 0)
+			else if (contSuspect != 0 && stR * f >= 0)
 				contSuspect = 0;
 			contFPrev = f;
 			Observe7Regime();
@@ -795,6 +800,13 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			r7Age = r7Since >= 0 ? CurrentBars[0] - r7Since : -1;
 			if (r7 != prev)
 				Out(string.Format("[{0}][{1}][TQ_Strategy] 7레짐 {2} → {3}  C={4:F3} 속도={5:F3}", Time[0], Instrument.FullName, R7Text(prev), R7Text(r7), C, V));
+			// (전환의심은 아래에서 r7 방향 기준으로 다시 계산)
+			// spec 3-4 전환의심: 추세·눌림 중 C가 반대쪽(0 넘음)이고 속도가 반대로 ScoreVelMin 이상 = 반대 방향 빠른 출발.
+			// 18일: 이때 30분 뒤 원래 방향 −1.44 ATR(반대 2 ATR 먼저 56%), 그냥 약해진 눌림은 +0.94 ATR(원래 방향 먼저 61%)
+			int d7 = R7TrendDir(), prevWarn = r7Warn;
+			r7Warn = d7 != 0 && d7 * C <= 0 && d7 * V <= -ScoreVelMin ? -d7 : 0;
+			if (r7Warn != prevWarn && r7Warn != 0)
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 전환의심: {2}  C={3:F3} 속도={4:F3}", Time[0], Instrument.FullName, R7Display(), C, V));
 			if (r7Age == E1DelayBars)
 			{
 				int dir7 = r7 > 0 ? 1 : -1;
@@ -810,15 +822,23 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string dir = v > 0 ? "상승" : "하락";
 			switch (Math.Abs(v))
 			{
-				case 1:	return dir + "시작의심";
+				case 1:	return dir + " 시작의심";
 				case 2:	return dir + "추세";
-				case 3:	return dir + "종료의심";
+				case 3:	return dir + " 눌림";
 				default:	return "횡보";
 			}
 		}
 
-		// 7레짐 방향: 추세·종료의심일 때만 ±1 (E1 추세 시작에 씀)
+		// 7레짐 방향: 추세·눌림일 때만 ±1 (spec 3-4: 진입 판정 RegimeState와 E1이 이 값을 씀)
 		private int R7TrendDir()	{ return Math.Abs(r7) == 2 || Math.Abs(r7) == 3 ? (r7 > 0 ? 1 : -1) : 0; }
+
+		// 화면·로그용 7레짐 이름: 추세·눌림 중 전환의심이면 '하락 전환의심'(상승 중) / '상승 전환의심'(하락 중)
+		private string R7Display()
+		{
+			if (r7Warn != 0)
+				return (r7Warn > 0 ? "상승" : "하락") + " 전환의심 (" + R7Text(r7) + " 중)";
+			return R7Text(r7);
+		}
 
 		// 진입 봉에서 새 추세 봉 값을 처음 볼 때 그 봉의 추세 시작·의심 이벤트를 꺼낸다 (그 진입 봉에서만 0이 아님)
 		private void ObserveRegime()
@@ -1117,6 +1137,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 시간대 공통 사유
 				string timeBlock = z == Zone.Out ? "진입 시간 아님" : z == Zone.News ? "지표 발표 진입 금지 (" + NewsBlockMinutes + "분)"
 					: z == Zone.OpenBlock ? "개장 전후 진입 금지" : null;
+				// spec 3-4: 전환의심 중에는 원래 추세 방향 새 진입 안 함 (모든 경로)
+				if (timeBlock == null && r7Warn == -d)
+					timeBlock = "전환의심 중 (" + R7Display() + ")";
 				// spec 4-7 v6: 23:00 봉부터는 최소 진입 보장(진입 횟수 < MinEntries)일 때만 새 진입 (개장 직후 움직임이 끝난 뒤의 돌파·되돌림은 졌음)
 				if (timeBlock == null && !fallback && RelMinutes(ToTime(Time[0])) >= RelMinutes(NormalEntryEndTime))
 					timeBlock = TimeText(NormalEntryEndTime) + " 뒤에는 최소 진입 보장만";
@@ -1127,6 +1150,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				string fastBlock = TrendEntryNeedFast && d * F < 0 ? "빠른 점수 F가 반대 (" + Signed(F) + ")" : null;
 				if (suspectBlock == null)
 					suspectBlock = fastBlock;
+				if (suspectBlock == null && r7Warn == -d)
+					suspectBlock = "전환의심 중 (" + R7Display() + ")";
 				// E1이 열리는 경우: 추세 시작 / 반대 추세 청산 뒤 / 재가속 (구간 첫 봉 추세 E1S는 21일 10건 3승 −$2,792로 지웠다)
 				string e1Kind		= trendStartNow == d ? "추세 시작"
 					: e1AfterExitDir == d && CurrentBars[0] - e1AfterExitBar <= E1AfterExitBars ? "반대 추세 청산 뒤"
@@ -1547,6 +1572,29 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2} {3} 경로={4} 구간={5}{6} 수량={7} ({8}) 손절={9:F2} 손익비={10} 추세={11} S={12} F={13}",
 				Time[0], Instrument.FullName, PosName(p), DirText(d), entryPath + (stopEntry ? " 스탑 주문 " + refPx.ToString("N2") : ""), session, fallback ? " 최소진입보장" : "",
 				qty, split + riskNote, stopPrice, double.IsNaN(rr) ? "-" : rr.ToString("F2"), RegimeState(), Signed(SlowNow()), Signed(FastNow())));
+		}
+
+		// spec 3-4: 보유 방향의 반대로 전환의심이 뜨면 포지션당 한 번, 남은 수량의 50%를 먼 조각부터 청산하고 이익 중이면 손절을 평단으로
+		private void WarnCheck()
+		{
+			if (warnDone || pos == Pos.None || path == "FORCE" || r7Warn != -dir || Position.MarketPosition == MarketPosition.Flat)
+				return;
+			warnDone = true;
+			int remaining = 0;
+			foreach (string sig in liveSignals)
+				remaining += Math.Max(0, ChunkLeft(sig));
+			int want = (int)Math.Floor(remaining * 0.5);
+			string why = string.Format("{0} → 남은 {1}계약의 50%", R7Display(), remaining);
+			if (want >= remaining)
+			{
+				FlattenRemaining("WARN", why);
+				return;
+			}
+			if (want > 0)
+				ExitFarChunks(want, "WARN", why);
+			double avg = AvgPrice();
+			if (dir * (Close[0] - avg) > 0)
+				MoveStopTo(avg, "전환의심 뒤 평단", Time[0]);
 		}
 
 		// spec 5 최소 진입 강제 채우기 (2026-10-16 사용자 결정): ForceStartTime 봉부터 종료 청산 전까지 진입 횟수 < MinEntries면
@@ -2255,6 +2303,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			tp2Done			= false;
 			tp1FillPrice	= double.NaN;
 			addSig			= "";
+			warnDone		= false;
 			baseQty			= 0;
 			earlyEntry		= false;
 			addFillSum		= 0;
@@ -2629,7 +2678,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			string hold = Position.MarketPosition == MarketPosition.Flat ? "없음"
 				: string.Format("{0} {1}계약 손절={2:F2}{3}{4}", PosName(pos), Position.Quantity, stopPrice,
 					suspectWaitLeft > 0 ? " 의심확인대기=" + suspectWaitLeft : "", tp2Done ? " 2차뒤" : tp1Done ? " 1차뒤" : "");
-			string cont = string.Format(" 점수C={0:F6} 속도={1:F6} 연속S={2:F6} 연속F={3:F6} 레짐7={4}", contScore, contVel, contSlow, contFast, r7);
+			string cont = string.Format(" 점수C={0:F6} 속도={1:F6} 연속S={2:F6} 연속F={3:F6} 레짐7={4} 전환의심={5}", contScore, contVel, contSlow, contFast, r7, r7Warn);
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 추세={2} S={3} F={4} ({5}){14} 의심={6} 구간={7} 후보 {8} 보유={9} 시고저종={10}/{11}/{12}/{13}",
 				Time[0], Instrument.FullName, RegimeState(), Signed(SlowNow()), Signed(FastNow()), regime.ScoreText,
 				SuspectActiveNow() < 0 ? "하락의심" : SuspectActiveNow() > 0 ? "상승의심" : "-",
@@ -2647,8 +2696,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			int sus = SuspectActiveNow();
 			// spec 3-4: 배경 = 7레짐. 추세 진하게, 시작의심 옅게, 종료의심 주황·하늘색
 			int a7 = Math.Abs(r7);
-			BackBrush = a7 == 2 ? (r7 > 0 ? upBackBrush : downBackBrush) : a7 == 3 ? (r7 > 0 ? upSuspectBrush : downSuspectBrush)
-				: a7 == 1 ? (r7 > 0 ? upStartBrush : downStartBrush) : null;
+			// 추세 진하게, 눌림·시작의심 옅게, 전환의심(반대 방향 빠른 출발) 주황(상승 중 하락 전환의심)·하늘색(하락 중 상승 전환의심)
+			BackBrush = r7Warn != 0 ? (r7Warn < 0 ? upSuspectBrush : downSuspectBrush)
+				: a7 == 2 ? (r7 > 0 ? upBackBrush : downBackBrush)
+				: a7 == 3 || a7 == 1 ? (r7 > 0 ? upStartBrush : downStartBrush) : null;
 
 			if (BoxReady())
 			{
@@ -2726,7 +2777,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// ── 현재 상태 ──
 			sb.Section("현재 상태", StateTone(st, sus), true);
 			sb.AppendFormat("{0}{1}   {2:HH:mm}\n", StateText(st), sus < 0 ? " · 하락의심" : sus > 0 ? " · 상승의심" : "", Times[0][0]);
-			sb.AppendFormat("7레짐: {0}{1}\n", R7Text(r7), r7Age >= 0 ? string.Format(" (확정 {0}봉째, E1은 {1}봉째)", r7Age, E1DelayBars) : "");
+			sb.AppendFormat("7레짐: {0}{1}\n", R7Display(), r7Age >= 0 ? string.Format(" (확정 {0}봉째, E1은 {1}봉째)", r7Age, E1DelayBars) : "");
 			sb.AppendFormat("점수 C {0:+0.000;-0.000} · 속도 {1:+0.000;-0.000} · 연속 S {2:+0.00;-0.00} (→{3}) · F {4:+0.00;-0.00} (→{5})\n",
 				contScore, contVel, contSlow, Signed(S), contFast, Signed(F));
 			if (suspectWaitLeft > 0)
