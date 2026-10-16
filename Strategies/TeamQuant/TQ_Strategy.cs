@@ -33,6 +33,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private TQ_Signals		signals;	// 진입 봉 신호
 		private ATR				atr;		// 진입 봉 ATR (손절·익절·트레일링 거리)
 		private int				regimeBip	= 1;	// 추세를 판단하는 시리즈 번호: 3분봉 (BarsArray[1])
+		private const int		tickBip		= 2;	// 1틱 시리즈 (BarsArray[2]): 현재가 청산만 본다 (spec 4-3 손절 안전장치, 4-9 B1 반대 돌파)
+		private double			tkSmaFast	= double.NaN, tkAtr = double.NaN, tkMacdSl = double.NaN;	// 현재가 F 계산용: 직전 1분봉 마감 때 값
+		private double			tkEdgeLow	= double.NaN, tkEdgeHigh = double.NaN;	// 현재가 반대 돌파 기준: 마감된 직전 BreakoutBars봉 최저·최고
+		private int				tickOppExitBar	= -10;	// 현재가 반대 돌파로 청산한 때의 CurrentBars[0] (그 봉이 마감될 때 새 진입 안 함)
 		private int				minBars0;			// 진입 봉 데이터 부족 가드
 
 		// ── 포지션 ──
@@ -373,6 +377,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				TrendTp1R				= 0.5;	// 2026-10-15 사용자 결정 1 → 0.5 (18일 시뮬레이션 합계 +23.0 → +24.5R, 밴드 +13.6R)
 				TrendTp2R				= 2.5;
 				UseAddOn				= true;
+				B1OppTickExit			= true;
 				// spec 4-4-2 개장 직후 진입 옵션 (기본 끔, 2026-10-15 사용자 결정: 옵션으로)
 				EarlyFullExitAtTp1		= false;
 				EarlyStopMult			= 1.0;
@@ -401,6 +406,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			{
 				// 추세 봉 = 3분봉 → BarsArray[1] (v6 정리에서 10분봉 선택을 뺐음)
 				AddDataSeries(BarsPeriodType.Minute, 3);
+				// 1틱 → BarsArray[2]: 봉 마감을 기다리지 않는 청산(현재가)용. 진입·판정은 그대로 1분봉 마감 (2026-10-16 사용자 결정)
+				AddDataSeries(BarsPeriodType.Tick, 1);
 
 				// 주문 오류를 NinjaTrader 기본 동작(포지션을 닫고 전략 종료)에 맡기지 않고 OnOrderUpdate에서 직접 처리한다 (SetDefaults·Configure에서만 정할 수 있음)
 				if (HandleOrderErrors)
@@ -497,7 +504,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				+ " | E5개장범위=" + UseEntryOpenRange + "(~" + E5EndTime + " " + E5RangeMinutes + "분 익절" + E5TargetR.ToString(inv) + "R 본전" + E5BreakevenR.ToString(inv)
 					+ "R 손절ATR" + E5StopMinAtr.ToString(inv) + "~" + E5StopMaxAtr.ToString(inv) + ")"
 				+ " | B1박스돌파=" + UseBreakoutEntry + "(" + BreakoutBars + "봉 F" + BreakoutMinFast
-				+ " 효율비≤" + BreakoutMaxEr.ToString(inv) + "(" + BreakoutBoxBars + "봉) 반대청산=" + BreakoutExitOnOpposite + ")"
+				+ " 효율비≤" + BreakoutMaxEr.ToString(inv) + "(" + BreakoutBoxBars + "봉) 반대청산=" + BreakoutExitOnOpposite + " 현재가=" + B1OppTickExit + ")"
 				+ " | E4=" + UseEntrySide + "(밴드" + SideBand + " T2=" + SideT2Entry + ") 횡보필터=" + SideBlockScore + " 횡보재진입금지=" + BlockSideAfterStop
 				+ " | 대기=" + T1Window + " MACD확인=" + MacdConfirmBars + " T2앞봉인정=" + T2CountConfirmBars
 				+ " | 손절봉=" + SwingBars + " 추세손절ATR=" + TrendStopMinAtr.ToString(inv) + "~" + TrendStopMaxAtr.ToString(inv)
@@ -525,6 +532,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				LogRegimeBar();
 				return;
 			}
+			if (BarsInProgress == tickBip)
+			{
+				TickExits();
+				return;
+			}
 			if (BarsInProgress != 0)
 				return;
 
@@ -532,6 +544,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			PaintBar();
 			TradeTrack();
 			UpdateSession();
+			tkEdgeLow	= rangeLow[0];	// 다음 봉 진행 중 현재가 반대 돌파 기준 = 지금까지 마감된 BreakoutBars봉 (4-9의 '지금 봉 제외'와 같음)
+			tkEdgeHigh	= rangeHigh[0];
 
 			// 종료 청산: FlattenTime 봉이 마감되면 남은 포지션을 전량 시장가로
 			if (IsFlattenTime())
@@ -553,6 +567,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				cands = EvaluateEntries();
 				if (force)
 					ForceEnter();
+				else if (tickOppExitBar == CurrentBars[0] - 1)
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 안 함: 이 봉 진행 중에 현재가 반대 돌파로 청산 (4-9: 청산한 봉에는 반대 진입 안 함)", Time[0], Instrument.FullName));
 				else if (InEntryWindow())
 					RouteEntry(cands);
 				else
@@ -720,6 +736,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			contScore	= R6((pxMid + pxFast + roc5 + don20 + lrs10 + er10 + structS + slope60 + macd + macdSl + rsi) / 11.0);
 			contSlow	= R6(pxMid + structS + macd + (RegimeUseRsi ? rsi : 0));	// S1 종가−중기선, S2 중기−장기선, S3 MACD선, S4 RSI
 			contFast	= R6(pxFast + macdSl);										// F1 종가−단기선, F2 MACD선 기울기
+			tkSmaFast	= sf;
+			tkAtr		= a;
+			tkMacdSl	= macdSl;
 			contHist[0]	= contScore;
 			contVel		= R6(contScore - contHist[ScoreVelBars]);
 		}
@@ -2138,6 +2157,36 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					dir > 0 ? "<" : ">", TrendLastExitMa == 1 ? "중기선" : "단기선", ma));
 		}
 
+		// 현재가 청산 (1틱 시리즈, 2026-10-16 사용자 결정: 봉 마감을 기다리지 말고 현재가로 바로)
+		private void TickExits()
+		{
+			if (pos == Pos.None || gapFlattened || Position.MarketPosition == MarketPosition.Flat || CurrentBars[tickBip] < 0)
+				return;
+			double px = Closes[tickBip][0];
+			// spec 4-3 손절 안전장치: 현재가가 손절가를 BreakevenBufferTicks 넘게 지났는데 포지션이 남음 = 손절 주문 수량이 모자람 (7/24 E5).
+			// 손절 스탑은 닿는 순간 체결되므로 여유를 두어 정상 체결과 겹치지 않게 함
+			if (!double.IsNaN(stopPrice) && dir * (stopPrice - px) >= Math.Max(1, BreakevenBufferTicks) * TickSize)
+			{
+				FlattenRemaining(breakevenDone ? "BE_STOP" : "STOP", string.Format("현재가 {0}가 손절가 {1}를 지났는데 {2}계약 남음", px, stopPrice, Position.Quantity));
+				return;
+			}
+			// spec 4-9 B1 반대 돌파 (B1OppTickExit): 현재가가 마감된 직전 BreakoutBars봉의 반대쪽 끝을 넘고, 현재가로 다시 계산한 F가 그 방향으로 BreakoutMinFast 이상
+			if (B1OppTickExit && BreakoutExitOnOpposite && path == "B1" && !double.IsNaN(tkAtr) && !double.IsNaN(tkEdgeLow))
+			{
+				double edge = dir > 0 ? tkEdgeLow : tkEdgeHigh;
+				if (-dir * (px - edge) > 0)
+				{
+					double fNow = R6(Math.Tanh((px - tkSmaFast) / (0.75 * tkAtr)) + tkMacdSl);
+					if (-dir * fNow >= BreakoutMinFast * ScoreScale)
+					{
+						tickOppExitBar = CurrentBars[0];
+						FlattenRemaining("OPP_BREAKOUT", string.Format("반대 돌파(현재가): {0:N2} {1} {2}분 {3} {4:N2}, F {5:+0.00;-0.00}", px, dir > 0 ? "<" : ">",
+							BreakoutBars, dir > 0 ? "저가" : "고가", edge, fNow));
+					}
+				}
+			}
+		}
+
 		// 보유 방향의 반대 돌파 (B1과 같은 식, 느린 점수 거르기는 안 봄)
 		private bool OppositeBreakout()
 		{
@@ -3335,6 +3384,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1.0, 5.0)]
 		[Display(Name = "[선택] 개장 직후 진입: 손절 배율 (EarlyStopMult)", Description = "기본 1(끔). 1.5면 개장 직후 진입의 손절 거리를 1.5배로 넓히고, 위험 금액 수량이라 계약이 줄어 1회 위험은 같음. 익절 R도 넓어진 거리 기준. 18일 시뮬레이션 1.5: 7월 +20.4 → +20.9R, 10월 +2.5 → +3.7R, 진입 61 → 56건(오래 들고 있어 다음 신호를 못 받음)", GroupName = "03. 익절·손절", Order = 8)]
 		public double EarlyStopMult { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "[선택] B1 반대 돌파를 현재가로 바로 청산 (B1OppTickExit)", Description = "기본 켬(2026-10-16 사용자 결정). 켜면 B1 포지션의 반대 돌파(직전 15봉 반대쪽 끝을 넘고 F가 반대로 0.9 이상)를 1분봉 마감을 기다리지 않고 현재가로 판단해 바로 시장가 청산. F는 현재가로 단기선 항목만 다시 계산. 끄면 1분봉 종가로(예전 방식). 1틱 데이터가 없으면(Strategy Analyzer에 틱 데이터 없음) 봉 마감 방식만 동작. 시뮬레이터로는 확인 못 해 Playback으로 비교", GroupName = "03. 익절·손절", Order = 9)]
+		public bool B1OppTickExit { get; set; }
 
 
 

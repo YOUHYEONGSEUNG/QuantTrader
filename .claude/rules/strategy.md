@@ -15,7 +15,8 @@ paths:
 ## 데이터
 - Configure에서 `AddDataSeries(BarsPeriodType.Minute, 10)` → BarsArray[1], `AddDataSeries(BarsPeriodType.Minute, 3)` → BarsArray[2]. 추세는 `TQ_Regime(BarsArray[regimeBip], ...)` (`RegimeBarMinutes` 10이면 1, 아니면 2).
 - CurrentBars[0], CurrentBars[regimeBip] 가드를 두고, `regime.Regime[0]`이 NaN이면 아무것도 하지 않는다.
-- 진입·청산 판단과 주문은 `BarsInProgress == 0`(진입 봉)에서만 한다. 추세 봉 마감 때는 로그만 남긴다(1분 지연).
+- `AddDataSeries(BarsPeriodType.Tick, 1)` → BarsArray[2](`tickBip`, v6 2026-10-16): `TickExits()`에서 현재가 청산(손절 안전장치, B1 반대 돌파)만 한다. 여기서 쓰는 1분봉 값은 직전 마감 때 필드에 담아 둔 것(`tk…`). 주문은 BIP 0으로.
+- 진입·청산 판단과 주문은 `BarsInProgress == 0`(진입 봉)에서만 한다(현재가 청산 예외). 추세 봉 마감 때는 로그만 남긴다(1분 지연).
 - 추세 봉의 이벤트(`TrendStart`, `SuspectEvent`)는 새 추세 봉 값을 처음 본 진입 봉에서만 쓴다 (`ObserveRegime`, `trendStartNow`·`suspectEventNow`).
 
 ## 주문 (Managed approach)
