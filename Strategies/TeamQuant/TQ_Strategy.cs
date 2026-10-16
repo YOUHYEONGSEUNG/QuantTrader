@@ -216,6 +216,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 3-4 7레짐 (2026-10-16 사용자 제안): 횡보 / 시작의심 / 추세 / 종료의심 (위·아래)
 		private const double R7EndSuspectC		= 0.1;	// 추세 중 C가 이 값 아래로(또는 속도가 반대로 ScoreVelMin) → 종료의심
 		private const int E1DelayBars			= 3;	// E1 = 추세 확정 뒤 이 봉 수째 진입 봉 (18일: 0분(지금) $41,253, 1분 $46,290, 2분 $43,960, 3분 $55,839, 5분 $41,606)
+		// spec 4-8-1 진입 품질 점수 (2026-10-16 사용자 결정): 7·10월 18일 후보 352개에서 두 달 모두 같은 방향이던 정보만. 구간 경계와 값은 두 달 합쳐 만든 것
+		private const double QualityHalfBelow	= -0.05;	// 점수가 이 값보다 낮으면 수량 50% (다른 달로 만든 점수로 18일: 7월 $44,966 → $39,466, 10월 $10,808 → $14,526)
+		private const double SizeFloorPercent	= 25;		// spec 4-8: 수량을 줄이는 이유(장전·달린 뒤·하루 손실·품질)는 곱하되 최대 계약의 이 % 아래로는 안 줄임
+		private static readonly double[] QF		= { 0.7056, 1.2511, 0.0143, 0.0738, -0.0861 };	// 빠른 F: 경계 2개, 낮은⅓·중간·높은⅓ 값
+		private static readonly double[] QExt	= { 0.8550, 1.8225, 0.0915, 0.0813, -0.1714 };	// 중심선 거리 ATR
+		private static readonly double[] QR10	= { 3.0649, 3.9154, -0.1736, 0.0797, 0.0932 };	// 최근 10봉 고저폭 ÷ ATR
+		private static readonly double[] QPre	= { 1.1770, 2.6459, -0.0443, 0.1236, -0.0800 };	// 진입 전 15분 이동 ÷ ATR
+		private static readonly double[] QRoom	= { -0.0269, 0.8333, -0.2536, 0.1931, 0.0610 };	// 30봉 고·저점까지 남은 거리 ÷ 예상 손절 거리
 		private const int ForceStartTime		= 232000;	// spec 5 최소 진입 강제 채우기: 이 시각 봉부터 종료 청산 전까지
 		private const double Tp1TrailAtr		= 3.0;	// spec 4-4: 1차 익절 뒤 트레일링 = 진입 뒤 최고가 − 이 값 × ATR (본전보다 나을 때부터, 2차 뒤는 TrailAtr)
 		#endregion
@@ -1119,6 +1127,35 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return path > 0 ? net / path : 1.0;
 		}
 
+		private static double QBin(double[] t, double x)	{ return x < t[0] ? t[2] : x < t[1] ? t[3] : t[4]; }
+
+		// spec 4-8-1 진입 품질 점수: 진입 방향 기준 정보 5개 + 7레짐 관계. 높을수록 유리 (0 근처가 평균)
+		private double EntryQuality(int d, double px, out string detail)
+		{
+			double a	= Math.Max(atr[0], TickSize);
+			double F	= d * contFast;
+			double ext	= d * (px - channels.Mid[0]) / a;
+			double r10	= (MAX(Highs[0], 10)[0] - MIN(Lows[0], 10)[0]) / a;
+			double pre	= CurrentBars[0] > 15 ? d * (px - Closes[0][15]) / a : 0;
+			double hh	= MAX(Highs[0], 30)[1], ll = MIN(Lows[0], 30)[1];
+			double swing	= d > 0 ? signals.SwingLow5[0] : signals.SwingHigh5[0];
+			double stopD	= StopDistance(d, true, px, swing, atr[0]);
+			double room	= stopD > 0 ? (d > 0 ? hh - px : px - ll) / stopD : 0;
+			int a7 = Math.Abs(r7), d7 = r7 > 0 ? 1 : r7 < 0 ? -1 : 0;
+			string reg; double rv;
+			if (r7Warn == -d)							{ reg = "전환의심";		rv = -0.0325; }
+			else if (a7 == 3 && d7 == d)				{ reg = "같은 눌림";	rv = 0.2566; }
+			else if (a7 == 2 && d7 == d)				{ reg = "같은 추세";	rv = -0.0646; }
+			else if ((a7 == 2 || a7 == 3) && d7 == -d)	{ reg = "반대 추세";	rv = 0.2174; }
+			else if (a7 == 1 && d7 == -d)				{ reg = "반대 시작의심";	rv = -0.1086; }
+			else if (a7 == 0)							{ reg = "횡보";		rv = -0.1444; }
+			else										{ reg = "같은 시작의심";	rv = 0; }
+			double sc = QBin(QF, F) + QBin(QExt, ext) + QBin(QR10, r10) + QBin(QPre, pre) + QBin(QRoom, room) + rv;
+			detail = string.Format("품질 {0:+0.000;-0.000} (F {1:F2}, 중심선 {2:F1}ATR, 10봉폭 {3:F1}ATR, 15분 {4:+0.0;-0.0}ATR, 남은거리 {5:F2}손절, {6})",
+				sc, F, ext, r10, pre, room, reg);
+			return sc;
+		}
+
 		private List<Candidate> EvaluateEntries()
 		{
 			List<Candidate> list	= new List<Candidate>();
@@ -1464,7 +1501,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			fallbackEntry	= fallback;
 			session			= ZoneNow() == Zone.Pre ? "pre" : "post";
 			rrExpected		= rr;
-			int qty			= Math.Max(1, (int)Math.Floor(EntryQuantity * qtyPercent / 100.0));
+			// spec 4-8: 기본 수량은 최소 진입 보장이면 그 %, 아니면 100%. 장전 %는 아래 '줄이는 이유'에 넣어 곱함
+			double basePct	= fallback ? qtyPercent : 100;
+			int qty			= Math.Max(1, (int)Math.Floor(EntryQuantity * basePct / 100.0));
 
 			TradeBegin();
 			stopAtr		= atr[0];
@@ -1486,29 +1525,52 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				double pv		= Instrument.MasterInstrument.PointValue;
 				if (distPts > 0 && pv > 0)
 				{
-					int byRisk	= (int)Math.Floor(RiskPerTrade * qtyPercent / 100.0 / (distPts * pv));
+					int byRisk	= (int)Math.Floor(RiskPerTrade * basePct / 100.0 / (distPts * pv));
 					qty			= Math.Max(1, Math.Min(qty, byRisk));
 					riskNote	= string.Format(" 위험≈${0:N0}(손절 {1:F1}pt × {2}계약)", distPts * pv * qty, distPts, qty);
 				}
 			}
-			// spec 4-8 v6: 이미 달린 뒤의 추세 진입(종가가 중심선에서 진입 방향으로 ExtendedEntryAtr × ATR 넘게)은 수량만 줄임 (진입은 그대로).
-			// v5·v6 147건: 중심선 거리 높은 ⅓(≥ 1.7 ATR)이 두 버전 모두 손실. 막으면 진입이 줄어 수량으로 (사용자: 진입 횟수를 줄이지 않기)
-			// spec 4-11 하루 손실 한도: 이번 구간 끝난 거래 손익이 −DayLossLimitR × 1회 위험 한도 이하면 그 뒤 수량 DayLossQtyPercent%
+			// spec 4-8 수량을 줄이는 이유: 장전(PreOpenQtyPercent) · 이미 달린 뒤(ExtendedEntryAtr) · 하루 손실 한도(DayLossLimitR) · 진입 품질 점수(4-8-1).
+			// 이유마다 곱하되 SizeFloorPercent 아래로는 줄이지 않음 (18일: 곱하기만 $53,424, 25% 바닥 $53,437, 가장 강한 하나만 $52,097. 바닥이 없으면 6%까지 내려가 1~2계약)
+			double mult = 1;
+			string why = "";
+			if (!fallback && qtyPercent < 100)
+			{
+				mult *= qtyPercent / 100.0;
+				why += string.Format(" 장전 {0}%", qtyPercent);
+			}
 			if (DayLossLimitR > 0 && sessPnlUsd <= -DayLossLimitR * RiskPerTrade)
 			{
-				int before = qty;
-				qty = Math.Max(1, (int)Math.Floor(qty * DayLossQtyPercent / 100.0));
-				riskNote += string.Format(" 하루 손실 ${0:N0} ≤ −{1}R → 수량 {2}→{3}", sessPnlUsd, DayLossLimitR, before, qty);
+				mult *= DayLossQtyPercent / 100.0;
+				why += string.Format(" 하루 손실 ${0:N0} ≤ −{1}R", sessPnlUsd, DayLossLimitR);
 			}
-			if (IsTrendPos() && entryPath != "E5" && entryPath != "E6" && ExtendedEntryAtr > 0 && atr[0] > 0)
+			bool trendPath = IsTrendPos() && entryPath != "E5" && entryPath != "E6" && entryPath != "FORCE";
+			if (trendPath && ExtendedEntryAtr > 0 && atr[0] > 0)
 			{
 				double ext = d * (refPx - channels.Mid[0]) / atr[0];
 				if (ext > ExtendedEntryAtr)
 				{
-					int before = qty;
-					qty = Math.Max(1, (int)Math.Floor(qty * ExtendedQtyPercent / 100.0));
-					riskNote += string.Format(" 달린 뒤 진입(중심선에서 {0:F1} ATR > {1}) → 수량 {2}→{3}", ext, ExtendedEntryAtr, before, qty);
+					mult *= ExtendedQtyPercent / 100.0;
+					why += string.Format(" 달린 뒤(중심선 {0:F1} ATR)", ext);
 				}
+			}
+			if (trendPath && contReady)
+			{
+				string qd;
+				double q = EntryQuality(d, refPx, out qd);
+				riskNote += " " + qd;
+				if (q < QualityHalfBelow)
+				{
+					mult *= 0.5;
+					why += string.Format(" 품질 {0:+0.000;-0.000} < {1}", q, QualityHalfBelow);
+				}
+			}
+			if (mult < 1)
+			{
+				int before = qty;
+				double m2 = Math.Max(SizeFloorPercent / 100.0, mult);
+				qty = Math.Max(1, (int)Math.Floor(qty * m2));
+				riskNote += string.Format(" 수량 줄임:{0} → ×{1:F2}{2} {3}→{4}", why, m2, m2 > mult ? "(바닥)" : "", before, qty);
 			}
 			if (entryPath == "FORCE")
 				qty = 1;	// spec 5 강제 채우기는 1계약
