@@ -20,18 +20,22 @@ paths:
 - 진입·청산 판단과 주문은 `BarsInProgress == 0`(진입 봉)에서만 한다(현재가 청산 예외). 추세 봉 마감 때는 로그만 남긴다(1분 지연).
 - 추세 봉의 이벤트(`TrendStart`, `SuspectEvent`)는 새 추세 봉 값을 처음 본 진입 봉에서만 쓴다 (`ObserveRegime`, `trendStartNow`·`suspectEventNow`).
 
-## 주문 (Managed approach)
-- 분할 진입은 조각마다 시그널명이 하나다: 추세 `TL{n}.1`(1차) / `TL{n}.2`(2차) / `TL{n}.3`(마지막 조각), 횡보 `SL{n}.1`(1단계) / `SL{n}.2`(나머지). 매도는 TS·SS. n은 진입마다 1씩 늘어나는 번호(`signalSeq`): NinjaTrader는 같은 시그널명의 Set 익절·손절 값을 다음 진입에도 쓰고 지울 방법이 없어서, 이름을 재사용하면 지난 거래의 익절가가 남는다(7/27). 닿지 않는 먼 익절을 거는 방법은 차트 가격 축을 늘려서 쓰지 않는다. `chunkStage`(1 / 2 / 3)로 역할을 구분한다.
-- `EntryHandling = UniqueEntries`, `EntriesPerDirection = 1`.
-- 손절은 조각별 `SetStopLoss(signal, CalculationMode.Price, price, false)`, 진입 주문보다 먼저 건다.
-- 지정가 익절은 `SetProfitTarget`(`IntrabarTakeProfit`): 추세 조각은 밴드 값을 봉마다 옮기고, 횡보 1단계는 고정 가격(진입가 ± ATR × 배수, 체결되면 체결가 기준으로 다시 검). `ExitLongLimit` 같은 지정가 Exit 주문은 쓰지 않는다.
-- **조각의 일부만 청산하지 않는다.** 일부 청산 때 그 조각의 Set 익절·손절 수량이 어떻게 되는지 공식 문서에서 확인되지 않았다. 의심 일부청산은 먼 조각부터 조각 단위로 뺀다(`ExitFarChunks`).
-- 봉 마감 조건의 청산은 시장가 `ExitLong/ExitShort`. 주문은 BIP 0으로만.
-- **청산 수량은 항상 직접 준다.** 조각별 실제 보유 수량 `chunkLeft`(진입 체결 +, `FromEntrySignal`이 그 조각인 청산 체결 −)로 조각마다 청산하고, 조각과 상관없이 남은 포지션은 `FlattenLeftover()`(`Position.Quantity`, 직접 낸 청산 주문이 살아 있으면 기다림)로 정리한다. 수량 없는 `ExitLong()`은 쓰지 않는다: 부분 체결 뒤 NinjaTrader가 조각별로 기억하는 수량이 어긋나 반대 포지션이 생겼다(10/6 Playback).
-- 조각을 끝내는 것은 체결 수량으로(`chunkLeft`가 0). 익절 단계 처리는 부분 체결이 여러 번 와도 한 번(`stageFilled`).
-- 체결 콜백이 주문 호출 도중에 올 수 있다. 콜백이 읽는 상태(`liveSignals`)는 주문 전에 바꿔 둔다.
-- E3 스탑 진입 주문(`PlaceE3Stop`)은 같은 방향이면 같은 시그널명으로 다시 내서 고친다. 다시 안 내면 봉 끝에 취소된다. 시장가 진입 전에는 `CancelE3Stop`.
-- 손절 이동은 `MoveStopTo()`만 쓴다(유리한 쪽으로만, `BreakevenBufferTicks` 안전 거리, 가까우면 미뤘다가 재시도).
+## 주문 (Unmanaged approach, 2026-10-22)
+- `IsUnmanaged = true`, `IgnoreOverfill = true`(SetDefaults). 관리형 메서드(EnterLong, SetStopLoss, ExitLong …)는 섞어 쓸 수 없다(NT8 문서). 관리형 Set 손절·익절은 부분 체결 때 조각마다 주문이 여러 개 생기고, 한 조각을 청산하면 NinjaTrader가 다른 조각의 손절·익절을 취소해 손절 없는 계약과 남는 손절이 생겼다(10/15 22:06, 7/24 22:35).
+- 주문 구조: 진입 주문 1개(조각 합계, `TL{n}.E`), 보호 손절 1개(`TL{n}.S`, 실제 보유 수량 전체), 조각별 익절 지정가(`TL{n}.1T` …, 그 조각 남은 수량), 시장가 청산(`X{k}`), 계획에 없는 포지션 정리(`Fix{k}`). 손절과 익절은 OCO로 묶지 않는다.
+- **`Reconcile()`이 실제 보유 수량에 맞춘다.** 체결(OnExecutionUpdate)·포지션 변화(OnPositionUpdate)·주문 상태 변화(OnOrderUpdate)·봉 마감마다 부른다. 손절 수량 = 보유 − 아직 체결 안 된 시장가 청산(`plannedExitQty`), 익절은 단계 순서로 그 수량 안에서. 미보유면 손절·익절 취소, 방향이 다른 포지션이면 시장가 정리. 안에서 다시 불리면 끝난 뒤 한 번 더(재진입 막기).
+- 조각은 기록만(`SubmitChunk`): 진입 체결은 조각 순서(1차 → 2차 → 마지막)로 나누고(`AllocateEntry`), 청산 체결은 그 주문의 조각 먼저, 나머지는 먼 조각부터(추가 → 마지막 → 2차 → 1차) 뺀다(`ReduceChunks`).
+- 주문 객체는 OnOrderUpdate에서 이름으로 잡는다(제출 직후 돌려받은 참조가 아직 안 채워질 수 있음). 실시간 전환 때 `GetRealtimeOrder`로 바꾼다.
+- 바꾸는 중(Submitted, ChangePending/Submitted, Cancel…)인 주문은 다시 고치지 않는다. 접수되면 OnOrderUpdate → Reconcile이 다시 맞춘다.
+- 시장가 청산은 `SubmitMarketExit`: 먼저 계획 수량에 넣고 Reconcile로 손절 수량을 줄인 뒤 낸다(같이 체결돼 넘치지 않게). 취소·거부되면 계획에서 빼고 손절이 다시 덮는다.
+- 익절 체결은 조각 수량을 먼저 줄인 뒤 단계 처리(손절 이동)를 한다. 거꾸로 하면 Reconcile이 익절을 다시 낸다.
+- E3 스탑 진입은 같은 방향이면 걸어 둔 주문을 `ChangeOrder`로 고친다. 비관리형 주문은 취소할 때까지 살아 있어, 다시 걸지 않는 봉에는 `ForgetE3Stop`이 직접 취소한다. 시장가 진입 전에는 `CancelE3Stop`.
+- 손절 이동은 `MoveStopTo()`만 쓴다(유리한 쪽으로만, `BreakevenBufferTicks` 안전 거리, 가까우면 미뤘다가 봉 마감마다 재시도). 실제 주문 반영은 Reconcile.
+- 안전장치(봉 마감·현재가)는 손절 주문이 덮지 못하는 수량(`UnprotectedQty`)이 있을 때만 청산한다(정상 손절과 겹쳐 넘치지 않게).
+
+## 그리기 (2026-10-22 사용자 규칙)
+- 계산은 전부 OnBarUpdate, OnRender에는 계산을 넣지 않는다. 연속된 선은 OnRender로 차트 끝에서 끝까지, 봉에 붙는 값은 BackBrush·AddPlot.
+- `Draw.*`는 쓰지 않는다(봉마다 그리면 무거움). 장전 박스 선·손절선·평단선·체결 표시·진입 횟수는 OnBarUpdate·체결 때 값만 기록하고(`boxLines`, `marks`, `renderStop`, `entryCountText`, `renderLock`으로 잠금) `RenderChartMarks`가 그린다. SharpDX 자원은 그릴 때 만들고 Dispose.
 
 ## 상태 관리
 - 미보유가 되면 `ResetTradeState()`로 포지션·조각·손절·의심 상태를 지운다. 대회 구간 상태(진입 횟수, 장전 박스, E3 사용, 횡보 재진입 금지)와 추세 관찰 상태(`lastRegimeBar`, E1 재허용)는 지우지 않는다.

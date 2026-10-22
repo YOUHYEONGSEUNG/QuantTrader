@@ -11,7 +11,6 @@ using NinjaTrader.Gui;						// DashStyleHelper
 using NinjaTrader.Gui.Chart;				// ChartControl, ChartScale (OnRender)
 using NinjaTrader.Gui.Tools;				// SimpleFont
 using NinjaTrader.NinjaScript;
-using NinjaTrader.NinjaScript.DrawingTools;	// Draw.*
 using NinjaTrader.NinjaScript.Indicators;
 using NinjaTrader.NinjaScript.Indicators.TeamQuant;
 #endregion
@@ -62,7 +61,17 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private readonly Dictionary<string, int>	chunkLeft		= new Dictionary<string, int>();
 		private readonly HashSet<string>			stageFilled		= new HashSet<string>();			// 익절 단계 처리를 이미 한 조각 (부분 체결이 여러 번 와도 한 번만)
 		private readonly HashSet<string>			exitSent		= new HashSet<string>();			// 직접 청산 주문을 낸 조각 (늦게 온 진입 체결로 다시 살리지 않음)
-		private readonly List<Order>				exitOrders		= new List<Order>();				// 직접 낸 청산 주문 (남은 포지션 재청산 전에 아직 살아 있는지 본다)
+		// 비관리형 주문 (2026-10-22): 진입 1개, 보호 손절 1개(실제 보유 수량 전체), 조각별 익절 지정가, 시장가 청산. Reconcile()이 보유 수량에 맞춤
+		private Order							entryOrder;									// 진입 주문 (시장가 또는 E3 스탑)
+		private Order							addOrder;									// 추가 진입 주문
+		private Order							stopOrder;									// 보호 손절 (보유 수량 전체)
+		private readonly Dictionary<string, Order>	tpOrders		= new Dictionary<string, Order>();	// 조각 → 익절 지정가
+		private readonly Dictionary<string, List<string>>	exitOrderChunks	= new Dictionary<string, List<string>>();	// 시장가 청산 주문 이름 → 조각
+		private readonly Dictionary<string, int>	chunkFilled		= new Dictionary<string, int>();	// 조각별 진입 체결 수량 (진입 체결을 조각 순서로 나눔)
+		private int								plannedExitQty;								// 아직 체결 안 된 시장가 청산 수량 (손절 수량에서 뺌)
+		private int								exitSeq;
+		private string							tradePrefix		= "";						// 이번 거래 주문 이름 앞부분 (예: TL7.)
+		private bool							inReconcile, reconcileAgain;
 		private bool			tp1Done;
 		private bool			tp2Done;
 		private double			tp1FillPrice	= double.NaN;	// 1차 익절 체결가 (1차 뒤 손절 계산용)
@@ -75,7 +84,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private int				e3StopDir;						// 걸어 둔 E3 스탑 주문 방향 (0 = 없음)
 		private string			e3StopPrefix	= "";			// 걸어 둔 E3 스탑 주문 시그널명 앞부분 (같은 방향이면 이름을 그대로 써서 주문을 고침)
 		private bool			e3StopPlacedNow;				// 이번 봉에 다시 걸었음 (안 걸면 NinjaTrader가 봉 끝에 취소)
-		private readonly List<Order>	e3StopOrders	= new List<Order>();
+
 		private bool			earlyEntry;
 		// 박스 장 감지와 하루 손실 (spec 4-11)
 		private double			sessStartPx		= double.NaN;	// 대회 구간 첫 봉 종가
@@ -200,9 +209,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private Brush			upStartBrush;					// 7레짐 시작의심 (옅은 초록·빨강)
 		private Brush			downStartBrush;
 		private Brush			downSuspectBrush;
-		private SimpleFont		markFont;
-		private string			markTag			= "";
-		private int				markQty;
 
 		#region 고정값 (v6 박스 장 대책, spec 4-11)
 		private const double RangeFadeMaxEr		= 0.15;	// 박스 장 감지: 대회 구간 시작부터 지금까지 종가 효율비 ≤ 이 값
@@ -341,8 +347,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				Description			= "팀 퀀트 대회 전략 v5: v3 규칙 + 위험 금액 수량 + 설정 정리 (docs/spec.md, 브랜치 v5-clean)";
 				Name				= "TQ_Strategy";
 				Calculate			= Calculate.OnBarClose;			// 4-1 원칙 1: 봉 마감 뒤 판단
-				EntriesPerDirection	= 1;
-				EntryHandling		= EntryHandling.UniqueEntries;	// 시그널명별 분할 진입
+				// 주문은 비관리형 (2026-10-22 사용자 결정: 확실한 방법으로). 관리형 Set 손절·익절은 부분 체결 때 조각마다 주문이 여러 개 생기고,
+				// 한 조각을 청산하면 NinjaTrader가 다른 조각의 손절·익절을 취소해 손절 없는 계약과 남는 손절(반대 포지션 위험)이 생겼음 (10/15 22:06, 7/24 22:35)
+				IsUnmanaged			= true;
+				// 취소 중인 주문이 체결돼도(초과 체결) 전략을 멈추지 않고 Reconcile()이 계획에 없는 포지션을 시장가로 정리 (NT8 IgnoreOverfill 문서)
+				IgnoreOverfill		= true;
+
 
 				// 기본값 = v3 지시서 5-2 (설계안)
 				// 01 추세 판단
@@ -459,7 +469,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				upStartBrush.Freeze();
 				downStartBrush.Freeze();
 				downSuspectBrush.Freeze();
-				markFont			= new SimpleFont("Malgun Gothic", 11);
 
 				// 4-8: 보유 수량은 EntryQuantity를 넘지 않는다. 한도(MaxQuantity)보다 크면 경고만
 				if (EntryQuantity > MaxQuantity)
@@ -469,6 +478,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			else if (State == State.Realtime)
 			{
 				Out("==== " + SettingsSummary());
+				ToRealtimeOrders();
 			}
 		}
 
@@ -561,7 +571,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				if (force)
 					ForceEnter();
 				else if (tickOppExitBar == CurrentBars[0] - 1)
+				{
+					ForgetE3Stop();
 					Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 안 함: 이 봉 진행 중에 현재가 반대 돌파로 청산 (4-9: 청산한 봉에는 반대 진입 안 함)", Time[0], Instrument.FullName));
+				}
 				else if (InEntryWindow())
 					RouteEntry(cands);
 				else
@@ -580,7 +593,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					// 전량 청산 주문을 낸 뒤에도 포지션이 남아 있으면 다시 낸다 (거부·미체결·수량 어긋남)
 					FlattenLeftover();
 				}
-				else if (!double.IsNaN(stopPrice) && Position.MarketPosition != MarketPosition.Flat && dir * (Close[0] - stopPrice) < 0)
+				else if (!double.IsNaN(stopPrice) && Position.MarketPosition != MarketPosition.Flat && dir * (Close[0] - stopPrice) < 0 && UnprotectedQty() > 0)
 				{
 					// spec 4-3 안전장치: 종가가 이미 손절가를 넘었는데 포지션이 남음 = 손절 주문 수량이 보유 수량보다 적었음.
 					// 7/24 22:35 E5 16계약이 4 + 12로 나뉘어 체결되고 손절은 12계약만 나가, 4계약이 손절 없이 23:27까지 남았음 (−1.57R)
@@ -599,6 +612,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				}
 			}
 
+			Reconcile();	// 이번 봉에 바뀐 손절·익절·청산을 실제 주문에 반영
 			LogEntryBar(cands);
 			UpdateStatusPanel(cands);
 
@@ -618,7 +632,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					if (dir > 0)	{ orbCountLong++;	orbArmedLong = false; }
 					else			{ orbCountShort++;	orbArmedShort = false; }
 					Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 체결 {2}", Time[0], Instrument.FullName, DirText(dir)));
-					e3StopOrders.Clear();
 					ForgetE3Stop();
 				}
 				entryCount++;
@@ -628,6 +641,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (lastPosition != MarketPosition.Flat && marketPosition == MarketPosition.Flat)
 				TradeEnd();
 			lastPosition = marketPosition;
+			Reconcile();	// 포지션 수량이 바뀐 뒤 보호 주문을 다시 맞춤 (체결 콜백 안에서 포지션이 아직 안 바뀌었을 수 있음)
 		}
 
 		// 실시간·Playback 로그를 파일에도 남긴다 (LogToFile). 백테스트에서는 Output 창에만
@@ -1043,10 +1057,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				}
 			}
 
-			// 우상단 진입 횟수 (최소 진입 목표)
-			Draw.TextFixed(this, "TQ_EntryCount",
-				string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryCount >= MinEntries ? "" : " (최소 미달)"),
-				TextPosition.TopRight);
+			// 우상단 진입 횟수 (최소 진입 목표): 글자만 만들고 그리기는 OnRender
+			entryCountText = string.Format("{0} 진입: {1}/{2}회{3}", Instrument.MasterInstrument.Name, entryCount, MinEntries, entryCount >= MinEntries ? "" : " (최소 미달)");
 		}
 
 		// spec 4-11 박스 장: 대회 구간 시작 뒤 RangeFadeMinBars봉이 지났고, 시작부터 지금까지 효율비 ≤ RangeFadeMaxEr
@@ -1492,19 +1504,21 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			if (e3StopDir == 0)
 				return;
-			foreach (Order o in e3StopOrders.ToArray())
-				if (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted)
-					CancelOrder(o);
-			Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 취소 → {2}{3}", Time[0], Instrument.FullName, why,
-				e3StopOrders.Count == 0 ? "" : " (반대 방향 진입은 취소가 끝나기 전이면 NinjaTrader가 무시할 수 있음)"));
-			ForgetE3Stop();
-		}
-
-		private void ForgetE3Stop()
-		{
+			bool live = IsWorking(entryOrder) && entryOrder.OrderType == OrderType.StopMarket;
+			if (live)
+				CancelOrder(entryOrder);
+			Out(string.Format("[{0}][{1}][TQ_Strategy] E3 스탑 주문 취소 → {2}", Time[0], Instrument.FullName, why));
 			e3StopDir		= 0;
 			e3StopPrefix	= "";
-			e3StopOrders.Clear();
+		}
+
+		// 걸어 둔 E3 스탑 진입을 이번 봉에 다시 걸지 않음: 비관리형 주문은 취소할 때까지 살아 있으므로 직접 취소 (관리형은 봉 끝에 자동 취소였음)
+		private void ForgetE3Stop()
+		{
+			if (IsWorking(entryOrder) && entryOrder.OrderType == OrderType.StopMarket && PosQty() == 0)
+				CancelOrder(entryOrder);
+			e3StopDir		= 0;
+			e3StopPrefix	= "";
 		}
 
 		// 분할 진입. 조각 수량 = 진입 계약 × % 내림, 마지막 조각이 나머지 (4-8)
@@ -1595,10 +1609,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			baseQty = qty;
 			MlBegin();
 
-			// 시그널명은 거래마다 새로: TL7.1 = 7번째 진입의 1차 조각. NinjaTrader는 같은 시그널명에 걸었던 Set 익절·손절 값을 다음 진입에도 쓰고
-			// 지우는 메서드가 없어서(NT8 문서 SetProfitTarget), 이름을 재사용하면 익절을 걸지 않는 조각에 지난 거래의 익절가가 남는다
-			// (7/27 22:33: 트레일링으로 보낸 TS1·TS2가 21:35 거래의 익절가로 진입가 28522에 바로 체결). 멀리 거는 방법은 차트 가격 축이 늘어나서 뺐다
-			// E3 스탑을 같은 방향으로 다시 걸면 같은 이름 (NinjaTrader가 걸어 둔 주문을 고침)
+			// 주문 이름은 거래마다 새로: TL7.E = 7번째 거래 진입, TL7.S = 손절, TL7.1T = 1차 조각 익절 (비관리형 주문은 이름으로 찾음)
+			// E3 스탑을 같은 방향으로 다시 걸면 같은 이름 (걸어 둔 주문의 가격만 고침)
 			string prefix;
 			if (stopEntry && e3StopDir == d && e3StopPrefix.Length > 0)
 				prefix = e3StopPrefix;
@@ -1647,6 +1659,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				split = q1 + "/" + (qty - q1);
 			}
 
+			SubmitEntry(prefix, qty, stopEntry ? e3StopPx : double.NaN);
 			if (stopEntry && e3StopDir == d)
 				return;	// 같은 스탑 주문을 다시 건 것: 진입 줄은 처음 걸 때만
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2} {3} 경로={4} 구간={5}{6} 수량={7} ({8}) 손절={9:F2} 손익비={10} 추세={11} S={12} F={13}",
@@ -1691,6 +1704,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			int d = contScore < 0 ? -1 : 1;
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 최소 진입 강제 채우기 {2}/{3}회 → {4} 1계약", Time[0], Instrument.FullName, entryCount, MinEntries, DirText(d)));
+			CancelE3Stop("최소 진입 강제 채우기");
 			Enter(d > 0 ? Pos.TL : Pos.TS, d, "FORCE", 1, true, double.NaN);
 		}
 
@@ -1711,9 +1725,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 추가 진입 {2} {3}계약: 1차 익절 뒤 점수 속도 {4:F3} (기준 {5}) 손절={6:F2}",
 				Time[0], Instrument.FullName, DirText(dir), q, contVel, AddOnMinVel, stopPrice));
 			SubmitChunk(addSig, q, 3, double.NaN);
+			addOrder = SubmitOrderUnmanaged(0, EntryAction(dir), OrderType.Market, q, 0, 0, "", addSig + "A");
 		}
 
-		// 진입 조각 하나: 손절과 익절 지정가를 먼저 걸고 진입한다 (SetStopLoss는 진입 전에, NT8 공식 문서)
+		// 진입 조각 하나를 기록한다 (주문은 SubmitEntry가 합계로 한 번, 손절·익절은 체결 뒤 Reconcile이 건다)
 		private void SubmitChunk(string sig, int qty, int stage, double fixedPrice)
 		{
 			if (qty <= 0)
@@ -1723,17 +1738,26 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			chunkFixed[sig]	= fixedPrice;
 			chunkOrder.Add(sig);
 			liveSignals.Add(sig);
-			SetStopLoss(sig, CalculationMode.Price, OrderSafeStop(stopPrice, double.IsNaN(e3StopPx) ? Close[0] : e3StopPx), false);
-			SetTarget(sig);
-			if (!double.IsNaN(e3StopPx))
+		}
+
+		// 진입 주문: 조각 합계 수량으로 하나. E3 스탑 진입을 같은 방향으로 다시 걸면 걸어 둔 주문의 가격·수량만 고친다
+		private void SubmitEntry(string prefix, int qty, double stopPx)
+		{
+			tradePrefix = prefix;
+			string name = prefix + "E";
+			if (!double.IsNaN(stopPx))
 			{
-				// spec 4-2 v6: E3 스탑 진입 (관리형 주문, 다시 걸지 않으면 봉 끝에 취소)
-				if (dir > 0)	EnterLongStopMarket(qty, e3StopPx, sig);
-				else			EnterShortStopMarket(qty, e3StopPx, sig);
+				double px = Instrument.MasterInstrument.RoundToTickSize(stopPx);
+				if (IsWorking(entryOrder) && entryOrder.Name == name)
+				{
+					if (!IsChanging(entryOrder) && (entryOrder.StopPrice != px || entryOrder.Quantity != qty))
+						ChangeOrder(entryOrder, qty, 0, px);
+					return;
+				}
+				entryOrder = SubmitOrderUnmanaged(0, EntryAction(dir), OrderType.StopMarket, qty, 0, px, "", name);
 				return;
 			}
-			if (dir > 0)	EnterLong(qty, sig);
-			else			EnterShort(qty, sig);
+			entryOrder = SubmitOrderUnmanaged(0, EntryAction(dir), OrderType.Market, qty, 0, 0, "", name);
 		}
 
 		// 예상 손절 거리 (진입 전 손익비 계산용). CalcStop과 같은 식, 기준가 = 지금 종가
@@ -1787,10 +1811,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return Math.Max(dist, StopMinTicks * TickSize);
 		}
 
+		// 손절 가격이 바뀌었음: 실제 손절 주문은 Reconcile이 보유 수량 전체로 맞춘다
 		private void SetStopForLive(double price)
 		{
-			foreach (string sig in liveSignals)
-				SetStopLoss(sig, CalculationMode.Price, price, false);
+			Reconcile();
 		}
 
 		// 체결 전 임시 손절 주문 가격: 기준가와 같거나 넘으면 거부될 수 있어 최소 1틱 띄운다
@@ -1922,6 +1946,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 						SetTarget(sig);
 					}
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 손절 재계산(체결가 기준) 평균 체결가={2} 손절={3}", time, Instrument.FullName, avg, s));
+			Reconcile();
 			// 1차 익절 체결이 진입 체결 콜백보다 먼저 와서 본절을 못 옮긴 경우 (평단을 아직 몰랐음): 지금 옮긴다
 			if (tp1Done && !double.IsNaN(tp1FillPrice))
 				MoveStopAfterTp1(tp1FillPrice, time);
@@ -1976,19 +2001,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return chunkFixed.TryGetValue(sig, out fixedPrice) ? fixedPrice : double.NaN;
 		}
 
+		// 익절 지정가는 Reconcile이 조각 남은 수량으로 건다 (가격은 chunkFixed)
 		private void SetTarget(string sig)
 		{
-			double price = TargetPrice(sig);
-			if (double.IsNaN(price))
-				return;	// 익절이 없는 조각. 시그널명이 거래마다 새것이라(Enter의 signalSeq) 지난 거래의 익절 값이 남아 있지 않다
-			SetProfitTarget(sig, CalculationMode.Price, Instrument.MasterInstrument.RoundToTickSize(price));
 		}
 
 		// 봉 마감마다 밴드 익절 지정가를 새 밴드 값으로 옮긴다. 체결 콜백이 liveSignals를 바꿀 수 있어 복사본으로 돈다
 		private void UpdateTargets()
 		{
-			foreach (string sig in liveSignals.ToArray())
-				SetTarget(sig);
+			Reconcile();
 		}
 
 		private void OnTargetFill(string sig, double price, DateTime time)
@@ -2166,7 +2187,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			// spec 4-3 손절 안전장치: 현재가가 손절가를 BreakevenBufferTicks 넘게 지났는데 포지션이 남음 = 손절 주문 수량이 모자람 (7/24 E5).
 			// 손절 스탑은 닿는 순간 체결되므로 여유를 두어 정상 체결과 겹치지 않게 함
-			if (!double.IsNaN(stopPrice) && dir * (stopPrice - px) >= Math.Max(1, BreakevenBufferTicks) * TickSize)
+			if (!double.IsNaN(stopPrice) && dir * (stopPrice - px) >= Math.Max(1, BreakevenBufferTicks) * TickSize && UnprotectedQty() > 0)
 			{
 				FlattenRemaining(breakevenDone ? "BE_STOP" : "STOP", string.Format("현재가 {0}가 손절가 {1}를 지났는데 {2}계약 남음", px, stopPrice, Position.Quantity));
 				return;
@@ -2330,7 +2351,6 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		#endregion
 
 		#region 청산 주문
-		// 조각 하나를 시장가로 청산. 체결 콜백이 주문 호출 도중에 올 수 있어 상태를 먼저 바꾼다
 		// 조각 하나를 시장가로 청산. 수량은 그 조각의 실제 보유 수량(chunkLeft)
 		private void ExitChunk(string sig, string code, string why)
 		{
@@ -2342,10 +2362,21 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;
 			exitReason = code;
 			exitSent.Add(sig);
-			Order o = dir > 0 ? ExitLong(0, q, "x" + sig, sig) : ExitShort(0, q, "x" + sig, sig);
-			if (o != null)
-				exitOrders.Add(o);
+			SubmitMarketExit(q, new List<string> { sig });
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 청산 {2} 시그널={3} 수량={4} ({5})", Time[0], Instrument.FullName, code, sig, q, why));
+		}
+
+		// 시장가 청산 주문. 먼저 계획 수량에 넣고 Reconcile로 손절 수량을 줄인 뒤 낸다 (손절과 같이 체결돼 넘치지 않게)
+		private void SubmitMarketExit(int q, List<string> chunks)
+		{
+			if (q <= 0 || PosQty() == 0)
+				return;
+			int side = PosSide();
+			string name = "X" + (++exitSeq);
+			exitOrderChunks[name] = chunks ?? new List<string>();
+			plannedExitQty += q;
+			Reconcile();
+			SubmitOrderUnmanaged(0, side > 0 ? OrderAction.Sell : OrderAction.BuyToCover, OrderType.Market, q, 0, 0, "", name);
 		}
 
 		private int ChunkLeft(string sig)
@@ -2354,42 +2385,35 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return chunkLeft.TryGetValue(sig, out q) ? q : 0;
 		}
 
-		// 전량 청산: 살아 있는 조각마다 실제 보유 수량만큼 청산한다. ExitLong()처럼 수량 없이 내면 NinjaTrader가 조각별로 기억하는 수량을 써서
-		// 실제 포지션보다 많이 청산하고 반대 포지션이 생길 수 있다 (10/6 Playback). 조각 기록으로 다 못 덮은 수량은 다음 봉에 FlattenLeftover가 정리한다
+		// 전량 청산: 실제 보유 수량에서 이미 낸 시장가 청산을 뺀 만큼 시장가로 (조각 기록은 체결 때 먼 조각부터 줄임)
 		private void FlattenRemaining(string code, string why)
 		{
 			exitReason = code;
-			int sent = 0;
+			List<string> chunks = new List<string>();
 			foreach (string sig in liveSignals.ToArray())
-			{
-				int q = ChunkLeft(sig);
-				if (q <= 0)
-					continue;
-				exitSent.Add(sig);
-				Order o = dir > 0 ? ExitLong(0, q, "x" + sig, sig) : ExitShort(0, q, "x" + sig, sig);
-				if (o != null)
-					exitOrders.Add(o);
-				sent += q;
-			}
+				if (ChunkLeft(sig) > 0)
+				{
+					exitSent.Add(sig);
+					chunks.Add(sig);
+				}
 			liveSignals.Clear();
 			pos = Pos.None;
-			Out(string.Format("[{0}][{1}][TQ_Strategy] 전량 청산 {2} ({3}) 수량={4}", Time[0], Instrument.FullName, code, why, sent));
-			if (sent == 0)
-				FlattenLeftover();
+			if (IsWorking(entryOrder) && PosQty() == 0)
+				CancelOrder(entryOrder);	// 아직 체결 안 된 진입은 취소
+			int q = PosQty() - plannedExitQty;
+			if (q > 0)
+				SubmitMarketExit(q, chunks);
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 전량 청산 {2} ({3}) 수량={4}", Time[0], Instrument.FullName, code, why, Math.Max(0, q)));
+			Reconcile();
 		}
 
-		// 조각과 상관없이 남은 포지션을 실제 보유 수량(Position.Quantity)만큼 청산한다. 직접 낸 청산 주문이 아직 살아 있으면 기다린다 (같은 수량을 두 번 내지 않게)
+		// 청산을 결정했는데 포지션이 남아 있으면 (청산 주문 거부·미체결) 남은 수량을 다시 시장가로. 낸 청산 주문이 아직 살아 있으면 기다린다
 		private void FlattenLeftover()
 		{
-			if (Position.MarketPosition == MarketPosition.Flat)
+			if (PosQty() == 0 || plannedExitQty > 0)
 				return;
-			foreach (Order o in exitOrders)
-				if (o.OrderState != OrderState.Filled && o.OrderState != OrderState.Cancelled && o.OrderState != OrderState.Rejected)
-					return;
-			int q = Position.Quantity;
-			Order x = Position.MarketPosition == MarketPosition.Long ? ExitLong(0, q, "Flat", "") : ExitShort(0, q, "Flat", "");
-			if (x != null)
-				exitOrders.Add(x);
+			int q = PosQty();
+			SubmitMarketExit(q, null);
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 남은 포지션 청산 {2} {3}계약", Time[0], Instrument.FullName, Position.MarketPosition, q));
 		}
 
@@ -2439,43 +2463,54 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			chunkLeft.Clear();
 			stageFilled.Clear();
 			exitSent.Clear();
-			exitOrders.Clear();
+			chunkFilled.Clear();
+			exitOrderChunks.Clear();
+			plannedExitQty	= 0;
+			// 미보유: 남은 손절·익절 주문이 있으면 취소 (Reconcile이 먼저 거두지만 한 번 더). E3 스탑 진입(entryOrder)은 RouteEntry가 다룸
+			if (PosQty() == 0)
+			{
+				CancelIfWorking(stopOrder);
+				foreach (Order t in tpOrders.Values)
+					CancelIfWorking(t);
+			}
+			stopOrder		= null;
+			addOrder		= null;
+			tpOrders.Clear();
 		}
 		#endregion
 
 		#region 주문 이벤트
-		// 주문 오류 처리 (HandleOrderErrors): 손절 변경 거부 → 실제 가격으로 되돌리고 나중에 재시도, 손절 주문 거부 → 즉시 전량 청산, 진입 거부 → 그 조각 제외
+		// 주문 상태 (비관리형): 주문 객체를 이름으로 잡고, 손절 거부 → 즉시 전량 청산, 손절 가격 변경 거부 → 기존 가격 유지 뒤 재시도, 취소·거부된 청산은 계획 수량에서 뺌
 		protected override void OnOrderUpdate(Order order, double limitPrice, double orderStopPrice, int quantity, int filled,
 			double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string comment)
 		{
 			if (order == null)
 				return;
-			// E3 스탑 진입 주문 추적 (취소용)
-			if (order.OrderType == OrderType.StopMarket && e3StopPrefix.Length > 0 && order.Name.StartsWith(e3StopPrefix))
-			{
-				if (orderState == OrderState.Filled || orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
-					e3StopOrders.Remove(order);
-				else if (!e3StopOrders.Contains(order))
-					e3StopOrders.Add(order);
-			}
-			bool rejected = orderState == OrderState.Rejected;
-			if (!rejected && error == ErrorCode.NoError)
-				return;
-
+			ToRealtimeOrders();
 			string name = order.Name;
-			Out(string.Format("[{0}][{1}][TQ_Strategy] 주문 오류 이름={2} 상태={3} 오류={4} 내용={5} 스탑가={6} 수량={7}",
-				time, Instrument.FullName, name, orderState, error, comment, order.StopPrice, quantity));
-
-			if (name == "Stop loss")
+			// 주문 객체는 이름으로 잡는다: 제출 직후에는 돌려받은 참조가 아직 안 채워졌을 수 있음 (NT8 GetRealtimeOrder·Unmanaged 문서)
+			if (tradePrefix.Length > 0)
 			{
-				if (rejected)
+				if (name == tradePrefix + "E")							entryOrder = order;
+				else if (name == tradePrefix + "S")						stopOrder = order;
+				else if (addSig.Length > 0 && name == addSig + "A")	addOrder = order;
+				else if (name.EndsWith("T") && chunkQty.ContainsKey(name.Substring(0, name.Length - 1)))
+					tpOrders[name.Substring(0, name.Length - 1)] = order;
+			}
+			bool gone = orderState == OrderState.Cancelled || orderState == OrderState.Rejected;
+			if (gone && exitOrderChunks.ContainsKey(name))
+				plannedExitQty = Math.Max(0, plannedExitQty - Math.Max(0, order.Quantity - order.Filled));	// 체결 안 된 청산 수량은 계획에서 뺌
+
+			if (orderState == OrderState.Rejected || error != ErrorCode.NoError)
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 주문 오류 이름={2} 상태={3} 오류={4} 내용={5} 스탑가={6} 수량={7}",
+					time, Instrument.FullName, name, orderState, error, comment, order.StopPrice, quantity));
+			if (name == tradePrefix + "S")
+			{
+				if (orderState == OrderState.Rejected && PosQty() > 0)
 				{
-					if (Position.MarketPosition != MarketPosition.Flat)
-					{
-						gapFlattened = true;
-						Out(string.Format("[{0}][{1}][TQ_Strategy] 손절 주문 거부 → 손절 없이 둘 수 없어 즉시 전량 청산", time, Instrument.FullName));
-						FlattenRemaining("STOP", "손절 주문 거부");
-					}
+					gapFlattened = true;
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 손절 주문 거부 → 손절 없이 둘 수 없어 즉시 전량 청산", time, Instrument.FullName));
+					FlattenRemaining("STOP", "손절 주문 거부");
 				}
 				else if (error == ErrorCode.UnableToChangeOrder)
 				{
@@ -2488,11 +2523,236 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					Out(string.Format("[{0}][{1}][TQ_Strategy] 손절 가격 변경 거부 → 기존 손절 {2} 유지", time, Instrument.FullName, stopPrice));
 				}
 			}
-			else if (rejected && chunkQty.ContainsKey(name))
+			if (gone || orderState == OrderState.Accepted || orderState == OrderState.Working)
+				Reconcile();
+		}
+
+		// 실시간으로 넘어올 때 과거 처리 중 낸 주문 참조를 실시간 주문으로 바꾼다 (NT8 GetRealtimeOrder 문서)
+		private void ToRealtimeOrders()
+		{
+			if (State != State.Realtime)
+				return;
+			if (entryOrder != null && entryOrder.IsBacktestOrder)	entryOrder = GetRealtimeOrder(entryOrder);
+			if (addOrder != null && addOrder.IsBacktestOrder)		addOrder = GetRealtimeOrder(addOrder);
+			if (stopOrder != null && stopOrder.IsBacktestOrder)		stopOrder = GetRealtimeOrder(stopOrder);
+			foreach (string sig in new List<string>(tpOrders.Keys))
+				if (tpOrders[sig] != null && tpOrders[sig].IsBacktestOrder)
+					tpOrders[sig] = GetRealtimeOrder(tpOrders[sig]);
+		}
+
+		private static bool IsWorking(Order o)
+		{
+			if (o == null)
+				return false;
+			OrderState st = o.OrderState;
+			return st == OrderState.Initialized || st == OrderState.Submitted || st == OrderState.Accepted || st == OrderState.TriggerPending
+				|| st == OrderState.Working || st == OrderState.ChangePending || st == OrderState.ChangeSubmitted || st == OrderState.PartFilled;
+		}
+
+		private static bool IsGoingAway(Order o)
+		{
+			return o != null && (o.OrderState == OrderState.CancelPending || o.OrderState == OrderState.CancelSubmitted);
+		}
+
+		// 바꾸는 중이거나 아직 접수 전인 주문은 다시 고치지 않는다 (접수되면 OnOrderUpdate → Reconcile이 다시 맞춤)
+		private static bool IsChanging(Order o)
+		{
+			return o.OrderState == OrderState.Initialized || o.OrderState == OrderState.Submitted || o.OrderState == OrderState.ChangePending
+				|| o.OrderState == OrderState.ChangeSubmitted || IsGoingAway(o);
+		}
+
+		private void CancelIfWorking(Order o)
+		{
+			if (IsWorking(o))
+				CancelOrder(o);
+		}
+
+		private int PosQty()	{ return Position.MarketPosition == MarketPosition.Flat ? 0 : Position.Quantity; }
+
+		// 손절 주문이 덮지 못하는 보유 수량 (시장가 청산을 낸 수량은 덮인 것으로 봄). 안전장치는 이 값이 있을 때만 청산
+		private int UnprotectedQty()
+		{
+			int covered = plannedExitQty + (IsWorking(stopOrder) ? Math.Max(0, stopOrder.Quantity - stopOrder.Filled) : 0);
+			return Math.Max(0, PosQty() - covered);
+		}
+		private int PosSide()	{ return Position.MarketPosition == MarketPosition.Long ? 1 : Position.MarketPosition == MarketPosition.Short ? -1 : 0; }
+		private static OrderAction EntryAction(int d)	{ return d > 0 ? OrderAction.Buy : OrderAction.SellShort; }
+		private static OrderAction ExitAction(int d)	{ return d > 0 ? OrderAction.Sell : OrderAction.BuyToCover; }
+
+		// 실제 보유 수량에 맞춰 보호 주문을 맞춘다. 체결·주문 상태 변화·봉 마감마다 부른다 (안에서 다시 불리면 끝난 뒤 한 번 더)
+		//  · 미보유 → 손절·익절 취소
+		//  · 계획에 없는 포지션(방향이 다르거나 거래 정보 없음, 초과 체결) → 손절·익절을 거두고 시장가로 정리
+		//  · 그 외 → 손절 1개 = 보유 − 아직 체결 안 된 시장가 청산, 익절 = 조각 단계 순서로 그 수량 안에서 조각 남은 수량
+		private void Reconcile()
+		{
+			if (inReconcile)
 			{
-				liveSignals.Remove(name);
-				Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 주문 거부 → 시그널 {2} 제외", time, Instrument.FullName, name));
+				reconcileAgain = true;
+				return;
 			}
+			inReconcile = true;
+			try
+			{
+				for (int n = 0; n < 4; n++)
+				{
+					reconcileAgain = false;
+					ReconcileOnce();
+					if (!reconcileAgain)
+						break;
+				}
+			}
+			finally
+			{
+				inReconcile = false;
+			}
+		}
+
+		private void ReconcileOnce()
+		{
+			int P = PosQty(), side = PosSide();
+			if (P == 0)
+			{
+				CancelIfWorking(stopOrder);
+				foreach (Order t in tpOrders.Values)
+					CancelIfWorking(t);
+				return;
+			}
+			if (dir == 0 || side != dir)
+			{
+				CancelIfWorking(stopOrder);
+				foreach (Order t in tpOrders.Values)
+					CancelIfWorking(t);
+				if (plannedExitQty <= 0)
+				{
+					string name = "Fix" + (++exitSeq);
+					exitOrderChunks[name] = new List<string>();
+					plannedExitQty += P;
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 계획에 없는 포지션 {2} {3}계약 → 시장가 정리", Time[0], Instrument.FullName, Position.MarketPosition, P));
+					SubmitOrderUnmanaged(0, side > 0 ? OrderAction.Sell : OrderAction.BuyToCover, OrderType.Market, P, 0, 0, "", name);
+				}
+				return;
+			}
+			int need = Math.Max(0, P - plannedExitQty);
+
+			// ── 보호 손절: 보유 수량 전체 하나 ──
+			if (need > 0 && !double.IsNaN(stopPrice))
+			{
+				double px = Instrument.MasterInstrument.RoundToTickSize(stopPrice);
+				bool beyond = dir > 0 ? px >= GetCurrentBid(0) : px <= GetCurrentAsk(0);
+				if (beyond && !IsWorking(stopOrder))
+				{
+					// 걸려는 손절가를 현재가가 이미 지남: 걸 수 없으니 바로 청산
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 손절가 {2}를 현재가가 이미 지남 → 전량 청산", Time[0], Instrument.FullName, px));
+					gapFlattened = true;
+					FlattenRemaining(breakevenDone ? "BE_STOP" : "STOP", "손절가를 이미 지남");
+					return;
+				}
+				if (IsGoingAway(stopOrder))
+				{
+					// 취소 중인 손절이 끝나면 다시 건다 (두 개가 겹치지 않게)
+				}
+				else if (!IsWorking(stopOrder))
+					stopOrder = SubmitOrderUnmanaged(0, ExitAction(dir), OrderType.StopMarket, need, 0, px, "", tradePrefix + "S");
+				else if (!IsChanging(stopOrder) && !beyond && (stopOrder.StopPrice != px || stopOrder.Quantity - stopOrder.Filled != need))
+					ChangeOrder(stopOrder, stopOrder.Filled + need, 0, px);
+			}
+			else
+				CancelIfWorking(stopOrder);
+
+			// ── 익절 지정가: 단계 순서로, 손절이 덮는 수량 안에서 ──
+			int room = need;
+			foreach (string sig in chunkOrder)
+			{
+				double tp = TargetPrice(sig);
+				Order t;
+				tpOrders.TryGetValue(sig, out t);
+				int want = 0;
+				if (!double.IsNaN(tp) && entryFillQty > 0 && liveSignals.Contains(sig) && !exitSent.Contains(sig))
+					want = Math.Min(Math.Max(0, ChunkLeft(sig)), room);
+				room -= want;
+				if (want <= 0)
+				{
+					CancelIfWorking(t);
+					continue;
+				}
+				double lp = Instrument.MasterInstrument.RoundToTickSize(tp);
+				if (IsGoingAway(t))
+					continue;
+				if (!IsWorking(t))
+					tpOrders[sig] = SubmitOrderUnmanaged(0, ExitAction(dir), OrderType.Limit, want, lp, 0, "", sig + "T");
+				else if (!IsChanging(t) && (t.LimitPrice != lp || t.Quantity - t.Filled != want))
+				{
+					if (t.Filled > 0 && t.Quantity - t.Filled < want)
+						continue;	// 일부 체결된 지정가는 늘리지 않음
+					ChangeOrder(t, t.Filled + want, lp, 0);
+				}
+			}
+		}
+
+		// 진입 체결을 조각 순서(1차 → 2차 → 마지막)로 나눈다. 계획보다 많이 체결되면(겹친 진입) 마지막 조각에
+		private void AllocateEntry(int q)
+		{
+			string last = null;
+			foreach (string sig in chunkOrder)
+			{
+				if (sig == addSig)
+					continue;
+				last = sig;
+				int f;
+				chunkFilled.TryGetValue(sig, out f);
+				int take = Math.Min(q, Math.Max(0, chunkQty[sig] - f));
+				if (take <= 0)
+					continue;
+				chunkFilled[sig]	= f + take;
+				chunkLeft[sig]		= ChunkLeft(sig) + take;
+				q -= take;
+				if (pos != Pos.None && !exitSent.Contains(sig) && !liveSignals.Contains(sig))
+					liveSignals.Add(sig);
+				if (q <= 0)
+					break;
+			}
+			if (q > 0 && last != null)
+				chunkLeft[last] = ChunkLeft(last) + q;
+		}
+
+		private int ReduceChunk(string sig, int q, double price, DateTime time, string name)
+		{
+			int left = ChunkLeft(sig);
+			int take = Math.Min(q, Math.Max(0, left));
+			if (take <= 0)
+				return 0;
+			chunkLeft[sig] = left - take;
+			TradeExitFill(name, price, take, time, sig);
+			if (chunkLeft[sig] <= 0)
+				liveSignals.Remove(sig);
+			return take;
+		}
+
+		// 청산 체결 수량을 조각에서 뺀다: 지정한 조각 먼저, 그다음 먼 조각부터 (추가 → 마지막 → 2차 → 1차)
+		private void ReduceChunks(int q, double price, DateTime time, string name, List<string> first)
+		{
+			if (first != null)
+				foreach (string sig in first)
+				{
+					if (q <= 0)
+						break;
+					q -= ReduceChunk(sig, q, price, time, name);
+				}
+			List<string> order = new List<string>();
+			if (addSig.Length > 0)
+				order.Add(addSig);
+			for (int st = 3; st >= 1; st--)
+				foreach (string sig in chunkOrder)
+					if (sig != addSig && chunkStage[sig] == st)
+						order.Add(sig);
+			foreach (string sig in order)
+			{
+				if (q <= 0)
+					break;
+				q -= ReduceChunk(sig, q, price, time, name);
+			}
+			if (q > 0)
+				TradeExitFill(name, price, q, time, "");	// 조각 기록 밖 수량 (계획에 없는 포지션 정리)
 		}
 
 		protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity,
@@ -2500,48 +2760,56 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			if (execution == null || execution.Order == null)
 				return;
-			string name = execution.Order.Name;
-			MarkExecution(name, price, quantity, marketPosition, time);
+			Order o		= execution.Order;
+			string name	= o.Name;
+			bool isEntry	= o.OrderAction == OrderAction.Buy || o.OrderAction == OrderAction.SellShort;
+			int ed			= o.OrderAction == OrderAction.Buy || o.OrderAction == OrderAction.BuyToCover ? 1 : -1;	// 이 체결의 매수(+1)·매도(−1)
+			AddMark(name, price, quantity, ed > 0, isEntry, time);
 
-			if (!chunkQty.ContainsKey(name))
+			if (isEntry)
 			{
-				Out(string.Format("[{0}][{1}][TQ_Strategy] 청산 체결 {2} 가격={3} 수량={4}", time, Instrument.FullName, name, price, quantity));
-				TradeExitFill(name, price, quantity, time, execution.Order.FromEntrySignal);
-			}
-
-			if (chunkQty.ContainsKey(name))
-			{
-				// 조각 진입 체결: 실제 보유 수량을 늘린다. 익절·손절로 0이 됐다가 늦게 온 부분 체결이면 다시 살린다(직접 청산한 조각은 빼고)
-				chunkLeft[name] = ChunkLeft(name) + quantity;
-				if (chunkLeft[name] > 0 && pos != Pos.None && !exitSent.Contains(name) && !liveSignals.Contains(name))
-					liveSignals.Add(name);
-				if (name == addSig)
+				if (addSig.Length > 0 && name == addSig + "A")
 				{
+					chunkLeft[addSig] = ChunkLeft(addSig) + quantity;
+					if (pos != Pos.None && !exitSent.Contains(addSig) && !liveSignals.Contains(addSig))
+						liveSignals.Add(addSig);
 					addFillSum += price * quantity;
 					addFillQty += quantity;
 					Out(string.Format("[{0}][{1}][TQ_Strategy] 추가 진입 체결 가격={2} 수량={3} 손절={4:F2}", time, Instrument.FullName, price, quantity, stopPrice));
 				}
-				else
+				else if (dir != 0 && ed == dir && (name == tradePrefix + "E" || pos != Pos.None))
+				{
+					AllocateEntry(quantity);
 					OnEntryFill(price, quantity, time);
+				}
+				else
+					Out(string.Format("[{0}][{1}][TQ_Strategy] 계획에 없는 진입 체결 {2} 가격={3} 수량={4} → 정리", time, Instrument.FullName, name, price, quantity));
 			}
 			else
 			{
-				if (name == "Profit target")
-					OnTargetFill(execution.Order.FromEntrySignal, price, time);
-				else if (name == "Stop loss")
-					OnStopLossFill(price, time);
-
-				// 그 조각의 실제 보유 수량을 줄이고, 0 이하가 되면 조각을 끝낸다 (손절·익절·직접 청산 모두).
-				// 청산 체결 콜백이 진입 체결 콜백보다 먼저 올 수 있어(7/27 22:33) 음수를 허용하고 뒤에 오는 진입 체결로 맞춘다
-				string from = execution.Order.FromEntrySignal;
-				if (!string.IsNullOrEmpty(from) && chunkQty.ContainsKey(from))
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 청산 체결 {2} 가격={3} 수량={4}", time, Instrument.FullName, name, price, quantity));
+				List<string> chunks;
+				string tsig = name.EndsWith("T") ? name.Substring(0, name.Length - 1) : "";
+				// 조각 수량을 먼저 줄이고 단계 처리(손절 이동 → Reconcile)를 한다. 거꾸로 하면 Reconcile이 아직 남은 줄 알고 익절을 다시 냄
+				if (name == tradePrefix + "S")
 				{
-					chunkLeft[from] = ChunkLeft(from) - quantity;
-					if (chunkLeft[from] <= 0)
-						liveSignals.Remove(from);
+					ReduceChunks(quantity, price, time, "Stop loss", null);
+					OnStopLossFill(price, time);
 				}
+				else if (tsig.Length > 0 && chunkQty.ContainsKey(tsig))
+				{
+					ReduceChunks(quantity, price, time, "Profit target", new List<string> { tsig });
+					OnTargetFill(tsig, price, time);
+				}
+				else if (exitOrderChunks.TryGetValue(name, out chunks))
+				{
+					plannedExitQty = Math.Max(0, plannedExitQty - quantity);
+					ReduceChunks(quantity, price, time, "x" + name, chunks);
+				}
+				else
+					ReduceChunks(quantity, price, time, name, null);
 			}
-
+			Reconcile();
 			UpdateStatusPanel(null);
 		}
 		#endregion
@@ -2825,8 +3093,16 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			if (BoxReady())
 			{
-				Draw.Line(this, "TQ_BoxH_" + sessionTag, false, boxStartTime, boxHigh, Time[0], boxHigh, Brushes.Goldenrod, DashStyleHelper.Dash, 1);
-				Draw.Line(this, "TQ_BoxL_" + sessionTag, false, boxStartTime, boxLow, Time[0], boxLow, Brushes.Goldenrod, DashStyleHelper.Dash, 1);
+				// 장전 박스 선: 구간 시작 ~ 지금 봉의 고가·저가를 기록만 하고 그리기는 OnRender (2026-10-22: 그림은 OnRender, 계산은 OnBarUpdate)
+				lock (renderLock)
+				{
+					if (boxLines.Count == 0 || boxLines[boxLines.Count - 1].Tag != sessionTag)
+						boxLines.Add(new BoxLine { Tag = sessionTag });
+					BoxLine bl = boxLines[boxLines.Count - 1];
+					bl.Start = boxStartTime; bl.End = Time[0]; bl.High = boxHigh; bl.Low = boxLow;
+					if (boxLines.Count > 30)
+						boxLines.RemoveAt(0);
+				}
 			}
 		}
 
@@ -2928,8 +3204,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			if (Position.MarketPosition == MarketPosition.Flat)
 			{
-				RemoveDrawObject("TQ_StopLine");
-				RemoveDrawObject("TQ_AvgLine");
+				renderStop	= double.NaN;
+				renderAvg	= double.NaN;
 				sb.Section("진입 조건", ToneEntry);
 				if (cands != null)
 				{
@@ -2961,9 +3237,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				sb.Section("포지션", dir > 0 ? TonePosLong : TonePosShort);
 				sb.AppendFormat("{0} {1} @ {2:N2}  {3}{4:N2}  ({5}, {6}{7})\n", DirText(dir), Position.Quantity, avg, pts >= 0 ? "+" : "", pts,
 					PathName(path), session == "pre" ? "장전" : "장후", fallbackEntry ? ", 최소 진입 보장" : "");
-				if (!double.IsNaN(stopPrice))
-					Draw.HorizontalLine(this, "TQ_StopLine", false, stopPrice, Brushes.Magenta, DashStyleHelper.Solid, 2);
-				Draw.HorizontalLine(this, "TQ_AvgLine", false, avg, Brushes.Gray, DashStyleHelper.Dash, 1);
+				renderStop	= stopPrice;	// 손절선·평단선은 OnRender가 그림
+				renderAvg	= avg;
 				AppendExitSections(sb, st, S);
 			}
 			panelSections = sb.Sections;
@@ -3066,8 +3341,21 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		{
 			base.OnRender(chartControl, chartScale);
 
+			if (!ShowStatus || RenderTarget == null || ChartPanel == null || ChartBars == null)
+				return;
+			List<IDisposable> marksTrash = new List<IDisposable>();
+			try
+			{
+				RenderChartMarks(chartControl, chartScale, marksTrash);
+			}
+			finally
+			{
+				foreach (IDisposable d in marksTrash)
+					d.Dispose();
+			}
+
 			List<PanelSection> sections = panelSections;
-			if (!ShowStatus || sections == null || sections.Count == 0 || RenderTarget == null || ChartPanel == null)
+			if (sections == null || sections.Count == 0)
 				return;
 
 			float k100		= Math.Max(50, StatusPanelScale) / 100f;
@@ -3166,47 +3454,132 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			}
 		}
 
-		// 체결 라벨과 화살표: 진입은 화살표(매수 ↑ 초록, 매도 ↓ 빨강) + 라벨, 청산은 라벨. 같은 봉 같은 종류는 수량을 합친다
-		private void MarkExecution(string name, double price, int quantity, MarketPosition side, DateTime time)
+		// 체결 표시 기록 (그리기는 OnRender). 진입: 매수 ▲ 초록·매도 ▼ 빨강, 청산: 파랑 화살표 + 종류·수량. 같은 분 같은 종류는 수량을 합친다
+		private void AddMark(string name, double price, int quantity, bool isBuy, bool isEntry, DateTime time)
 		{
-			if (!ShowStatus || ChartControl == null)
+			if (!ShowStatus)
 				return;
-			bool isBuy = side == MarketPosition.Long;
-			string kind;
-			Brush brush;
-			if (chunkQty.ContainsKey(name))
+			string kind = isEntry ? (isBuy ? "매수" : "매도")
+				: name == tradePrefix + "S" ? (!breakevenDone ? "손절" : stopNote == "트레일링" ? "트레일링 스탑" : "본절")
+				: name.EndsWith("T") ? "익절" : "청산";
+			DateTime minute = new DateTime(time.Year, time.Month, time.Day, time.Hour, time.Minute, 0);
+			lock (renderLock)
 			{
-				kind	= isBuy ? "매수" : "매도";
-				brush	= isBuy ? Brushes.LimeGreen : Brushes.Tomato;
-				if (isBuy)	Draw.ArrowUp(this, "TQ_Arr_" + CurrentBars[0], false, time, Low[0] - TickSize * 8, Brushes.LimeGreen);
-				else		Draw.ArrowDown(this, "TQ_Arr_" + CurrentBars[0], false, time, High[0] + TickSize * 8, Brushes.Tomato);
+				ExecMark last = marks.Count > 0 ? marks[marks.Count - 1] : null;
+				if (last != null && last.Minute == minute && last.Kind == kind)
+				{
+					last.Qty += quantity;
+					return;
+				}
+				marks.Add(new ExecMark { Time = time, Minute = minute, Price = price, Buy = isBuy, Entry = isEntry, Kind = kind, Qty = quantity });
+				if (marks.Count > 400)
+					marks.RemoveAt(0);
 			}
-			else if (name.StartsWith("x") || name == "Profit target")
+		}
+
+		private class ExecMark
+		{
+			public DateTime	Time, Minute;
+			public double	Price;
+			public bool		Buy, Entry;
+			public string	Kind;
+			public int		Qty;
+		}
+
+		private class BoxLine
+		{
+			public string	Tag;
+			public DateTime	Start, End;
+			public double	High, Low;
+		}
+
+		private readonly object			renderLock		= new object();
+		private readonly List<ExecMark>	marks			= new List<ExecMark>();
+		private readonly List<BoxLine>	boxLines		= new List<BoxLine>();
+		private double					renderStop		= double.NaN;
+		private double					renderAvg		= double.NaN;
+		private string					entryCountText	= "";
+
+		// 차트 그림: 장전 박스 점선, 손절선·평단선, 체결 표시, 진입 횟수. 값은 OnBarUpdate·체결 때 기록해 둔 것만 쓴다 (계산 없음)
+		private void RenderChartMarks(ChartControl chartControl, ChartScale chartScale, List<IDisposable> trash)
+		{
+			List<ExecMark> ms;
+			List<BoxLine> bls;
+			lock (renderLock)
 			{
-				kind	= "익절·청산";
-				brush	= Brushes.Goldenrod;
+				ms	= new List<ExecMark>(marks);
+				bls	= new List<BoxLine>();
+				foreach (BoxLine b in boxLines)
+					bls.Add(new BoxLine { Tag = b.Tag, Start = b.Start, End = b.End, High = b.High, Low = b.Low });
 			}
-			else if (name == "Stop loss")
+			float x0 = ChartPanel.X, x1 = ChartPanel.X + ChartPanel.W;
+			DateTime tFrom = ChartBars.GetTimeByBarIdx(chartControl, ChartBars.FromIndex);
+			DateTime tTo = ChartBars.GetTimeByBarIdx(chartControl, ChartBars.ToIndex);
+
+			SharpDX.Direct2D1.StrokeStyle dash = new SharpDX.Direct2D1.StrokeStyle(NinjaTrader.Core.Globals.D2DFactory,
+				new SharpDX.Direct2D1.StrokeStyleProperties { DashStyle = SharpDX.Direct2D1.DashStyle.Dash });
+			trash.Add(dash);
+			SharpDX.Direct2D1.SolidColorBrush gold	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)218, (byte)165, (byte)32, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush mag	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)255, (byte)0, (byte)255, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush gray	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)150, (byte)150, (byte)150, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush green	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)50, (byte)205, (byte)50, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush red	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)255, (byte)99, (byte)71, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush blue	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)30, (byte)144, (byte)255, (byte)255));
+			SharpDX.Direct2D1.SolidColorBrush white	= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color((byte)235, (byte)235, (byte)235, (byte)255));
+			trash.Add(gold); trash.Add(mag); trash.Add(gray); trash.Add(green); trash.Add(red); trash.Add(blue); trash.Add(white);
+			float k100 = Math.Max(50, StatusPanelScale) / 100f;
+			SharpDX.DirectWrite.TextFormat fmt = new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Malgun Gothic", 11f * k100);
+			SharpDX.DirectWrite.TextFormat big = new SharpDX.DirectWrite.TextFormat(NinjaTrader.Core.Globals.DirectWriteFactory, "Malgun Gothic",
+				SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, 13f * k100);
+			trash.Add(fmt); trash.Add(big);
+
+			// 장전 박스: 구간 시작 ~ 마지막 기록 봉까지 고가·저가 점선 (화면 밖 구간은 건너뜀)
+			foreach (BoxLine b in bls)
 			{
-				kind	= !breakevenDone ? "손절" : stopNote == "트레일링" ? "트레일링 스탑" : "본절";
-				brush	= Brushes.Magenta;
+				if (b.End < tFrom || b.Start > tTo)
+					continue;
+				float xa = Math.Max(x0, chartControl.GetXByTime(b.Start < tFrom ? tFrom : b.Start));
+				float xb = Math.Min(x1, chartControl.GetXByTime(b.End > tTo ? tTo : b.End));
+				float yh = chartScale.GetYByValue(b.High), yl = chartScale.GetYByValue(b.Low);
+				RenderTarget.DrawLine(new SharpDX.Vector2(xa, yh), new SharpDX.Vector2(xb, yh), gold, 1f, dash);
+				RenderTarget.DrawLine(new SharpDX.Vector2(xa, yl), new SharpDX.Vector2(xb, yl), gold, 1f, dash);
 			}
-			else
+			// 손절선(자홍 실선)·평단선(회색 점선): 보유 중일 때 차트 끝에서 끝까지
+			double sp = renderStop, ap = renderAvg;
+			if (!double.IsNaN(sp))
 			{
-				kind	= "청산";
-				brush	= Brushes.DodgerBlue;
+				float y = chartScale.GetYByValue(sp);
+				RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(x1, y), mag, 2f);
 			}
-			// 청산 화살표: 매도 체결(매수 청산)은 체결가 위에 ↓, 매수 체결(매도 청산)은 아래에 ↑ (파랑)
-			if (!chunkQty.ContainsKey(name))
+			if (!double.IsNaN(ap))
 			{
-				if (isBuy)	Draw.ArrowUp(this, "TQ_ArrX_" + CurrentBars[0], false, time, price - TickSize * 6, Brushes.DodgerBlue);
-				else		Draw.ArrowDown(this, "TQ_ArrX_" + CurrentBars[0], false, time, price + TickSize * 6, Brushes.DodgerBlue);
+				float y = chartScale.GetYByValue(ap);
+				RenderTarget.DrawLine(new SharpDX.Vector2(x0, y), new SharpDX.Vector2(x1, y), gray, 1f, dash);
 			}
-			string tag	= "TQ_Ex_" + kind + "_" + CurrentBars[0];
-			markQty		= tag == markTag ? markQty + quantity : quantity;
-			markTag		= tag;
-			Draw.Text(this, tag, false, kind + " " + markQty, time, price, isBuy ? -20 : 20, brush, markFont,
-				System.Windows.TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
+			// 체결 표시
+			foreach (ExecMark m in ms)
+			{
+				if (m.Time < tFrom || m.Time > tTo.AddMinutes(1))
+					continue;
+				float x = chartControl.GetXByTime(m.Minute);
+				float y = chartScale.GetYByValue(m.Price);
+				SharpDX.Direct2D1.SolidColorBrush b = m.Entry ? (m.Buy ? green : red) : blue;
+				string arrow = m.Buy ? "▲" : "▼";
+				float dy = m.Buy ? 6f * k100 : -18f * k100;
+				SharpDX.DirectWrite.TextLayout la = new SharpDX.DirectWrite.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, arrow, big, 40f, 30f);
+				SharpDX.DirectWrite.TextLayout lt = new SharpDX.DirectWrite.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, m.Kind + " " + m.Qty, fmt, 200f, 30f);
+				trash.Add(la); trash.Add(lt);
+				RenderTarget.DrawTextLayout(new SharpDX.Vector2(x - la.Metrics.Width / 2, y + dy), la, b, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+				RenderTarget.DrawTextLayout(new SharpDX.Vector2(x - lt.Metrics.Width / 2, y + dy + (m.Buy ? 16f : -14f) * k100), lt, b, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+			}
+			// 우상단 진입 횟수
+			string ec = entryCountText;
+			if (!string.IsNullOrEmpty(ec))
+			{
+				SharpDX.DirectWrite.TextLayout l = new SharpDX.DirectWrite.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, ec, big, 400f, 40f);
+				trash.Add(l);
+				RenderTarget.DrawTextLayout(new SharpDX.Vector2(x1 - l.Metrics.Width - 8f, ChartPanel.Y + 6f), l, white, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+			}
 		}
 		#endregion
 
