@@ -228,7 +228,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private const int E1DelayBars			= 3;	// E1 = 추세 확정 뒤 이 봉 수째 진입 봉 (18일: 0분(지금) $41,253, 1분 $46,290, 2분 $43,960, 3분 $55,839, 5분 $41,606)
 		// spec 4-8-1 진입 품질 점수 (2026-10-16 사용자 결정): 7·10월 18일 후보 352개에서 두 달 모두 같은 방향이던 정보만. 구간 경계와 값은 두 달 합쳐 만든 것
 		private const double QualityHalfBelow	= -0.05;	// 점수가 이 값보다 낮으면 수량 50% (다른 달로 만든 점수로 18일: 7월 $44,966 → $39,466, 10월 $10,808 → $14,526)
-		private const double SizeFloorPercent	= 25;		// spec 4-8: 수량을 줄이는 이유(장전·달린 뒤·하루 손실·품질)는 곱하되 최대 계약의 이 % 아래로는 안 줄임
+		private const double SizeFloorPercent	= 25;
+		private const double SkipBelowMult		= 0.5;	// 수량 배율이 이 값보다 작으면 진입 안 함 (장전 50% 하나만이면 들어감, 장전 + 품질 낮음 = 25%면 안 들어감)		// spec 4-8: 수량을 줄이는 이유(장전·달린 뒤·하루 손실·품질)는 곱하되 최대 계약의 이 % 아래로는 안 줄임
 		private static readonly double[] QF		= { 0.7056, 1.2511, 0.0143, 0.0738, -0.0861 };	// 빠른 F: 경계 2개, 낮은⅓·중간·높은⅓ 값
 		private static readonly double[] QExt	= { 0.8550, 1.8225, 0.0915, 0.0813, -0.1714 };	// 중심선 거리 ATR
 		private static readonly double[] QR10	= { 3.0649, 3.9154, -0.1736, 0.0797, 0.0932 };	// 최근 10봉 고저폭 ÷ ATR
@@ -1453,7 +1454,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			// 기록용 경로 이름: E1은 열린 이유별로 나눈다 (E1 추세 시작, E1X 반대 추세 청산 뒤, E1R 재가속, E1S 구간 첫 봉 추세)
 			string pathCode = best.Path != "E1" ? best.Path
 				: best.Note == "반대 추세 청산 뒤" ? "E1X" : best.Note == "재가속" ? "E1R" : best.Note == "구간 첫 봉 추세" ? "E1S" : "E1";
-			Enter(p, best.Dir, pathCode, best.QtyPercent, best.Fallback, best.RR);
+			if (!Enter(p, best.Dir, pathCode, best.QtyPercent, best.Fallback, best.RR))
+				return;	// 수량 배율이 너무 작아 진입 안 함: 경로 횟수(E3·E5)도 쓰지 않음
 			if (best.Path == "E3")
 			{
 				if (best.Dir > 0)	{ orbCountLong++;	orbArmedLong = false; }
@@ -1491,8 +1493,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				return;	// 반대 방향 스탑이 아직 살아 있음: 이번 봉 끝에 취소되면 다음 봉에 건다
 			bool renew = e3StopDir == pick.Dir;
 			e3StopPx = pick.StopPrice;
-			Enter(pick.Dir > 0 ? Pos.TL : Pos.TS, pick.Dir, "E3", pick.QtyPercent, pick.Fallback, double.NaN);
+			bool placed = Enter(pick.Dir > 0 ? Pos.TL : Pos.TS, pick.Dir, "E3", pick.QtyPercent, pick.Fallback, double.NaN);
 			e3StopPx = double.NaN;
+			if (!placed)
+				return;	// 걸지 않음 (e3StopPlacedNow false → ForgetE3Stop이 걸려 있던 것을 취소)
 			e3StopDir		= pick.Dir;
 			e3StopPlacedNow	= true;
 			if (!renew)
@@ -1522,7 +1526,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		}
 
 		// 분할 진입. 조각 수량 = 진입 계약 × % 내림, 마지막 조각이 나머지 (4-8)
-		private void Enter(Pos p, int d, string entryPath, double qtyPercent, bool fallback, double rr)
+		private bool Enter(Pos p, int d, string entryPath, double qtyPercent, bool fallback, double rr)
 		{
 			bool stopEntry	= !double.IsNaN(e3StopPx);
 			double refPx	= stopEntry ? e3StopPx : Close[0];	// 손절·수량·익절 기준가: 스탑 진입이면 스탑 가격
@@ -1597,6 +1601,15 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 					why += string.Format(" 품질 {0:+0.000;-0.000} < {1}", q, QualityHalfBelow);
 				}
 			}
+			// spec 4-8: 줄이는 이유가 겹쳐 배율이 SkipBelowMult 아래면 작게 들어가지 않고 진입하지 않음 (최소 진입 보장·강제 채우기는 그대로).
+			// 재현기 7월 10일 + 10월 13일: 지금 $45,700 → $50,621 (7월 +$140, 10월 +$4,780), 진입 2회 미만인 날은 그대로
+			if (mult < SkipBelowMult && !fallback && entryPath != "FORCE")
+			{
+				Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 안 함 {2} {3}: 수량 배율 ×{4:F2} < {5} ({6})", Time[0], Instrument.FullName, entryPath, DirText(d), mult, SkipBelowMult, why.Trim()));
+				trOpen = false;
+				ResetTradeState();
+				return false;
+			}
 			if (mult < 1)
 			{
 				int before = qty;
@@ -1661,10 +1674,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			SubmitEntry(prefix, qty, stopEntry ? e3StopPx : double.NaN);
 			if (stopEntry && e3StopDir == d)
-				return;	// 같은 스탑 주문을 다시 건 것: 진입 줄은 처음 걸 때만
+				return true;	// 같은 스탑 주문을 다시 건 것: 진입 줄은 처음 걸 때만
 			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 {2} {3} 경로={4} 구간={5}{6} 수량={7} ({8}) 손절={9:F2} 손익비={10} 추세={11} S={12} F={13}",
 				Time[0], Instrument.FullName, PosName(p), DirText(d), entryPath + (stopEntry ? " 스탑 주문 " + refPx.ToString("N2") : ""), session, fallback ? " 최소진입보장" : "",
 				qty, split + riskNote, stopPrice, double.IsNaN(rr) ? "-" : rr.ToString("F2"), RegimeState(), Signed(SlowNow()), Signed(FastNow())));
+			return true;
 		}
 
 		// spec 3-4: 보유 방향의 반대로 전환의심이 뜨면 포지션당 한 번, 남은 수량의 50%를 먼 조각부터 청산하고 이익 중이면 손절을 평단으로
