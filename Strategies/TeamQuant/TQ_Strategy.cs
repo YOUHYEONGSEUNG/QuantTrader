@@ -180,6 +180,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				UseSwingStop		= true;
 				SwingBars			= 5;
 				MinStopAtr			= 1;		// 명세에 없음 (0과 같음)
+				StopUseFarthest		= true;		// 명세에 없음 (끔과 같음). 2026-10-22: 전저점·전고점과 ATR 중 먼 쪽
+				MaxStopPoints		= 0;		// 명세에 없음. 0 = 사용 안 함 (2026-10-15 테스트용 손절 거리 상한)
+				MaxStopAtr			= 0;		// 명세에 없음. 0 = 사용 안 함
 				BreakevenAtR		= 1;
 				BreakevenBufferTicks	= 8;	// 본절 이동 때 현재가와 띄울 최소 거리 (주문 거부 방지)
 				HandleOrderErrors	= true;		// 주문 오류를 전략이 직접 처리 (끄면 NinjaTrader가 전략을 끈다)
@@ -188,6 +191,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				SideRestBand		= 3;
 				SideRestNarrowTime	= 213000;	// 대회 시작 시각과 같게 (2026-10-14 대회 시간 21:30~23:30)
 				MomentumSmaPeriod	= 20;
+				DnShortExitSma		= true;		// 명세에 없음 (끔 = 명세의 RSI 20 아래). 2026-10-22: 5.1 강한 모멘텀 청산의 거울상
 				IntrabarTakeProfit	= true;		// 명세 1장에 2026-10-09 추가 (끄면 봉 마감 후 시장가)
 
 				// 수량·대회 시간 (spec 6·7장)
@@ -280,14 +284,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로 (기본값에서 자주 바꾸는 것만). 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38} | 밴드터치진입={39}",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38} | 손절상한 pt/ATR={39}/{40} | 밴드터치진입={41} | 손절먼쪽={42} 하락매도청산SMA={43}",
 				Instrument.FullName, BarsPeriod.Value, UpLongBand, UpShortBand, DnShortBand, DnLongBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, UseCounterTrend, BlockReentryAfterStop, DnShortNeedBoth,
 				RegimeFast, RegimeMid, RegimeSlow, UseRule12, Rule12Bars, Rule12PriceFilter, FastTrendBars,
 				StopPercent, UseSwingStop, MinStopAtr, BreakevenAtR, SideRestBand, MacdConfirmBars, TrendT2Entry,
 				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10,
 				RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit,
-				BandTouchEntry);
+				MaxStopPoints, MaxStopAtr, BandTouchEntry, StopUseFarthest, DnShortExitSma);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -757,6 +761,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.1 상승추세 롱(주력): 1/5 + 2/5 + 나머지
 		private void EnterUpLong()
 		{
+			if (StopTooWide(true, "상승추세 롱(5.1)"))
+				return;
 			BeginTrade(true, 1, ActiveStrategy.UpLong);
 			int q1 = Split(1, 5), q2 = Split(2, 5), q3 = tradeQty - q1 - q2;
 			SubmitChunk("UpL1", q1);
@@ -768,6 +774,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.2 상승추세 숏(역추세): 1/2 + 나머지
 		private void EnterUpShort()
 		{
+			if (StopTooWide(false, "상승추세 숏(5.2)"))
+				return;
 			BeginTrade(false, 1, ActiveStrategy.UpShort);
 			int q1 = Split(1, 2), q2 = tradeQty - q1;
 			SubmitChunk("UpS1", q1);
@@ -778,6 +786,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.3 하락추세 롱(역추세): 1/3 + 나머지
 		private void EnterDnLong()
 		{
+			if (StopTooWide(true, "하락추세 롱(5.3)"))
+				return;
 			BeginTrade(true, -1, ActiveStrategy.DnLong);
 			int q1 = Split(1, 3), q2 = tradeQty - q1;
 			SubmitChunk("DnL1", q1);
@@ -788,6 +798,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.4 하락추세 숏(주력): 1/3 + 1/3 + 나머지
 		private void EnterDnShort()
 		{
+			if (StopTooWide(false, "하락추세 숏(5.4)"))
+				return;
 			BeginTrade(false, -1, ActiveStrategy.DnShort);
 			int q1 = Split(1, 3), q2 = Split(1, 3), q3 = tradeQty - q1 - q2;
 			SubmitChunk("DnS1", q1);
@@ -799,6 +811,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.5 횡보 롱: 1/2 + 나머지
 		private void EnterSideLong()
 		{
+			if (StopTooWide(true, "횡보 롱(5.5)"))
+				return;
 			BeginTrade(true, 0, ActiveStrategy.SideLong);
 			int q1 = Split(1, 2), q2 = tradeQty - q1;
 			SubmitChunk("SideL1", q1);
@@ -809,6 +823,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.6 횡보 숏: 1/2 + 나머지
 		private void EnterSideShort()
 		{
+			if (StopTooWide(false, "횡보 숏(5.6)"))
+				return;
 			BeginTrade(false, 0, ActiveStrategy.SideShort);
 			int q1 = Split(1, 2), q2 = tradeQty - q1;
 			SubmitChunk("SideS1", q1);
@@ -936,27 +952,58 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 롱은 둘 중 높은 값, 숏은 둘 중 낮은 값. 전고점·전저점이 없으면(NaN) %만 쓴다(방어).
 		private double CalcStop(double entryPrice)
 		{
-			double pct = isLongPos
+			return CalcStop(entryPrice, isLongPos, stopSwing, stopAtr);
+		}
+
+		// 위 계산을 상태 필드 없이 한다. 진입 전 손절 거리 상한 검사(MaxStopPoints·MaxStopAtr)에서도 쓴다
+		private double CalcStop(double entryPrice, bool isLong, double swing, double atrValue)
+		{
+			double pct = isLong
 				? entryPrice * (1 - StopPercent / 100.0)
 				: entryPrice * (1 + StopPercent / 100.0);
-			if (double.IsNaN(stopSwing))	// 지표 미완성·데이터 부족 방어
-				return FloorStop(entryPrice, pct);
+			if (double.IsNaN(swing))		// 지표 미완성·데이터 부족 방어
+				return FloorStop(entryPrice, pct, isLong, atrValue);
 			if (!UseSwingStop)				// 실험 옵션: 전고점·전저점을 쓰지 않고 %만 쓴다
-				return FloorStop(entryPrice, pct);
-			return FloorStop(entryPrice, isLongPos ? Math.Max(stopSwing, pct) : Math.Min(stopSwing, pct));
+				return FloorStop(entryPrice, pct, isLong, atrValue);
+			// 실험 옵션 StopUseFarthest (명세에 없음): %로 손절을 당기지 않고, 전저점·전고점과 ATR × MinStopAtr 중 진입가에서 먼 쪽을 쓴다.
+			// 손절 범위를 넓혀 추세를 더 길게 가져가기 위함 (2026-10-22). ATR 쪽은 FloorStop이 맞춘다
+			if (StopUseFarthest)
+				return FloorStop(entryPrice, swing, isLong, atrValue);
+			return FloorStop(entryPrice, isLong ? Math.Max(swing, pct) : Math.Min(swing, pct), isLong, atrValue);
 		}
 
 		// 실험 옵션 MinStopAtr: 손절 거리가 신호 봉 ATR × MinStopAtr보다 짧으면 그 거리까지 벌린다. 0이면 그대로 둔다.
 		// 신호 봉이 최근 5봉의 저점(롱)·고점(숏) 근처에서 마감하면 손절 거리가 0에 가까워지는 것을 막는다
-		private double FloorStop(double entryPrice, double stop)
+		private double FloorStop(double entryPrice, double stop, bool isLong, double atrValue)
 		{
-			if (MinStopAtr > 0 && !double.IsNaN(stopAtr) && stopAtr > 0)
+			if (MinStopAtr > 0 && !double.IsNaN(atrValue) && atrValue > 0)
 			{
-				double minDist = MinStopAtr * stopAtr;
+				double minDist = MinStopAtr * atrValue;
 				if (Math.Abs(entryPrice - stop) < minDist)
-					stop = isLongPos ? entryPrice - minDist : entryPrice + minDist;
+					stop = isLong ? entryPrice - minDist : entryPrice + minDist;
 			}
 			return Instrument.MasterInstrument.RoundToTickSize(stop);
+		}
+
+		// 실험 옵션 MaxStopPoints·MaxStopAtr (명세에 없음): 신호 봉 종가 기준으로 계산한 손절 거리가 상한을 넘으면 진입하지 않는다.
+		// 손절 계산은 진입 때와 같다(전저점·전고점, %, MinStopAtr 하한 포함). 둘 다 0이면 검사하지 않는다.
+		// 건너뛴 신호도 그 밴드 조건의 진입 기회를 쓴 것으로 본다 (spec 2장 T1: 진입하지 못한 경우도 포함)
+		private bool StopTooWide(bool isLong, string name)
+		{
+			if (MaxStopPoints <= 0 && MaxStopAtr <= 0)
+				return false;
+
+			double a	= atr[0];
+			double s	= CalcStop(Close[0], isLong, isLong ? signals.SwingLow5[0] : signals.SwingHigh5[0], a);
+			double dist	= Math.Abs(Close[0] - s);
+			bool overPt		= MaxStopPoints > 0 && dist > MaxStopPoints;
+			bool overAtr	= MaxStopAtr > 0 && !double.IsNaN(a) && a > 0 && dist > MaxStopAtr * a;
+			if (!overPt && !overAtr)
+				return false;
+
+			Out(string.Format("[{0}][{1}][TQ_Strategy] 진입 건너뜀 {2}: 손절 거리 {3:N2}pt (ATR {4:N2}의 {5:N2}배) > 상한 (pt {6}, ATR 배수 {7})",
+				Time[0], Instrument.FullName, name, dist, a, a > 0 ? dist / a : double.NaN, MaxStopPoints, MaxStopAtr));
+			return true;
 		}
 
 		// 실험 옵션 SideRestBand: 횡보 세트 A의 나머지 청산 밴드 (spec 5.5·5.6은 3배).
@@ -1386,7 +1433,11 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// spec 5.4 하락추세 숏(주력): 3단계 (1차·2차·최종)
 		private void ManageDnShort()
 		{
-			bool final = signals.Rsi[0] < RsiLow;		// 최종 청산
+			// 최종 청산. 명세는 RSI < 20. 실험 옵션 DnShortExitSma를 켜면 5.1 강한 모멘텀 청산(종가 < SMA20)을 뒤집어
+			// 종가 > 차트 봉 SMA(MomentumSmaPeriod)일 때 청산한다 (2026-10-22)
+			bool final = DnShortExitSma
+				? Close[0] > signals.Sma20[0]
+				: signals.Rsi[0] < RsiLow;
 			bool tp1   = Close[0] <= channels.Dn2[0] || signals.MacdUp[0] || signals.K20CrossDown[0];
 			bool tp2   = Close[0] <= channels.Dn3[0];	// 2차 익절(-3배 도달)
 
@@ -1719,7 +1770,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				case ActiveStrategy.DnShort:
 					sb.AppendFormat("{0} −2배 / MACD▲ / %K 20 이탈 → 1/3 익절\n", Mark(tp1Done));
 					sb.AppendFormat("{0} −3배 → 1/3 익절\n", Mark(tp2Done));
-					sb.Append("○ RSI 20 아래 → 전량 청산\n");
+					sb.Append(DnShortExitSma
+						? string.Format("○ 종가 > SMA{0} → 전량 청산\n", MomentumSmaPeriod)
+						: "○ RSI 20 아래 → 전량 청산\n");
 					break;
 				case ActiveStrategy.SideLong:
 					if (sideSet == SideSet.None)
@@ -2041,6 +2094,20 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		public double MinStopAtr { get; set; }
 
 		[NinjaScriptProperty]
+		[Display(Name = "손절: 전저점·전고점과 ATR 중 먼 쪽 (StopUseFarthest)", Description = "켜면 손절 %로 당기지 않고 전저점(롱)·전고점(숏)과 ATR × 위 배수 중 진입가에서 먼 쪽을 손절가로 씀. 손절을 넓혀 더 길게 가져감. 끄면 명세대로(전저점·전고점과 % 중 가까운 쪽, 그다음 ATR 하한). 명세에 없는 실험 옵션", GroupName = "6. 손절·본절", Order = 4)]
+		public bool StopUseFarthest { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "손절 거리 상한, 포인트 (MaxStopPoints)", Description = "신호 봉 종가 기준 손절 거리가 이 포인트보다 멀면 진입하지 않음. 0 = 사용 안 함. 명세에 없는 실험 옵션", GroupName = "6. 손절·본절", Order = 7)]
+		public double MaxStopPoints { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, double.MaxValue)]
+		[Display(Name = "손절 거리 상한, ATR 배수 (MaxStopAtr)", Description = "신호 봉 종가 기준 손절 거리가 신호 봉 ATR × 이 배수보다 멀면 진입하지 않음. 0 = 사용 안 함. MinStopAtr보다 커야 의미가 있음. 명세에 없는 실험 옵션", GroupName = "6. 손절·본절", Order = 8)]
+		public double MaxStopAtr { get; set; }
+
+		[NinjaScriptProperty]
 		[Range(0, double.MaxValue)]
 		[Display(Name = "이익 보호 본절: 손절 거리의 몇 배 이익에서 (BreakevenAtR)", Description = "이익이 처음 손절 거리의 이 배수에 닿으면 손절을 평단으로 옮김. 역추세·횡보 진입만. 0 = 사용 안 함", GroupName = "6. 손절·본절", Order = 4)]
 		public double BreakevenAtR { get; set; }
@@ -2073,6 +2140,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[Range(1, int.MaxValue)]
 		[Display(Name = "상승추세 매수: 강한 모멘텀 청산 이동평균 (MomentumSmaPeriod)", Description = "+3배 돌파 뒤 종가가 이 3분봉 이동평균 아래로 내려가면 나머지 전량 청산. 명세는 20", GroupName = "7. 청산", Order = 2)]
 		public int MomentumSmaPeriod { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "하락추세 매도: 최종 청산을 이동평균으로 (DnShortExitSma)", Description = "켜면 상승추세 매수의 강한 모멘텀 청산을 뒤집어, 종가가 위 이동평균(MomentumSmaPeriod, 차트 봉 기준) 위로 올라가면 나머지 전량 청산. 끄면 명세대로 RSI 20 아래에서 청산. 명세에 없는 실험 옵션", GroupName = "7. 청산", Order = 3)]
+		public bool DnShortExitSma { get; set; }
 
 		// ── 8. 수량·대회 시간 ──
 		[NinjaScriptProperty]
