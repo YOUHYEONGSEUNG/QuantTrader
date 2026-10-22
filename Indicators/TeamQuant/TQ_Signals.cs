@@ -120,7 +120,8 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 				UpShortBand					= 3;	// 5.2: 고가 +3배 터치
 				DnLongBand					= 3;	// 5.3: −3배 하방 돌파
 				DnShortBand					= 0;	// 5.4: 운용 기본값 0(중심선 상방 돌파). 명세는 2(+2배)
-				SideBand					= 2;	// 5.5·5.6: ±2배 또는 그 바깥 밴드 돌파
+				SideBand					= 1;	// 5.5·5.6: 운용 기본값 1(±1배 또는 그 바깥 밴드). 명세는 2
+				BandTouchEntry				= true;	// 진입 밴드 조건을 고가·저가 터치로 판단. 명세는 끔(종가 돌파)
 				T1WindowUp					= 0;	// 0 = T1Window 사용
 				T1WindowDn					= 0;
 				T1WindowSide				= 0;
@@ -321,6 +322,23 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			bool xMidUp = c1 <= channels.Mid[1] && c0 > channels.Mid[0];
 			bool xMidDn = c1 >= channels.Mid[1] && c0 < channels.Mid[0];
 
+			// 진입 밴드 조건 (BandTouchEntry, 명세에 없음 — 2026-10-22 운용 기본값):
+			// 켜면 종가 돌파 대신 고가·저가 터치로 본다. 직전 봉 저가(고가)는 밴드 안쪽, 현재 봉 저가(고가)가 밴드에 닿은 첫 봉만.
+			// 끄면 spec 2장 종가 돌파. CrossAbove/Below 이벤트(익절용)는 그대로 종가 돌파다
+			bool eUp0 = xMidUp, eUp1 = xUp1, eUp2 = xUp2, eUp3 = xUp3;
+			bool eDn0 = xMidDn, eDn1 = xDn1, eDn2 = xDn2, eDn3 = xDn3;
+			if (BandTouchEntry)
+			{
+				eUp0 = High[1] < channels.Mid[1] && High[0] >= channels.Mid[0];
+				eUp1 = High[1] < channels.Up1[1] && High[0] >= channels.Up1[0];
+				eUp2 = High[1] < channels.Up2[1] && High[0] >= channels.Up2[0];
+				eUp3 = High[1] < channels.Up3[1] && High[0] >= channels.Up3[0];
+				eDn0 = Low[1] > channels.Mid[1] && Low[0] <= channels.Mid[0];
+				eDn1 = Low[1] > channels.Dn1[1] && Low[0] <= channels.Dn1[0];
+				eDn2 = Low[1] > channels.Dn2[1] && Low[0] <= channels.Dn2[0];
+				eDn3 = Low[1] > channels.Dn3[1] && Low[0] <= channels.Dn3[0];
+			}
+
 			// 진입 밴드 조건의 배수는 설정값으로 고른다. 기본값은 spec 5장 (−1 / +3 / −3 / +2 / ±2)
 			double upShortBandValue = UpShortBand <= 1 ? channels.Up1[0] : UpShortBand == 2 ? channels.Up2[0] : channels.Up3[0];
 
@@ -329,18 +347,18 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			bool revDn	= mDn || dd;
 
 			// spec 5.1 상승추세 롱: 종가 −1배 하방 돌파 → T1 [MACD 상승 전환 OR 골든크로스]
-			bool eUpLong	= StepT1(ref waitUpLong, Pick(UpLongBand, xMidDn, xDn1, xDn2, xDn3), revUp, t1BarsUp);
+			bool eUpLong	= StepT1(ref waitUpLong, Pick(UpLongBand, eDn0, eDn1, eDn2, eDn3), revUp, t1BarsUp);
 			// spec 5.2 상승추세 숏: 고가 +3배 터치 AND RSI ≥ 70 AND 하락 다이버전스 → T1 [MACD 하락 전환 OR 데드크로스]
 			bool eUpShort	= StepT1(ref waitUpShort, High[0] >= upShortBandValue && r0 >= RsiHigh && div, revDn, t1BarsUp);
 			// spec 5.3 하락추세 롱: 종가 −3배 하방 돌파 → T1 [RSI < 20 OR MACD 상승 전환 OR 골든크로스]
-			bool eDnLong	= StepT1(ref waitDnLong, Pick(DnLongBand, xMidDn, xDn1, xDn2, xDn3), r0 < RsiLow || revUp, t1BarsDn);
+			bool eDnLong	= StepT1(ref waitDnLong, Pick(DnLongBand, eDn0, eDn1, eDn2, eDn3), r0 < RsiLow || revUp, t1BarsDn);
 			// spec 5.4 하락추세 숏: 종가 +2배 상방 돌파 → T1 [MACD 하락 전환 OR 데드크로스 OR (RSI ≥ 70 AND 하락 다이버전스)]
-			bool eDnShort	= StepT1(ref waitDnShort, Pick(DnShortBand, xMidUp, xUp1, xUp2, xUp3), revDn || (r0 >= RsiHigh && div), t1BarsDn);
+			bool eDnShort	= StepT1(ref waitDnShort, Pick(DnShortBand, eUp0, eUp1, eUp2, eUp3), revDn || (r0 >= RsiHigh && div), t1BarsDn);
 			// spec 5.5 횡보 롱: (−2배 또는 −3배 하방 돌파 → T1 [MACD 상승 전환 OR 골든크로스]) 또는 T2. 동시 충족은 1회 (spec T3)
-			bool t1SideLong	= StepT1(ref waitSideLong, PickFrom(SideBand, xDn1, xDn2, xDn3), revUp, t1BarsSide);
+			bool t1SideLong	= StepT1(ref waitSideLong, PickFrom(SideBand, eDn1, eDn2, eDn3), revUp, t1BarsSide);
 			bool eSideLong	= t1SideLong || tBull;
 			// spec 5.6 횡보 숏: (+2배 또는 +3배 상방 돌파 → T1 [MACD 하락 전환 OR 데드크로스]) 또는 T2
-			bool t1SideShort	= StepT1(ref waitSideShort, PickFrom(SideBand, xUp1, xUp2, xUp3), revDn, t1BarsSide);
+			bool t1SideShort	= StepT1(ref waitSideShort, PickFrom(SideBand, eUp1, eUp2, eUp3), revDn, t1BarsSide);
 			bool eSideShort		= t1SideShort || tBear;
 
 			entryUpLong[0]		= eUpLong;
@@ -375,7 +393,7 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 			entryDnLongDiv[0] = StepT1(ref waitDnLongDiv, Low[0] <= dnLongBandValue && r0 <= 100 - RsiHigh && bdiv, revUp, t1BarsDn);
 
 			// 실험 (spec 미반영): 5.4와 같은 밴드 조건인데 반전 신호로 T2(MACD 하락 전환 AND 데드크로스)만 인정하는 변형
-			entryDnShortBoth[0]	= StepT1(ref waitDnShortBoth, Pick(DnShortBand, xMidUp, xUp1, xUp2, xUp3), tBear, t1BarsDn);
+			entryDnShortBoth[0]	= StepT1(ref waitDnShortBoth, Pick(DnShortBand, eUp0, eUp1, eUp2, eUp3), tBear, t1BarsDn);
 
 			if (eUpLong)	MarkSignal("EntryUpLong", true, 0, Brushes.Lime);
 			if (eDnLong)	MarkSignal("EntryDnLong", true, 1, Brushes.Cyan);
@@ -615,6 +633,10 @@ namespace NinjaTrader.NinjaScript.Indicators.TeamQuant
 		[Display(Name = "T2CountConfirmBars", Description = "T2(MACD 전환 AND 크로스)에서 MACD 확인에 걸린 봉 수만큼 앞에서 나온 크로스도 인정", GroupName = "Parameters", Order = 33)]
 		public bool T2CountConfirmBars { get; set; }
 
+		[NinjaScriptProperty]
+		[Display(Name = "BandTouchEntry", Description = "진입 밴드 조건(5.1·5.3·5.4·5.5·5.6)을 종가 돌파 대신 고가·저가가 밴드에 처음 닿은 봉으로 판단. 끄면 명세(종가 돌파)", GroupName = "Parameters", Order = 34)]
+		public bool BandTouchEntry { get; set; }
+
 		// 숫자 값
 		[Browsable(false)]
 		[XmlIgnore]
@@ -805,18 +827,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private TeamQuant.TQ_Signals[] cacheTQ_Signals;
-		public TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
-			return TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars);
+			return TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars, bandTouchEntry);
 		}
 
-		public TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input, int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input, int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
 			if (cacheTQ_Signals != null)
 				for (int idx = 0; idx < cacheTQ_Signals.Length; idx++)
-					if (cacheTQ_Signals[idx] != null && cacheTQ_Signals[idx].T1Window == t1Window && cacheTQ_Signals[idx].CrossFilterBars == crossFilterBars && cacheTQ_Signals[idx].CrossLow == crossLow && cacheTQ_Signals[idx].CrossHigh == crossHigh && cacheTQ_Signals[idx].RsiPeriod == rsiPeriod && cacheTQ_Signals[idx].RsiHigh == rsiHigh && cacheTQ_Signals[idx].RsiLow == rsiLow && cacheTQ_Signals[idx].DivFrom == divFrom && cacheTQ_Signals[idx].DivTo == divTo && cacheTQ_Signals[idx].SwingBars == swingBars && cacheTQ_Signals[idx].BandMidPeriod == bandMidPeriod && cacheTQ_Signals[idx].BandAtrPeriod == bandAtrPeriod && cacheTQ_Signals[idx].BandMult1 == bandMult1 && cacheTQ_Signals[idx].BandMult2 == bandMult2 && cacheTQ_Signals[idx].BandMult3 == bandMult3 && cacheTQ_Signals[idx].MacdFast == macdFast && cacheTQ_Signals[idx].MacdSlow == macdSlow && cacheTQ_Signals[idx].MacdSmooth == macdSmooth && cacheTQ_Signals[idx].StochPeriodK == stochPeriodK && cacheTQ_Signals[idx].StochSmooth == stochSmooth && cacheTQ_Signals[idx].StochPeriodD == stochPeriodD && cacheTQ_Signals[idx].SmaPeriod == smaPeriod && cacheTQ_Signals[idx].MacdConfirmBars == macdConfirmBars && cacheTQ_Signals[idx].MacdMinChangeAtr == macdMinChangeAtr && cacheTQ_Signals[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Signals[idx].UpLongBand == upLongBand && cacheTQ_Signals[idx].UpShortBand == upShortBand && cacheTQ_Signals[idx].DnLongBand == dnLongBand && cacheTQ_Signals[idx].DnShortBand == dnShortBand && cacheTQ_Signals[idx].SideBand == sideBand && cacheTQ_Signals[idx].T1WindowUp == t1WindowUp && cacheTQ_Signals[idx].T1WindowDn == t1WindowDn && cacheTQ_Signals[idx].T1WindowSide == t1WindowSide && cacheTQ_Signals[idx].T2CountConfirmBars == t2CountConfirmBars && cacheTQ_Signals[idx].EqualsInput(input))
+					if (cacheTQ_Signals[idx] != null && cacheTQ_Signals[idx].T1Window == t1Window && cacheTQ_Signals[idx].CrossFilterBars == crossFilterBars && cacheTQ_Signals[idx].CrossLow == crossLow && cacheTQ_Signals[idx].CrossHigh == crossHigh && cacheTQ_Signals[idx].RsiPeriod == rsiPeriod && cacheTQ_Signals[idx].RsiHigh == rsiHigh && cacheTQ_Signals[idx].RsiLow == rsiLow && cacheTQ_Signals[idx].DivFrom == divFrom && cacheTQ_Signals[idx].DivTo == divTo && cacheTQ_Signals[idx].SwingBars == swingBars && cacheTQ_Signals[idx].BandMidPeriod == bandMidPeriod && cacheTQ_Signals[idx].BandAtrPeriod == bandAtrPeriod && cacheTQ_Signals[idx].BandMult1 == bandMult1 && cacheTQ_Signals[idx].BandMult2 == bandMult2 && cacheTQ_Signals[idx].BandMult3 == bandMult3 && cacheTQ_Signals[idx].MacdFast == macdFast && cacheTQ_Signals[idx].MacdSlow == macdSlow && cacheTQ_Signals[idx].MacdSmooth == macdSmooth && cacheTQ_Signals[idx].StochPeriodK == stochPeriodK && cacheTQ_Signals[idx].StochSmooth == stochSmooth && cacheTQ_Signals[idx].StochPeriodD == stochPeriodD && cacheTQ_Signals[idx].SmaPeriod == smaPeriod && cacheTQ_Signals[idx].MacdConfirmBars == macdConfirmBars && cacheTQ_Signals[idx].MacdMinChangeAtr == macdMinChangeAtr && cacheTQ_Signals[idx].ShowDebugVisuals == showDebugVisuals && cacheTQ_Signals[idx].UpLongBand == upLongBand && cacheTQ_Signals[idx].UpShortBand == upShortBand && cacheTQ_Signals[idx].DnLongBand == dnLongBand && cacheTQ_Signals[idx].DnShortBand == dnShortBand && cacheTQ_Signals[idx].SideBand == sideBand && cacheTQ_Signals[idx].T1WindowUp == t1WindowUp && cacheTQ_Signals[idx].T1WindowDn == t1WindowDn && cacheTQ_Signals[idx].T1WindowSide == t1WindowSide && cacheTQ_Signals[idx].T2CountConfirmBars == t2CountConfirmBars && cacheTQ_Signals[idx].BandTouchEntry == bandTouchEntry && cacheTQ_Signals[idx].EqualsInput(input))
 						return cacheTQ_Signals[idx];
-			return CacheIndicator<TeamQuant.TQ_Signals>(new TeamQuant.TQ_Signals(){ T1Window = t1Window, CrossFilterBars = crossFilterBars, CrossLow = crossLow, CrossHigh = crossHigh, RsiPeriod = rsiPeriod, RsiHigh = rsiHigh, RsiLow = rsiLow, DivFrom = divFrom, DivTo = divTo, SwingBars = swingBars, BandMidPeriod = bandMidPeriod, BandAtrPeriod = bandAtrPeriod, BandMult1 = bandMult1, BandMult2 = bandMult2, BandMult3 = bandMult3, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, StochPeriodK = stochPeriodK, StochSmooth = stochSmooth, StochPeriodD = stochPeriodD, SmaPeriod = smaPeriod, MacdConfirmBars = macdConfirmBars, MacdMinChangeAtr = macdMinChangeAtr, ShowDebugVisuals = showDebugVisuals, UpLongBand = upLongBand, UpShortBand = upShortBand, DnLongBand = dnLongBand, DnShortBand = dnShortBand, SideBand = sideBand, T1WindowUp = t1WindowUp, T1WindowDn = t1WindowDn, T1WindowSide = t1WindowSide, T2CountConfirmBars = t2CountConfirmBars }, input, ref cacheTQ_Signals);
+			return CacheIndicator<TeamQuant.TQ_Signals>(new TeamQuant.TQ_Signals(){ T1Window = t1Window, CrossFilterBars = crossFilterBars, CrossLow = crossLow, CrossHigh = crossHigh, RsiPeriod = rsiPeriod, RsiHigh = rsiHigh, RsiLow = rsiLow, DivFrom = divFrom, DivTo = divTo, SwingBars = swingBars, BandMidPeriod = bandMidPeriod, BandAtrPeriod = bandAtrPeriod, BandMult1 = bandMult1, BandMult2 = bandMult2, BandMult3 = bandMult3, MacdFast = macdFast, MacdSlow = macdSlow, MacdSmooth = macdSmooth, StochPeriodK = stochPeriodK, StochSmooth = stochSmooth, StochPeriodD = stochPeriodD, SmaPeriod = smaPeriod, MacdConfirmBars = macdConfirmBars, MacdMinChangeAtr = macdMinChangeAtr, ShowDebugVisuals = showDebugVisuals, UpLongBand = upLongBand, UpShortBand = upShortBand, DnLongBand = dnLongBand, DnShortBand = dnShortBand, SideBand = sideBand, T1WindowUp = t1WindowUp, T1WindowDn = t1WindowDn, T1WindowSide = t1WindowSide, T2CountConfirmBars = t2CountConfirmBars, BandTouchEntry = bandTouchEntry }, input, ref cacheTQ_Signals);
 		}
 	}
 }
@@ -825,14 +847,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public Indicators.TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
-			return indicator.TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars);
+			return indicator.TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars, bandTouchEntry);
 		}
 
-		public Indicators.TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input , int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public Indicators.TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input , int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
-			return indicator.TQ_Signals(input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars);
+			return indicator.TQ_Signals(input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars, bandTouchEntry);
 		}
 	}
 }
@@ -841,14 +863,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public Indicators.TeamQuant.TQ_Signals TQ_Signals(int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
-			return indicator.TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars);
+			return indicator.TQ_Signals(Input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars, bandTouchEntry);
 		}
 
-		public Indicators.TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input , int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars)
+		public Indicators.TeamQuant.TQ_Signals TQ_Signals(ISeries<double> input , int t1Window, int crossFilterBars, double crossLow, double crossHigh, int rsiPeriod, double rsiHigh, double rsiLow, int divFrom, int divTo, int swingBars, int bandMidPeriod, int bandAtrPeriod, double bandMult1, double bandMult2, double bandMult3, int macdFast, int macdSlow, int macdSmooth, int stochPeriodK, int stochSmooth, int stochPeriodD, int smaPeriod, int macdConfirmBars, double macdMinChangeAtr, bool showDebugVisuals, int upLongBand, int upShortBand, int dnLongBand, int dnShortBand, int sideBand, int t1WindowUp, int t1WindowDn, int t1WindowSide, bool t2CountConfirmBars, bool bandTouchEntry)
 		{
-			return indicator.TQ_Signals(input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars);
+			return indicator.TQ_Signals(input, t1Window, crossFilterBars, crossLow, crossHigh, rsiPeriod, rsiHigh, rsiLow, divFrom, divTo, swingBars, bandMidPeriod, bandAtrPeriod, bandMult1, bandMult2, bandMult3, macdFast, macdSlow, macdSmooth, stochPeriodK, stochSmooth, stochPeriodD, smaPeriod, macdConfirmBars, macdMinChangeAtr, showDebugVisuals, upLongBand, upShortBand, dnLongBand, dnShortBand, sideBand, t1WindowUp, t1WindowDn, t1WindowSide, t2CountConfirmBars, bandTouchEntry);
 		}
 	}
 }

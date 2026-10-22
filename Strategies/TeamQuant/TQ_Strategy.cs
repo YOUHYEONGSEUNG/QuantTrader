@@ -141,7 +141,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				DnShortNeedBoth		= false;
 				DnLongBand			= 3;
 				DnLongNeedDiv		= false;
-				SideBand			= 2;
+				SideBand			= 1;		// 명세 2
 				T1Window			= 5;		// 명세 3
 				T1WindowUp			= 0;		// 0 = T1Window 사용
 				T1WindowDn			= 0;
@@ -150,6 +150,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				// 진입 — 공통
 				TrendT2Entry		= true;		// 명세에 없음 (끔과 같음)
 				T2CountConfirmBars	= true;		// 명세에 없음 (끔과 같음)
+				BandTouchEntry		= true;		// 명세에 없음 (끔 = 종가 돌파)
 				UseCounterTrend		= false;	// 명세 켬
 				CounterQtyPercent	= 100;
 				BlockReentryAfterStop	= true;
@@ -236,7 +237,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 								StochPeriodK, StochSmooth, StochPeriodD,
 								MomentumSmaPeriod, MacdConfirmBars, MacdMinChangeAtr, false,
 								UpLongBand, UpShortBand, DnLongBand, DnShortBand, SideBand,
-								T1WindowUp, T1WindowDn, T1WindowSide, T2CountConfirmBars);
+								T1WindowUp, T1WindowDn, T1WindowSide, T2CountConfirmBars, BandTouchEntry);
 
 				// 로그 파일: 내 문서\NinjaTrader 8\TQ_log_종목.txt (LogToFile)
 				logPath		= System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -279,13 +280,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 어떤 설정으로 돌린 기록인지 한 줄로 (기본값에서 자주 바꾸는 것만). 로그 파일과 거래 요약 파일에 쓴다
 		private string SettingsSummary()
 		{
-			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38}",
+			return string.Format("[{0}] {1}분봉 | 밴드 상승 매수/매도={2}/{3} 하락 매도/매수={4}/{5} 횡보={6} | 대기 공통/상승/하락/횡보={7}/{8}/{9}/{10} | 역추세={11} 재진입금지={12} 매도둘다={13} | 추세 MA={14}/{15}/{16} 고저규칙={17} 구간={18} 20선조건={19} 빠른전환={20} 기울기={28} | 손절%={21} 전저점={22} 최소ATR={23} 본절R={24} | 횡보청산밴드={25} MACD확인={26} 추세T2진입={27} | 역추세매수 다이버전스={29} 역추세수량%={30} T2앞봉인정={31} 봉중익절={32} 추세봉={33}분 | 추세방식={34}(1이평/2점수) 최소점수={35} RSI폭={36} 사건봉수={37} 종료점수={38} | 밴드터치진입={39}",
 				Instrument.FullName, BarsPeriod.Value, UpLongBand, UpShortBand, DnShortBand, DnLongBand, SideBand,
 				T1Window, T1WindowUp, T1WindowDn, T1WindowSide, UseCounterTrend, BlockReentryAfterStop, DnShortNeedBoth,
 				RegimeFast, RegimeMid, RegimeSlow, UseRule12, Rule12Bars, Rule12PriceFilter, FastTrendBars,
 				StopPercent, UseSwingStop, MinStopAtr, BreakevenAtR, SideRestBand, MacdConfirmBars, TrendT2Entry,
 				FastTrendSlope, DnLongNeedDiv, CounterQtyPercent, T2CountConfirmBars, IntrabarTakeProfit, RegimeBarMinutes == 3 ? 3 : 10,
-				RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit);
+				RegimeMode, RegimeScoreMin, RegimeScoreRsiBand, RegimeScoreEventBars, RegimeScoreExit,
+				BandTouchEntry);
 		}
 
 		#region 거래 요약 파일 (TradeLogToFile) — 매매 판단에는 영향 없음
@@ -993,6 +995,12 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			return level == 0 ? "중심선" : (up ? "+" : "−") + level + "배";
 		}
 
+		// 진입 밴드 조건을 화면에 적는 말: BandTouchEntry면 고가·저가 터치, 아니면 종가 돌파·이탈
+		private string BandHow(bool up)
+		{
+			return BandTouchEntry ? (up ? " 고가 터치" : " 저가 터치") : (up ? " 돌파" : " 이탈");
+		}
+
 		// 아직 보유 중인 모든 진입 시그널의 손절가를 price로 (재)설정
 		private void SetStopForLive(double price)
 		{
@@ -1611,22 +1619,22 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 					if (rv > 0)
 					{
-						sb.Append(CandidateLine("매수(주력)", signals.WaitUpLong, BandText(UpLongBand, false) + " 이탈" + (TrendT2Entry ? " (또는 MACD▲ + 골든)" : ""), "MACD▲ / 골든", null, signals.T1BarsUp));
+						sb.Append(CandidateLine("매수(주력)", signals.WaitUpLong, BandText(UpLongBand, false) + BandHow(false) + (TrendT2Entry ? " (또는 MACD▲ + 골든)" : ""), "MACD▲ / 골든", null, signals.T1BarsUp));
 						sb.Append(CandidateLine("매도(역추세)", signals.WaitUpShort, "+" + UpShortBand + "배 터치 + RSI 70 + 다이버전스", "MACD▼ / 데드", counterOff ?? shortBlock, signals.T1BarsUp));
 					}
 					else if (rv < 0)
 					{
-						sb.Append(CandidateLine("매도(주력)", DnShortWait(), BandText(DnShortBand, true) + " 돌파" + (TrendT2Entry ? " (또는 MACD▼ + 데드)" : ""),
+						sb.Append(CandidateLine("매도(주력)", DnShortWait(), BandText(DnShortBand, true) + BandHow(true) + (TrendT2Entry ? " (또는 MACD▼ + 데드)" : ""),
 							DnShortNeedBoth ? "MACD▼ + 데드" : "MACD▼ / 데드 / RSI 70 + 다이버전스", null, signals.T1BarsDn));
 						if (DnLongNeedDiv)
 							sb.Append(CandidateLine("매수(역추세)", signals.WaitDnLongDiv, BandText(DnLongBand, false) + " 터치 + RSI 과매도 + 다이버전스", "MACD▲ / 골든", counterOff ?? longBlock, signals.T1BarsDn));
 						else
-							sb.Append(CandidateLine("매수(역추세)", signals.WaitDnLong, BandText(DnLongBand, false) + " 이탈", "RSI 20 아래 / MACD▲ / 골든", counterOff ?? longBlock, signals.T1BarsDn));
+							sb.Append(CandidateLine("매수(역추세)", signals.WaitDnLong, BandText(DnLongBand, false) + BandHow(false), "RSI 20 아래 / MACD▲ / 골든", counterOff ?? longBlock, signals.T1BarsDn));
 					}
 					else
 					{
-						sb.Append(CandidateLine("매수", signals.WaitSideLong, "−" + SideBand + "배 이상 이탈 (또는 MACD▲ + 골든)", "MACD▲ / 골든", longBlock, signals.T1BarsSide));
-						sb.Append(CandidateLine("매도", signals.WaitSideShort, "+" + SideBand + "배 이상 돌파 (또는 MACD▼ + 데드)", "MACD▼ / 데드", shortBlock, signals.T1BarsSide));
+						sb.Append(CandidateLine("매수", signals.WaitSideLong, "−" + SideBand + "배 이상" + BandHow(false) + " (또는 MACD▲ + 골든)", "MACD▲ / 골든", longBlock, signals.T1BarsSide));
+						sb.Append(CandidateLine("매도", signals.WaitSideShort, "+" + SideBand + "배 이상" + BandHow(true) + " (또는 MACD▼ + 데드)", "MACD▼ / 데드", shortBlock, signals.T1BarsSide));
 					}
 				}
 			}
@@ -1880,7 +1888,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// ── 3. 진입 — 횡보 ──
 		[NinjaScriptProperty]
 		[Range(1, 3)]
-		[Display(Name = "매수·매도: 몇 배 밴드부터 (SideBand)", Description = "횡보 매수·매도(5.5·5.6)의 밴드 조건. 이 배수와 그 바깥 밴드를 이탈·돌파하면 충족. 명세는 2 (±2배 또는 ±3배)", GroupName = "3. 진입 — 횡보", Order = 0)]
+		[Display(Name = "매수·매도: 몇 배 밴드부터 (SideBand)", Description = "횡보 매수·매도(5.5·5.6)의 밴드 조건. 이 배수와 그 바깥 밴드를 이탈·돌파(BandTouchEntry면 터치)하면 충족. 명세는 2 (±2배 또는 ±3배). 운용 기본값 1", GroupName = "3. 진입 — 횡보", Order = 0)]
 		public int SideBand { get; set; }
 
 		[NinjaScriptProperty]
@@ -1901,6 +1909,10 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		[NinjaScriptProperty]
 		[Display(Name = "MACD + 크로스 동시 조건: MACD가 꺾인 봉의 크로스도 인정 (T2CountConfirmBars)", Description = "MACD 전환은 2봉 연속이어야 확인되므로 실제로 꺾인 봉은 확인 봉보다 앞이다. 켜면 전환이 처음 확인된 봉에서, 확인에 걸린 봉 수만큼 앞에서 나온 골든·데드크로스도 같이 나온 것으로 인정한다. 진입과 청산의 'MACD 전환 + 크로스' 조건 모두에 적용", GroupName = "4. 진입 — 공통", Order = 7)]
 		public bool T2CountConfirmBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "밴드 조건: 종가 대신 고가·저가 터치 (BandTouchEntry)", Description = "켜면 진입 밴드 조건(주력 매수·매도, 역추세 매수, 횡보 매수·매도)을 종가 돌파 대신 저가(매수)·고가(매도)가 밴드에 처음 닿은 봉으로 판단한다. 익절의 밴드 터치와 같은 방식. 끄면 명세(종가 돌파)", GroupName = "4. 진입 — 공통", Order = 8)]
+		public bool BandTouchEntry { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "역추세 진입 사용 (UseCounterTrend)", Description = "상승추세 매도(5.2)와 하락추세 매수(5.3)를 할지. 끄면 추세 방향 진입과 횡보 진입만", GroupName = "4. 진입 — 공통", Order = 1)]

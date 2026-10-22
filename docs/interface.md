@@ -89,6 +89,7 @@ TQ_Signals의 스토캐스틱과 같은 식으로 %K·%D를 계산해 독립 패
 | MacdMinChangeAtr | 0 (MACD 전환 최소 변화폭, ATR 배수. TQ_MacdTurn의 MinChangeAtr로 넘김) |
 | ShowDebugVisuals | false (검증용 화살표) |
 | T2CountConfirmBars | true (T2에서 MACD 확인에 걸린 봉 수만큼 앞의 크로스도 인정. spec 2장 T2) |
+| BandTouchEntry | true (운용 기본값, 2026-10-22. 진입 밴드 조건 — EntryUpLong·EntryDnLong·EntryDnShort·EntryDnShortBoth·EntrySide* — 을 종가 돌파 대신 터치로 판단: 직전 봉 저가(고가)는 밴드 안쪽, 현재 봉 저가(고가)가 밴드에 닿은 첫 봉. 끄면 명세(종가 돌파). CrossAbove*/CrossBelow* 이벤트는 그대로 종가 돌파) |
 | ShowPlots | false (차트 표시 전용. 끄면 플롯 선을 투명으로 숨긴다. 값과 전략 동작은 그대로다. 생성자 인자가 아니라서 전략 호출부에는 없다) |
 
 차트에 올리면 가격 패널에 얹힌다(IsOverlay = true, IsAutoScale = false). 별도 패널을 만들지 않기 위함이고, 플롯 값을 눈으로 보려면 ShowPlots를 켠다.
@@ -145,7 +146,7 @@ T1 대기 상태 (int) — 전략의 화면 표시용. 매매 판단에는 쓰�
 | UpShortBand | 3 | EntryUpShort의 밴드 조건: 고가가 몇 배 밴드에 터치 |
 | DnLongBand | 3 | EntryDnLong의 밴드 조건: 몇 배 밴드 하방 돌파 |
 | DnShortBand | 0 (명세 2) | EntryDnShort의 밴드 조건: 몇 배 밴드 상방 돌파 |
-| SideBand | 2 | EntrySideLong·EntrySideShort의 밴드 조건: 이 배수와 그 바깥 밴드의 돌파 |
+| SideBand | 1 (명세 2) | EntrySideLong·EntrySideShort의 밴드 조건: 이 배수와 그 바깥 밴드의 돌파 (BandTouchEntry면 터치) |
 | T1WindowUp / T1WindowDn / T1WindowSide | 0 | 상승추세(5.1·5.2) / 하락추세(5.3·5.4) / 횡보(5.5·5.6) 진입 신호의 T1 대기 봉 수. 0이면 T1Window를 쓴다 |
 
 실험용 진입 신호 — spec에 없는 변형. 전략의 `DnShortNeedBoth`를 켰을 때만 쓴다. 채택되면 spec과 이 표를 고치고, 버리면 지운다
