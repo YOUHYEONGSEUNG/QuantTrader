@@ -6,6 +6,7 @@
 ## 2026-10-15 — v6 박스 돌파 (브랜치 `v6-box`, `v5-clean` bfcace4에서)
 
 ### 주문을 비관리형으로 + 그림을 OnRender로 (F5·Playback 확인 전)
+- **고침 (10/22 첫 Playback):** 과거 데이터 910번째 봉에서 `OnExecutionUpdate` 예외 'Collection was modified'로 전략이 멈춰 거래·추세 표시가 없었음. 주문 취소 때 Playback이 그 자리에서 OnOrderUpdate를 불러 돌고 있던 익절 주문 목록을 고침 → 목록은 복사본으로 돎.
 - **왜 (주문):** 10/15 22:00 E1 매도 NinjaTrader 주문 기록 — 마지막 조각 4계약이 1 + 3으로 나뉘어 체결돼 손절이 2개 생겼고, 22:06 그 조각을 청산하자 NinjaTrader가 1차 조각의 손절·익절을 취소하고 청산된 조각의 3계약 손절은 남김. 1계약이 22:31까지 손절 없이 남았고 남은 3계약 손절은 반대 포지션 위험. 안전장치의 조각 이름 청산은 무시돼 1분 뒤 이름 없는 청산으로 나감. 10/15 하루 안전장치 3번, 7/24 E5도 같은 원인. 부분 체결은 Playback 로그에 하루 수백 건.
 - **무엇:** `IsUnmanaged`. 진입 1개, 보유 수량 전체 손절 1개, 조각별 익절 지정가, `Reconcile()`로 체결마다 맞춤, 계획에 없는 포지션은 시장가 정리, `IgnoreOverfill`. 안전장치는 손절이 덮지 못하는 수량이 있을 때만 (.claude/rules/strategy.md 주문 절).
 - **왜 (그림):** 사용자 규칙 — Draw는 봉마다 그려 무거우니 쓰지 않고, 이어지는 선은 OnRender로, 계산은 OnBarUpdate에서만. `Draw.Line`(박스, 매 봉)·`Draw.TextFixed`(진입 횟수, 매 봉)·`Draw.HorizontalLine`(손절·평단, 매 봉)·체결 `Draw.Arrow/Text`를 OnRender로 옮김. 배경색(BackBrush)·상태 상자(계산 OnBarUpdate, 그리기 OnRender)는 이미 규칙대로.

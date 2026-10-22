@@ -2470,7 +2470,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (PosQty() == 0)
 			{
 				CancelIfWorking(stopOrder);
-				foreach (Order t in tpOrders.Values)
+				foreach (Order t in new List<Order>(tpOrders.Values))
 					CancelIfWorking(t);
 			}
 			stopOrder		= null;
@@ -2613,14 +2613,14 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			if (P == 0)
 			{
 				CancelIfWorking(stopOrder);
-				foreach (Order t in tpOrders.Values)
+				foreach (Order t in new List<Order>(tpOrders.Values))
 					CancelIfWorking(t);
 				return;
 			}
 			if (dir == 0 || side != dir)
 			{
 				CancelIfWorking(stopOrder);
-				foreach (Order t in tpOrders.Values)
+				foreach (Order t in new List<Order>(tpOrders.Values))
 					CancelIfWorking(t);
 				if (plannedExitQty <= 0)
 				{
@@ -2661,7 +2661,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 			// ── 익절 지정가: 단계 순서로, 손절이 덮는 수량 안에서 ──
 			int room = need;
-			foreach (string sig in chunkOrder)
+			// 목록 복사본으로 돈다: 주문을 내고 취소하면 Playback은 그 자리에서 OnOrderUpdate·OnExecutionUpdate를 불러 목록을 고칠 수 있음
+			// (2026-10-22 Playback: 'Collection was modified; enumeration operation may not execute' 로 전략이 과거 데이터 910번째 봉에서 멈춤)
+			foreach (string sig in new List<string>(chunkOrder))
 			{
 				double tp = TargetPrice(sig);
 				Order t;
