@@ -123,7 +123,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		private const double	ScoreTrendOn	= 0.2;		// 추세 시작 점수 (v6 ScoreTrendOn)
 		private const double	ScoreVelMin		= 0.25;		// 빠른 출발 속도 (v6 ScoreVelMin)
 		private const double	ScoreExitOff	= -0.1;		// 청산용 판정 종료 점수 (v6 ScoreExitOff)
-		private const int		ScoreVelBars	= 6;		// 속도 = 점수 − 6개 1분봉 전 점수
+		private const int		ScoreVelBars	= 6;		// 속도 = 점수 − (5·6·7개 1분봉 전 점수의 평균). 2026-10-23 오후 9: 6봉 전 한 점에서 3점 평균으로
 		private const double	R7EndSuspectC	= 0.1;		// 추세 → 눌림 점수 (v6 R7EndSuspectC)
 		private const int		ScoreMinBars3	= 70;		// 3분봉이 이만큼 쌓여야 점수를 냄 (SMA60 + 기울기 5봉 + 여유)
 		private const double	TrailTp1Atr		= 3.0;		// 1차 익절 뒤 트레일링: 진입 뒤 최고가 − 3 × 1분 ATR
@@ -238,7 +238,8 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 				BreakevenMinR		= 0.25;		// 1차 익절 이익이 손절 거리 × 이 값보다 작으면 본절로 옮기지 않음. 0 = 트레이더 원래 규칙
 				ChopMaxEr			= 0.15;		// 흔들리는 장이면 추세 진입은 눌림에서만. 0 = 끔
 				TrendContBars		= 8;		// 추세 지속 진입: 7레짐 같은 방향 추세가 이 봉 수 이어지면 한 번 진입. 0 = 끔
-				TrendContMaxVel		= 0.2;		// 추세 지속 진입은 점수 속도가 추세 방향으로 이 값 미만일 때만 (속도 추격 금지). 0 = 조건 없음
+				TrendContMaxVel		= 0.15;		// 추세 지속 진입은 점수 속도가 추세 방향으로 이 값 미만일 때만 (속도 추격 금지). 0 = 조건 없음.
+											// 2026-10-23 오후 9 속도를 3점 평균 기준으로 바꾸며 0.2 → 0.15: 대회 시간 60일 +$131,226 → +$133,594(8월 −$25,448 → −$19,998), 다른 시간대 +$10,162 더
 				AddOnQty			= 30;		// 2차 익절 뒤 추세가 이어지면 한 번 더하는 계약 수 (합계 MaxQuantity 이하). 0 = 끔
 				AddOnEndTime		= 231000;	// 불타기는 이 시각(HHmmss) 전까지만
 				AddOnMinRoomAtr		= 1;		// 불타기는 현재가와 손절 사이가 이 × 1분 ATR 이상일 때만. 0 = 조건 없음
@@ -2149,7 +2150,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 		// 가격 항목은 1분마다, 이평 항목은 3분봉마다 바뀜. v6 TQ_Strategy.UpdateContScore와 같은 식 (재현기 score.py)
 		private void UpdateContScore()
 		{
-			contReady = CurrentBars[2] >= ScoreMinBars3 && CurrentBars[0] > ScoreVelBars;
+			contReady = CurrentBars[2] >= ScoreMinBars3 && CurrentBars[0] > ScoreVelBars + 1;
 			if (!contReady)
 			{
 				contHist[0] = 0;
@@ -2197,7 +2198,9 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 			contSlow	= R6(pxMid + structS + macd + rsi);	// 종가−중기선, 중기−장기선, MACD선, RSI (−4~+4)
 			contFast	= R6(pxFast + macdSl);				// 종가−단기선, MACD선 기울기 (−2~+2)
 			contHist[0]	= contScore;
-			contVel		= R6(contScore - contHist[ScoreVelBars]);
+			// 속도: 비교 기준을 6봉 전 한 점이 아니라 5·6·7봉 전 평균으로 (한 점이 튀면 속도도 튀는 것을 줄임).
+			// 재현기 모든 시간대(대회 시간 60일 + 다른 10개 시간대): 대회 시간 +$128,276 → +$131,226, 다른 시간대 +$9,994 (docs/changelog.md 10/23 오후 8·9)
+			contVel		= R6(contScore - (contHist[ScoreVelBars - 1] + contHist[ScoreVelBars] + contHist[ScoreVelBars + 1]) / 3.0);
 			// 진단 (10/22 Playback에서 점수가 v6와 달랐음): 3분봉 시각과 지표 원값을 로그에 남겨 재현기와 대조
 			contDiag	= string.Format("3분봉={0:HH:mm} 종가3={1} ATR3={2:F4} SMA6={3:F4} SMA20={4:F4} SMA60={5:F4} SMA60[5]={6:F4} MACD={7:F4} MACD[2]={8:F4} RSI={9:F4} 항목={10}/{11}/{12}/{13}/{14}/{15}/{16}/{17}/{18}/{19}/{20}",
 				Times[2][0], Closes[2][0], r3Atr[0], sf, sm, ss, r3Slow[5], m, r3Macd[2], r3Rsi[0],
@@ -3629,7 +3632,7 @@ namespace NinjaTrader.NinjaScript.Strategies.TeamQuant
 
 		[NinjaScriptProperty]
 		[Range(0, double.MaxValue)]
-		[Display(Name = "추세 지속 진입 최대 속도 (TrendContMaxVel)", Description = "추세 지속 진입은 점수 속도(6봉 전 대비 점수 변화)가 추세 방향으로 이 값 미만일 때만 함. 이미 빠르게 달리는 중이면 건너뛰고 같은 추세 구간 안에서 속도가 줄 때까지 기다림. 0 = 조건 없음. 재현기 45일: 없음 +$74,875 → 0.2 +$80,818 (네 구간 모두 같거나 나음, 최악의 날 −$5,698 → −$4,506)", GroupName = "2. 진입", Order = 8)]
+		[Display(Name = "추세 지속 진입 최대 속도 (TrendContMaxVel)", Description = "추세 지속 진입은 점수 속도(지금 점수 − 5·6·7봉 전 점수 평균)가 추세 방향으로 이 값 미만일 때만 함. 이미 빠르게 달리는 중이면 건너뛰고 같은 추세 구간 안에서 속도가 줄 때까지 기다림. 0 = 조건 없음. 기본 0.15 (2026-10-23 오후 9, 재현기 모든 시간대: 대회 시간 60일 0.2 +$131,226 → 0.15 +$133,594, 다른 10개 시간대도 +$10,162)", GroupName = "2. 진입", Order = 8)]
 		public double TrendContMaxVel { get; set; }
 
 		[NinjaScriptProperty]

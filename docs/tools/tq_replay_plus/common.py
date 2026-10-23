@@ -25,7 +25,7 @@ combo3.Combo3.trader_qty = _risk_qty
 
 # 지금 C# 기본값. 키 이름은 Combo2~7 인자 (C# 설정 이름은 README 표)
 DEFAULT = dict(force=True, reg="v6", tstate="trendpull", sstate="off", warn=False, news=False, trail=True, rx=True,
-               chop_er=0.15, chop_mode="pull", cont_k=8, cont_mid=False, cont_once=True, cont_chop=True, cont_vmax=0.2,
+               chop_er=0.15, chop_mode="pull", cont_k=8, cont_mid=False, cont_once=True, cont_chop=True, cont_vmax=0.15,
                qty=50, cap=4000, add_q=30, add_when="tp2", add_end="23:10", max_q=80, add_room=1,
                sma_block="short", sma_wait=10, tp1_mid=False, ext_skip=True, early_q=("21:45", 25))
 MIN_ENTRIES = 4

@@ -10,6 +10,7 @@ class Score:
     ScoreTrendOn = 0.2; ScoreVelMin = 0.25; ScoreExitOff = -0.1; ScoreTrendOff = 0.0; ScoreScale = 0.9
     R7EndSuspectC = 0.1; E1DelayBars = 3; SuspectFast = 2
     VBARS = 6   # 속도 = 점수 C − VBARS봉 전 C (C# ScoreVelBars)
+    VMODE = "ref3"   # 속도 계산 방식. ref3 = 지금 C# (2026-10-23 오후 9부터: 지금 C − 5·6·7봉 전 평균), point = 그 전 (C − 6봉 전 C)
     CMODE = "equal"; GW = (1.0, 1.0, 1.0); GSCALE = 1.0   # 실험: 점수 C 만드는 방식 (지금은 11개 같은 무게)
 
     def __init__(self, b, b3, reg):
@@ -64,7 +65,16 @@ class Score:
             self.C = R6((pxMid + pxFast + roc5 + don20 + lrs10 + er10 + structS + slope60 + mac + macdSl + rs) / 11.0)
         self.S = R6(pxMid + structS + mac + rs); self.F = R6(pxFast + macdSl)
         self.tk = (sf, a, macdSl)
-        self.hist[i] = self.C; self.V = R6(self.C - self.hist[i - self.VBARS])
+        self.hist[i] = self.C; h = self.hist; n = self.VBARS; m = self.VMODE
+        if m == "point": self.V = R6(self.C - h[i - n])                                     # 지금 C − n봉 전 C (C#)
+        elif m == "ref3": self.V = R6(self.C - (h[i - n + 1] + h[i - n] + h[i - n - 1]) / 3)  # 지금 C − (n−1·n·n+1봉 전 평균)
+        elif m == "both": self.V = R6((self.C + h[i - 1]) / 2 - (h[i - n + 1] + h[i - n] + h[i - n - 1]) / 3)   # 최근 2봉 평균 − n봉 전 3봉 평균
+        elif m == "slope": self.V = R6(n * sum((k - n / 2) * h[i - n + k] for k in range(n + 1)) / sum((k - n / 2) ** 2 for k in range(n + 1)))   # 최근 n+1점 회귀 기울기 × n
+        elif m == "both3": self.V = R6((self.C + h[i - 1] + h[i - 2]) / 3 - (h[i - 5] + h[i - 6] + h[i - 7]) / 3)   # 실험: 최근 3봉 평균 − 5·6·7봉 전 평균 (거리 5)
+        elif m == "both3s": self.V = R6((self.C + h[i - 1] + h[i - 2]) / 3 - (h[i - 6] + h[i - 7] + h[i - 8]) / 3)  # 실험: 최근 3봉 평균 − 6·7·8봉 전 평균 (거리 6)
+        elif m == "near3": self.V = R6(self.C - (h[i - 1] + h[i - 2] + h[i - 3]) / 3)          # 실험: 지금 C − 직전 3봉 평균 (평균 2봉 전과 비교)
+        elif m == "near3x3": self.V = R6(3 * (self.C - (h[i - 1] + h[i - 2] + h[i - 3]) / 3))  # 실험: 위 × 3 (6봉 변화와 같은 크기로 맞춤)
+        else: raise ValueError(m)
         self.observe(i)
         self.reaccel()
 
